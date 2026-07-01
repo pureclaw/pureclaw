@@ -1,0 +1,1145 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.SlashCommands
+<span class="lineno">    2 </span>  ( -- * Command data types
+<span class="lineno">    3 </span>    SlashCommand (..)
+<span class="lineno">    4 </span>  , VaultSubCommand (..)
+<span class="lineno">    5 </span>  , ProviderSubCommand (..)
+<span class="lineno">    6 </span>  , ChannelSubCommand (..)
+<span class="lineno">    7 </span>    -- * Command registry — single source of truth
+<span class="lineno">    8 </span>  , CommandGroup (..)
+<span class="lineno">    9 </span>  , CommandSpec (..)
+<span class="lineno">   10 </span>  , allCommandSpecs
+<span class="lineno">   11 </span>    -- * Parsing (derived from allCommandSpecs)
+<span class="lineno">   12 </span>  , parseSlashCommand
+<span class="lineno">   13 </span>    -- * Execution
+<span class="lineno">   14 </span>  , executeSlashCommand
+<span class="lineno">   15 </span>  ) where
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import Control.Applicative ((&lt;|&gt;))
+<span class="lineno">   18 </span>import Control.Exception
+<span class="lineno">   19 </span>import Data.Foldable (asum)
+<span class="lineno">   20 </span>import Data.IORef
+<span class="lineno">   21 </span>import Data.List qualified as L
+<span class="lineno">   22 </span>import Data.Maybe (listToMaybe)
+<span class="lineno">   23 </span>import Data.Text (Text)
+<span class="lineno">   24 </span>import Data.Text qualified as T
+<span class="lineno">   25 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   26 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   27 </span>import Network.HTTP.Client.TLS qualified as HTTP
+<span class="lineno">   28 </span>import System.Directory qualified as Dir
+<span class="lineno">   29 </span>import System.FilePath ((&lt;/&gt;))
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   32 </span>import System.Exit
+<span class="lineno">   33 </span>import System.IO (Handle, hGetLine)
+<span class="lineno">   34 </span>import System.Process.Typed qualified as P
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>import PureClaw.Agent.Compaction
+<span class="lineno">   37 </span>import PureClaw.Agent.Context
+<span class="lineno">   38 </span>import PureClaw.Agent.Env
+<span class="lineno">   39 </span>import PureClaw.Auth.AnthropicOAuth
+<span class="lineno">   40 </span>import PureClaw.CLI.Config
+<span class="lineno">   41 </span>import PureClaw.Core.Types
+<span class="lineno">   42 </span>import PureClaw.Handles.Channel
+<span class="lineno">   43 </span>import PureClaw.Providers.Class
+<span class="lineno">   44 </span>import PureClaw.Providers.Ollama
+<span class="lineno">   45 </span>import PureClaw.Security.Vault
+<span class="lineno">   46 </span>import PureClaw.Security.Vault.Age
+<span class="lineno">   47 </span>import PureClaw.Security.Vault.Passphrase
+<span class="lineno">   48 </span>import PureClaw.Security.Vault.Plugin
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   51 </span>-- Command taxonomy
+<span class="lineno">   52 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>-- | Organisational group for display in '/help'.
+<span class="lineno">   55 </span>data CommandGroup
+<span class="lineno">   56 </span>  = GroupSession   -- ^ Session and context management
+<span class="lineno">   57 </span>  | GroupProvider  -- ^ Model provider configuration
+<span class="lineno">   58 </span>  | GroupChannel   -- ^ Chat channel configuration
+<span class="lineno">   59 </span>  | GroupVault     -- ^ Encrypted secrets vault
+<span class="lineno">   60 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Bounded</span></span></span></span>)
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Human-readable section heading for '/help' output.
+<span class="lineno">   63 </span>groupHeading :: CommandGroup -&gt; Text
+<span class="lineno">   64 </span><span class="decl"><span class="istickedoff">groupHeading GroupSession  = &quot;Session&quot;</span>
+<span class="lineno">   65 </span><span class="spaces"></span><span class="istickedoff">groupHeading GroupProvider = &quot;Provider&quot;</span>
+<span class="lineno">   66 </span><span class="spaces"></span><span class="istickedoff">groupHeading GroupChannel  = &quot;Channel&quot;</span>
+<span class="lineno">   67 </span><span class="spaces"></span><span class="istickedoff">groupHeading GroupVault    = &quot;Vault&quot;</span></span>
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>-- | Specification for a single slash command.
+<span class="lineno">   70 </span>-- 'allCommandSpecs' is the single source of truth: 'parseSlashCommand'
+<span class="lineno">   71 </span>-- is derived from '_cs_parse' and '/help' renders from '_cs_syntax' /
+<span class="lineno">   72 </span>-- '_cs_description', so the two cannot diverge.
+<span class="lineno">   73 </span>data CommandSpec = CommandSpec
+<span class="lineno">   74 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_syntax</span></span></span>      :: Text          -- ^ Display syntax, e.g. &quot;/vault add &lt;name&gt;&quot;
+<span class="lineno">   75 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_description</span></span></span> :: Text          -- ^ One-line description shown in '/help'
+<span class="lineno">   76 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_group</span></span></span>       :: CommandGroup  -- ^ Organisational group
+<span class="lineno">   77 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_parse</span></span></span>       :: Text -&gt; Maybe SlashCommand
+<span class="lineno">   78 </span>    -- ^ Try to parse a stripped, original-case input as this command.
+<span class="lineno">   79 </span>    -- Match is case-insensitive on keywords; argument case is preserved.
+<span class="lineno">   80 </span>  }
+<span class="lineno">   81 </span>
+<span class="lineno">   82 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   83 </span>-- Vault subcommands
+<span class="lineno">   84 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   85 </span>
+<span class="lineno">   86 </span>-- | Subcommands of the '/vault' family.
+<span class="lineno">   87 </span>data VaultSubCommand
+<span class="lineno">   88 </span>  = VaultSetup              -- ^ Interactive vault setup wizard
+<span class="lineno">   89 </span>  | VaultAdd Text           -- ^ Store a named secret
+<span class="lineno">   90 </span>  | VaultList               -- ^ List secret names
+<span class="lineno">   91 </span>  | VaultDelete Text        -- ^ Delete a named secret
+<span class="lineno">   92 </span>  | VaultLock               -- ^ Lock the vault
+<span class="lineno">   93 </span>  | VaultUnlock             -- ^ Unlock the vault
+<span class="lineno">   94 </span>  | VaultStatus'            -- ^ Show vault status
+<span class="lineno">   95 </span>  | VaultUnknown Text       -- ^ Unrecognised subcommand (not in allCommandSpecs)
+<span class="lineno">   96 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   97 </span>
+<span class="lineno">   98 </span>-- | Subcommands of the '/provider' family.
+<span class="lineno">   99 </span>data ProviderSubCommand
+<span class="lineno">  100 </span>  = ProviderList              -- ^ List available providers
+<span class="lineno">  101 </span>  | ProviderConfigure Text   -- ^ Configure a specific provider
+<span class="lineno">  102 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>-- | Subcommands of the '/channel' family.
+<span class="lineno">  105 </span>data ChannelSubCommand
+<span class="lineno">  106 </span>  = ChannelList               -- ^ Show current channel + available options
+<span class="lineno">  107 </span>  | ChannelSetup Text         -- ^ Interactive setup for a specific channel
+<span class="lineno">  108 </span>  | ChannelUnknown Text       -- ^ Unrecognised subcommand
+<span class="lineno">  109 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  112 </span>-- Top-level commands
+<span class="lineno">  113 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  114 </span>
+<span class="lineno">  115 </span>-- | All recognised slash commands.
+<span class="lineno">  116 </span>data SlashCommand
+<span class="lineno">  117 </span>  = CmdHelp                         -- ^ Show command reference
+<span class="lineno">  118 </span>  | CmdNew                          -- ^ Clear conversation, keep configuration
+<span class="lineno">  119 </span>  | CmdReset                        -- ^ Full reset including usage counters
+<span class="lineno">  120 </span>  | CmdStatus                       -- ^ Show session status
+<span class="lineno">  121 </span>  | CmdCompact                      -- ^ Summarise conversation to save context
+<span class="lineno">  122 </span>  | CmdModel (Maybe Text)            -- ^ Show or switch model
+<span class="lineno">  123 </span>  | CmdProvider ProviderSubCommand  -- ^ Provider configuration command family
+<span class="lineno">  124 </span>  | CmdVault VaultSubCommand        -- ^ Vault command family
+<span class="lineno">  125 </span>  | CmdChannel ChannelSubCommand    -- ^ Channel configuration
+<span class="lineno">  126 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">  127 </span>
+<span class="lineno">  128 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  129 </span>-- Command registry
+<span class="lineno">  130 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  131 </span>
+<span class="lineno">  132 </span>-- | All recognised slash commands, in the order they appear in '/help'.
+<span class="lineno">  133 </span>-- This is the authoritative definition: 'parseSlashCommand' is derived
+<span class="lineno">  134 </span>-- from '_cs_parse' across this list, and '/help' renders from it.
+<span class="lineno">  135 </span>-- To add a command, add a 'CommandSpec' here — parsing and help update
+<span class="lineno">  136 </span>-- automatically.
+<span class="lineno">  137 </span>allCommandSpecs :: [CommandSpec]
+<span class="lineno">  138 </span><span class="decl"><span class="istickedoff">allCommandSpecs = sessionCommandSpecs ++ providerCommandSpecs ++ channelCommandSpecs ++ vaultCommandSpecs</span></span>
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>sessionCommandSpecs :: [CommandSpec]
+<span class="lineno">  141 </span><span class="decl"><span class="istickedoff">sessionCommandSpecs =</span>
+<span class="lineno">  142 </span><span class="spaces">  </span><span class="istickedoff">[ CommandSpec &quot;/help&quot;    &quot;Show this command reference&quot;               GroupSession (exactP &quot;/help&quot;    CmdHelp)</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/status&quot;  &quot;Session status (messages, tokens used)&quot;   GroupSession (exactP &quot;/status&quot;  CmdStatus)</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/new&quot;     &quot;Clear conversation, keep configuration&quot;   GroupSession (exactP &quot;/new&quot;     CmdNew)</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/reset&quot;   &quot;Full reset including usage counters&quot;      GroupSession (exactP &quot;/reset&quot;   CmdReset)</span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/compact&quot; &quot;Summarise conversation to save context&quot;   GroupSession (exactP &quot;/compact&quot; CmdCompact)</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  148 </span>
+<span class="lineno">  149 </span>providerCommandSpecs :: [CommandSpec]
+<span class="lineno">  150 </span><span class="decl"><span class="istickedoff">providerCommandSpecs =</span>
+<span class="lineno">  151 </span><span class="spaces">  </span><span class="istickedoff">[ CommandSpec &quot;/provider [name]&quot; &quot;List or configure a model provider&quot; GroupProvider (providerArgP ProviderList ProviderConfigure)</span>
+<span class="lineno">  152 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/model [name]&quot;    &quot;Show or switch the current model&quot;   GroupProvider modelArgP</span>
+<span class="lineno">  153 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>channelCommandSpecs :: [CommandSpec]
+<span class="lineno">  156 </span><span class="decl"><span class="istickedoff">channelCommandSpecs =</span>
+<span class="lineno">  157 </span><span class="spaces">  </span><span class="istickedoff">[ CommandSpec &quot;/channel&quot;              &quot;Show current channel and available options&quot; GroupChannel (channelArgP <span class="nottickedoff">ChannelList</span> <span class="nottickedoff">ChannelSetup</span>)</span>
+<span class="lineno">  158 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/channel signal&quot;       &quot;Set up Signal messenger integration&quot;       GroupChannel (channelExactP &quot;signal&quot; <span class="nottickedoff">(ChannelSetup &quot;signal&quot;)</span>)</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/channel telegram&quot;     &quot;Set up Telegram bot integration&quot;           GroupChannel (channelExactP &quot;telegram&quot; <span class="nottickedoff">(ChannelSetup &quot;telegram&quot;)</span>)</span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>vaultCommandSpecs :: [CommandSpec]
+<span class="lineno">  163 </span><span class="decl"><span class="istickedoff">vaultCommandSpecs =</span>
+<span class="lineno">  164 </span><span class="spaces">  </span><span class="istickedoff">[ CommandSpec &quot;/vault setup&quot;           &quot;Set up or rekey the encrypted secrets vault&quot; GroupVault (vaultExactP &quot;setup&quot;  VaultSetup)</span>
+<span class="lineno">  165 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/vault add &lt;name&gt;&quot;      &quot;Store a named secret (prompts for value)&quot;  GroupVault (vaultArgP   &quot;add&quot;    VaultAdd)</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/vault list&quot;            &quot;List all stored secret names&quot;              GroupVault (vaultExactP &quot;list&quot;   VaultList)</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/vault delete &lt;name&gt;&quot;   &quot;Delete a named secret&quot;                     GroupVault (vaultArgP   &quot;delete&quot; VaultDelete)</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/vault lock&quot;            &quot;Lock the vault&quot;                            GroupVault (vaultExactP &quot;lock&quot;   VaultLock)</span>
+<span class="lineno">  169 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/vault unlock&quot;          &quot;Unlock the vault&quot;                          GroupVault (vaultExactP &quot;unlock&quot; VaultUnlock)</span>
+<span class="lineno">  170 </span><span class="spaces">  </span><span class="istickedoff">, CommandSpec &quot;/vault status&quot;          &quot;Show vault state and key type&quot;             GroupVault (vaultExactP &quot;status&quot; VaultStatus')</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  172 </span>
+<span class="lineno">  173 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  174 </span>-- Parsing — derived from allCommandSpecs
+<span class="lineno">  175 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>-- | Parse a user message as a slash command.
+<span class="lineno">  178 </span>-- Implemented as 'asum' over '_cs_parse' from 'allCommandSpecs', followed
+<span class="lineno">  179 </span>-- by a catch-all for unrecognised @\/vault@ subcommands.
+<span class="lineno">  180 </span>-- Returns 'Nothing' only for input that does not begin with @\/@.
+<span class="lineno">  181 </span>parseSlashCommand :: Text -&gt; Maybe SlashCommand
+<span class="lineno">  182 </span><span class="decl"><span class="istickedoff">parseSlashCommand input =</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">let stripped = T.strip input</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">in if &quot;/&quot; `T.isPrefixOf` stripped</span>
+<span class="lineno">  185 </span><span class="spaces">     </span><span class="istickedoff">then asum (map (`_cs_parse` stripped) allCommandSpecs)</span>
+<span class="lineno">  186 </span><span class="spaces">            </span><span class="istickedoff">&lt;|&gt; channelUnknownFallback stripped</span>
+<span class="lineno">  187 </span><span class="spaces">            </span><span class="istickedoff">&lt;|&gt; vaultUnknownFallback stripped</span>
+<span class="lineno">  188 </span><span class="spaces">     </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  189 </span>
+<span class="lineno">  190 </span>-- | Exact case-insensitive match.
+<span class="lineno">  191 </span>exactP :: Text -&gt; SlashCommand -&gt; Text -&gt; Maybe SlashCommand
+<span class="lineno">  192 </span><span class="decl"><span class="istickedoff">exactP keyword cmd t = if T.toLower t == keyword then Just cmd else Nothing</span></span>
+<span class="lineno">  193 </span>
+<span class="lineno">  194 </span>-- | Case-insensitive match for &quot;/vault &lt;sub&gt;&quot; with no argument.
+<span class="lineno">  195 </span>vaultExactP :: Text -&gt; VaultSubCommand -&gt; Text -&gt; Maybe SlashCommand
+<span class="lineno">  196 </span><span class="decl"><span class="istickedoff">vaultExactP sub cmd t =</span>
+<span class="lineno">  197 </span><span class="spaces">  </span><span class="istickedoff">if T.toLower t == &quot;/vault &quot; &lt;&gt; sub then Just (CmdVault cmd) else Nothing</span></span>
+<span class="lineno">  198 </span>
+<span class="lineno">  199 </span>-- | Case-insensitive prefix match for &quot;/vault &lt;sub&gt; [arg]&quot;.
+<span class="lineno">  200 </span>-- Argument is extracted from the original-case input, preserving its case.
+<span class="lineno">  201 </span>vaultArgP :: Text -&gt; (Text -&gt; VaultSubCommand) -&gt; Text -&gt; Maybe SlashCommand
+<span class="lineno">  202 </span><span class="decl"><span class="istickedoff">vaultArgP sub mkCmd t =</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">let pfx   = &quot;/vault &quot; &lt;&gt; sub</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">lower = T.toLower t</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">in if lower == pfx || (pfx &lt;&gt; &quot; &quot;) `T.isPrefixOf` lower</span>
+<span class="lineno">  206 </span><span class="spaces">     </span><span class="istickedoff">then Just (CmdVault (mkCmd (T.strip (T.drop (T.length pfx) t))))</span>
+<span class="lineno">  207 </span><span class="spaces">     </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  208 </span>
+<span class="lineno">  209 </span>-- | Case-insensitive match for &quot;/provider [name]&quot;.
+<span class="lineno">  210 </span>-- With no argument, returns the list command. With an argument, returns
+<span class="lineno">  211 </span>-- the configure command with the argument preserved in original case.
+<span class="lineno">  212 </span>providerArgP :: ProviderSubCommand -&gt; (Text -&gt; ProviderSubCommand) -&gt; Text -&gt; Maybe SlashCommand
+<span class="lineno">  213 </span><span class="decl"><span class="istickedoff">providerArgP listCmd mkCfgCmd t =</span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">let pfx   = &quot;/provider&quot;</span>
+<span class="lineno">  215 </span><span class="spaces">      </span><span class="istickedoff">lower = T.toLower t</span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="istickedoff">in if lower == pfx</span>
+<span class="lineno">  217 </span><span class="spaces">     </span><span class="istickedoff">then Just (CmdProvider listCmd)</span>
+<span class="lineno">  218 </span><span class="spaces">     </span><span class="istickedoff">else if (pfx &lt;&gt; &quot; &quot;) `T.isPrefixOf` lower</span>
+<span class="lineno">  219 </span><span class="spaces">          </span><span class="istickedoff">then let arg = T.strip (T.drop (T.length pfx) t)</span>
+<span class="lineno">  220 </span><span class="spaces">               </span><span class="istickedoff">in if <span class="tickonlyfalse">T.null arg</span></span>
+<span class="lineno">  221 </span><span class="spaces">                  </span><span class="istickedoff">then <span class="nottickedoff">Just (CmdProvider listCmd)</span></span>
+<span class="lineno">  222 </span><span class="spaces">                  </span><span class="istickedoff">else Just (CmdProvider (mkCfgCmd arg))</span>
+<span class="lineno">  223 </span><span class="spaces">          </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  224 </span>
+<span class="lineno">  225 </span>-- | Case-insensitive match for &quot;/model&quot; with optional argument.
+<span class="lineno">  226 </span>modelArgP :: Text -&gt; Maybe SlashCommand
+<span class="lineno">  227 </span><span class="decl"><span class="istickedoff">modelArgP t =</span>
+<span class="lineno">  228 </span><span class="spaces">  </span><span class="istickedoff">let pfx   = &quot;/model&quot;</span>
+<span class="lineno">  229 </span><span class="spaces">      </span><span class="istickedoff">lower = T.toLower t</span>
+<span class="lineno">  230 </span><span class="spaces">  </span><span class="istickedoff">in if lower == pfx</span>
+<span class="lineno">  231 </span><span class="spaces">     </span><span class="istickedoff">then Just (CmdModel Nothing)</span>
+<span class="lineno">  232 </span><span class="spaces">     </span><span class="istickedoff">else if (pfx &lt;&gt; &quot; &quot;) `T.isPrefixOf` lower</span>
+<span class="lineno">  233 </span><span class="spaces">          </span><span class="istickedoff">then let arg = T.strip (T.drop (T.length pfx) t)</span>
+<span class="lineno">  234 </span><span class="spaces">               </span><span class="istickedoff">in Just (CmdModel (if <span class="tickonlyfalse">T.null arg</span> then <span class="nottickedoff">Nothing</span> else Just arg))</span>
+<span class="lineno">  235 </span><span class="spaces">          </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  236 </span>
+<span class="lineno">  237 </span>-- | Case-insensitive match for &quot;/channel&quot; with optional argument.
+<span class="lineno">  238 </span>channelArgP :: ChannelSubCommand -&gt; (Text -&gt; ChannelSubCommand) -&gt; Text -&gt; Maybe SlashCommand
+<span class="lineno">  239 </span><span class="decl"><span class="istickedoff">channelArgP listCmd mkSetupCmd t =</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="istickedoff">let pfx   = &quot;/channel&quot;</span>
+<span class="lineno">  241 </span><span class="spaces">      </span><span class="istickedoff">lower = T.toLower t</span>
+<span class="lineno">  242 </span><span class="spaces">  </span><span class="istickedoff">in if lower == pfx</span>
+<span class="lineno">  243 </span><span class="spaces">     </span><span class="istickedoff">then Just <span class="nottickedoff">(CmdChannel listCmd)</span></span>
+<span class="lineno">  244 </span><span class="spaces">     </span><span class="istickedoff">else if (pfx &lt;&gt; &quot; &quot;) `T.isPrefixOf` lower</span>
+<span class="lineno">  245 </span><span class="spaces">          </span><span class="istickedoff">then let arg = T.strip (T.drop (T.length pfx) t)</span>
+<span class="lineno">  246 </span><span class="spaces">               </span><span class="istickedoff">in if <span class="tickonlyfalse">T.null arg</span></span>
+<span class="lineno">  247 </span><span class="spaces">                  </span><span class="istickedoff">then <span class="nottickedoff">Just (CmdChannel listCmd)</span></span>
+<span class="lineno">  248 </span><span class="spaces">                  </span><span class="istickedoff">else Just <span class="nottickedoff">(CmdChannel (mkSetupCmd (T.toLower arg)))</span></span>
+<span class="lineno">  249 </span><span class="spaces">          </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  250 </span>
+<span class="lineno">  251 </span>-- | Case-insensitive exact match for &quot;/channel &lt;sub&gt;&quot;.
+<span class="lineno">  252 </span>channelExactP :: Text -&gt; ChannelSubCommand -&gt; Text -&gt; Maybe SlashCommand
+<span class="lineno">  253 </span><span class="decl"><span class="istickedoff">channelExactP sub cmd t =</span>
+<span class="lineno">  254 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">T.toLower t == &quot;/channel &quot; &lt;&gt; sub</span> then <span class="nottickedoff">Just (CmdChannel cmd)</span> else Nothing</span></span>
+<span class="lineno">  255 </span>
+<span class="lineno">  256 </span>-- | Catch-all for any &quot;/channel &lt;X&gt;&quot; not matched by 'allCommandSpecs'.
+<span class="lineno">  257 </span>channelUnknownFallback :: Text -&gt; Maybe SlashCommand
+<span class="lineno">  258 </span><span class="decl"><span class="istickedoff">channelUnknownFallback t =</span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">let lower = T.toLower t</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">in if <span class="tickonlyfalse">&quot;/channel&quot; `T.isPrefixOf` lower</span></span>
+<span class="lineno">  261 </span><span class="spaces">     </span><span class="istickedoff">then <span class="nottickedoff">let rest = T.strip (T.drop (T.length &quot;/channel&quot;) lower)</span></span>
+<span class="lineno">  262 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">sub  = fst (T.break (== ' ') rest)</span></span>
+<span class="lineno">  263 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">in Just (CmdChannel (ChannelUnknown sub))</span></span>
+<span class="lineno">  264 </span><span class="spaces">     </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  265 </span>
+<span class="lineno">  266 </span>-- | Catch-all for any &quot;/vault &lt;X&gt;&quot; not matched by 'allCommandSpecs'.
+<span class="lineno">  267 </span>-- Not included in the spec list so it does not appear in '/help'.
+<span class="lineno">  268 </span>vaultUnknownFallback :: Text -&gt; Maybe SlashCommand
+<span class="lineno">  269 </span><span class="decl"><span class="istickedoff">vaultUnknownFallback t =</span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="istickedoff">let lower = T.toLower t</span>
+<span class="lineno">  271 </span><span class="spaces">  </span><span class="istickedoff">in if &quot;/vault&quot; `T.isPrefixOf` lower</span>
+<span class="lineno">  272 </span><span class="spaces">     </span><span class="istickedoff">then let rest = T.strip (T.drop (T.length &quot;/vault&quot;) lower)</span>
+<span class="lineno">  273 </span><span class="spaces">              </span><span class="istickedoff">sub  = fst (T.break (== ' ') rest)</span>
+<span class="lineno">  274 </span><span class="spaces">          </span><span class="istickedoff">in Just (CmdVault (VaultUnknown sub))</span>
+<span class="lineno">  275 </span><span class="spaces">     </span><span class="istickedoff">else Nothing</span></span>
+<span class="lineno">  276 </span>
+<span class="lineno">  277 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  278 </span>-- Execution
+<span class="lineno">  279 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  280 </span>
+<span class="lineno">  281 </span>-- | Execute a slash command. Returns the (possibly updated) context.
+<span class="lineno">  282 </span>executeSlashCommand :: AgentEnv -&gt; SlashCommand -&gt; Context -&gt; IO Context
+<span class="lineno">  283 </span>
+<span class="lineno">  284 </span><span class="decl"><span class="istickedoff">executeSlashCommand env CmdHelp ctx = do</span>
+<span class="lineno">  285 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage (renderHelpText allCommandSpecs))</span>
+<span class="lineno">  286 </span><span class="spaces">  </span><span class="istickedoff">pure ctx</span>
+<span class="lineno">  287 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  288 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env CmdNew ctx = do</span>
+<span class="lineno">  289 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage &quot;Session cleared. Starting fresh.&quot;)</span>
+<span class="lineno">  290 </span><span class="spaces">  </span><span class="istickedoff">pure (clearMessages ctx)</span>
+<span class="lineno">  291 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  292 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env CmdReset _ctx = do</span>
+<span class="lineno">  293 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) <span class="nottickedoff">(OutgoingMessage &quot;Full reset. Context and usage cleared.&quot;)</span></span>
+<span class="lineno">  294 </span><span class="spaces">  </span><span class="istickedoff">pure (emptyContext (contextSystemPrompt _ctx))</span>
+<span class="lineno">  295 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  296 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env CmdStatus ctx = do</span>
+<span class="lineno">  297 </span><span class="spaces">  </span><span class="istickedoff">let status = T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  298 </span><span class="spaces">        </span><span class="istickedoff">[ &quot;Session status:&quot;</span>
+<span class="lineno">  299 </span><span class="spaces">        </span><span class="istickedoff">, &quot;  Messages: &quot;          &lt;&gt; T.pack (show (contextMessageCount ctx))</span>
+<span class="lineno">  300 </span><span class="spaces">        </span><span class="istickedoff">, &quot;  Est. context tokens: &quot; &lt;&gt; T.pack (show (contextTokenEstimate ctx))</span>
+<span class="lineno">  301 </span><span class="spaces">        </span><span class="istickedoff">, &quot;  Total input tokens: &quot;  &lt;&gt; T.pack (show (contextTotalInputTokens ctx))</span>
+<span class="lineno">  302 </span><span class="spaces">        </span><span class="istickedoff">, &quot;  Total output tokens: &quot; &lt;&gt; T.pack (show (contextTotalOutputTokens ctx))</span>
+<span class="lineno">  303 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  304 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage status)</span>
+<span class="lineno">  305 </span><span class="spaces">  </span><span class="istickedoff">pure ctx</span>
+<span class="lineno">  306 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  307 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env (CmdModel Nothing) ctx = do</span>
+<span class="lineno">  308 </span><span class="spaces">  </span><span class="istickedoff">model &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  309 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage (&quot;Current model: &quot; &lt;&gt; unModelId model))</span>
+<span class="lineno">  310 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  311 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  312 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env (CmdModel (Just name)) ctx = do</span>
+<span class="lineno">  313 </span><span class="spaces">  </span><span class="istickedoff">let send = _ch_send (_env_channel env) . OutgoingMessage</span>
+<span class="lineno">  314 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_env_model env) (ModelId name)</span>
+<span class="lineno">  315 </span><span class="spaces">  </span><span class="istickedoff">-- Persist to config.toml</span>
+<span class="lineno">  316 </span><span class="spaces">  </span><span class="istickedoff">pureclawDir &lt;- getPureclawDir</span>
+<span class="lineno">  317 </span><span class="spaces">  </span><span class="istickedoff">let configPath = pureclawDir &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno">  318 </span><span class="spaces">  </span><span class="istickedoff">existing &lt;- loadFileConfig configPath</span>
+<span class="lineno">  319 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True pureclawDir</span>
+<span class="lineno">  320 </span><span class="spaces">  </span><span class="istickedoff">writeFileConfig configPath (existing { _fc_model = Just name })</span>
+<span class="lineno">  321 </span><span class="spaces">  </span><span class="istickedoff">send $ &quot;Model switched to: &quot; &lt;&gt; name</span>
+<span class="lineno">  322 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  323 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  324 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env CmdCompact ctx = do</span>
+<span class="lineno">  325 </span><span class="spaces">  </span><span class="istickedoff">mProvider &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">  326 </span><span class="spaces">  </span><span class="istickedoff">case mProvider of</span>
+<span class="lineno">  327 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  328 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_ch_send (_env_channel env) (OutgoingMessage &quot;Cannot compact: no provider configured.&quot;)</span></span>
+<span class="lineno">  329 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  330 </span><span class="spaces">    </span><span class="istickedoff">Just provider -&gt; do</span>
+<span class="lineno">  331 </span><span class="spaces">      </span><span class="istickedoff">model &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  332 </span><span class="spaces">      </span><span class="istickedoff">(ctx', result) &lt;- compactContext</span>
+<span class="lineno">  333 </span><span class="spaces">        </span><span class="istickedoff">provider</span>
+<span class="lineno">  334 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">model</span></span>
+<span class="lineno">  335 </span><span class="spaces">        </span><span class="istickedoff">0</span>
+<span class="lineno">  336 </span><span class="spaces">        </span><span class="istickedoff">defaultKeepRecent</span>
+<span class="lineno">  337 </span><span class="spaces">        </span><span class="istickedoff">ctx</span>
+<span class="lineno">  338 </span><span class="spaces">      </span><span class="istickedoff">let msg = case result of</span>
+<span class="lineno">  339 </span><span class="spaces">            </span><span class="istickedoff">NotNeeded         -&gt; &quot;Nothing to compact (too few messages).&quot;</span>
+<span class="lineno">  340 </span><span class="spaces">            </span><span class="istickedoff">Compacted o n     -&gt; &quot;Compacted: &quot; &lt;&gt; T.pack (show o)</span>
+<span class="lineno">  341 </span><span class="spaces">                              </span><span class="istickedoff">&lt;&gt; &quot; messages \x2192 &quot; &lt;&gt; T.pack (show n)</span>
+<span class="lineno">  342 </span><span class="spaces">            </span><span class="istickedoff">CompactionError e -&gt; <span class="nottickedoff">&quot;Compaction failed: &quot; &lt;&gt; e</span></span>
+<span class="lineno">  343 </span><span class="spaces">      </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage msg)</span>
+<span class="lineno">  344 </span><span class="spaces">      </span><span class="istickedoff">pure ctx'</span>
+<span class="lineno">  345 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  346 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env (CmdProvider sub) ctx = do</span>
+<span class="lineno">  347 </span><span class="spaces">  </span><span class="istickedoff">vaultOpt &lt;- readIORef (_env_vault env)</span>
+<span class="lineno">  348 </span><span class="spaces">  </span><span class="istickedoff">case vaultOpt of</span>
+<span class="lineno">  349 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  350 </span><span class="spaces">      </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage</span>
+<span class="lineno">  351 </span><span class="spaces">        </span><span class="istickedoff">&quot;Vault not configured. Run /vault setup first to store provider credentials.&quot;)</span>
+<span class="lineno">  352 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  353 </span><span class="spaces">    </span><span class="istickedoff">Just vault -&gt;</span>
+<span class="lineno">  354 </span><span class="spaces">      </span><span class="istickedoff">executeProviderCommand env <span class="nottickedoff">vault</span> sub <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  355 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  356 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env (CmdChannel sub) ctx = <span class="nottickedoff">do</span></span>
+<span class="lineno">  357 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">executeChannelCommand env sub ctx</span></span>
+<span class="lineno">  358 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  359 </span><span class="spaces"></span><span class="istickedoff">executeSlashCommand env (CmdVault sub) ctx = do</span>
+<span class="lineno">  360 </span><span class="spaces">  </span><span class="istickedoff">vaultOpt &lt;- readIORef (_env_vault env)</span>
+<span class="lineno">  361 </span><span class="spaces">  </span><span class="istickedoff">case sub of</span>
+<span class="lineno">  362 </span><span class="spaces">    </span><span class="istickedoff">VaultSetup -&gt; do</span>
+<span class="lineno">  363 </span><span class="spaces">      </span><span class="istickedoff">executeVaultSetup env <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  364 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; case vaultOpt of</span>
+<span class="lineno">  365 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  366 </span><span class="spaces">        </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage</span>
+<span class="lineno">  367 </span><span class="spaces">          </span><span class="istickedoff">&quot;No vault configured. Run /vault setup to create one.&quot;)</span>
+<span class="lineno">  368 </span><span class="spaces">        </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  369 </span><span class="spaces">      </span><span class="istickedoff">Just vault -&gt;</span>
+<span class="lineno">  370 </span><span class="spaces">        </span><span class="istickedoff">executeVaultCommand env vault sub <span class="nottickedoff">ctx</span></span></span>
+<span class="lineno">  371 </span>
+<span class="lineno">  372 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  373 </span>-- Provider subcommand execution
+<span class="lineno">  374 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  375 </span>
+<span class="lineno">  376 </span>-- | Supported provider names and their descriptions.
+<span class="lineno">  377 </span>supportedProviders :: [(Text, Text)]
+<span class="lineno">  378 </span><span class="decl"><span class="istickedoff">supportedProviders =</span>
+<span class="lineno">  379 </span><span class="spaces">  </span><span class="istickedoff">[ (&quot;anthropic&quot;,  &quot;Anthropic (Claude)&quot;)</span>
+<span class="lineno">  380 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;openai&quot;,     &quot;OpenAI (GPT)&quot;)</span>
+<span class="lineno">  381 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;openrouter&quot;, &quot;OpenRouter (multi-model gateway)&quot;)</span>
+<span class="lineno">  382 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;ollama&quot;,     &quot;Ollama (local models)&quot;)</span>
+<span class="lineno">  383 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  384 </span>
+<span class="lineno">  385 </span>executeProviderCommand :: AgentEnv -&gt; VaultHandle -&gt; ProviderSubCommand -&gt; Context -&gt; IO Context
+<span class="lineno">  386 </span><span class="decl"><span class="istickedoff">executeProviderCommand env _vault ProviderList ctx = do</span>
+<span class="lineno">  387 </span><span class="spaces">  </span><span class="istickedoff">let send = _ch_send (_env_channel env) . OutgoingMessage</span>
+<span class="lineno">  388 </span><span class="spaces">      </span><span class="istickedoff">listing = T.intercalate &quot;\n&quot; $</span>
+<span class="lineno">  389 </span><span class="spaces">        </span><span class="istickedoff">&quot;Available providers:&quot;</span>
+<span class="lineno">  390 </span><span class="spaces">        </span><span class="istickedoff">: [ &quot;  &quot; &lt;&gt; name &lt;&gt; &quot; \x2014 &quot; &lt;&gt; desc | (name, desc) &lt;- supportedProviders ]</span>
+<span class="lineno">  391 </span><span class="spaces">        </span><span class="istickedoff">++ [&quot;&quot;, &quot;Usage: /provider &lt;name&gt;&quot;]</span>
+<span class="lineno">  392 </span><span class="spaces">  </span><span class="istickedoff">send listing</span>
+<span class="lineno">  393 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  394 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  395 </span><span class="spaces"></span><span class="istickedoff">executeProviderCommand env vault (ProviderConfigure providerName) ctx = do</span>
+<span class="lineno">  396 </span><span class="spaces">  </span><span class="istickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  397 </span><span class="spaces">      </span><span class="istickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  398 </span><span class="spaces">      </span><span class="istickedoff">lowerName = T.toLower (T.strip providerName)</span>
+<span class="lineno">  399 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  400 </span><span class="spaces">  </span><span class="istickedoff">case lowerName of</span>
+<span class="lineno">  401 </span><span class="spaces">    </span><span class="istickedoff">&quot;anthropic&quot; -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  402 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let options = anthropicAuthOptions env vault</span></span>
+<span class="lineno">  403 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">optionLines = map (\o -&gt; &quot;  [&quot; &lt;&gt; T.pack (show (_ao_number o)) &lt;&gt; &quot;] &quot; &lt;&gt; _ao_name o) options</span></span>
+<span class="lineno">  404 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">menu = T.intercalate &quot;\n&quot; (&quot;Configure Anthropic provider. Choose auth method:&quot; : optionLines)</span></span>
+<span class="lineno">  405 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">send menu</span></span>
+<span class="lineno">  406 </span><span class="spaces"></span><span class="istickedoff"><span class="nottickedoff"></span></span>
+<span class="lineno">  407 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">choice &lt;- _ch_prompt ch &quot;Choice: &quot;</span></span>
+<span class="lineno">  408 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let selectedOption = listToMaybe [o | o &lt;- options, T.pack (show (_ao_number o)) == T.strip choice]</span></span>
+<span class="lineno">  409 </span><span class="spaces"></span><span class="istickedoff"><span class="nottickedoff"></span></span>
+<span class="lineno">  410 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">case selectedOption of</span></span>
+<span class="lineno">  411 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">Just opt -&gt; _ao_handler opt env vault ctx</span></span>
+<span class="lineno">  412 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">Nothing  -&gt; do</span></span>
+<span class="lineno">  413 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">send $ &quot;Invalid choice. Please enter 1 to &quot; &lt;&gt; T.pack (show (length options)) &lt;&gt; &quot;.&quot;</span></span>
+<span class="lineno">  414 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  415 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  416 </span><span class="spaces">    </span><span class="istickedoff">&quot;ollama&quot; -&gt; handleOllamaConfigure env <span class="nottickedoff">vault</span> <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  417 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  418 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  419 </span><span class="spaces">      </span><span class="istickedoff">send $ &quot;Unknown provider: &quot; &lt;&gt; providerName</span>
+<span class="lineno">  420 </span><span class="spaces">      </span><span class="istickedoff">send $ &quot;Supported providers: &quot; &lt;&gt; T.intercalate &quot;, &quot; (map fst supportedProviders)</span>
+<span class="lineno">  421 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span></span>
+<span class="lineno">  422 </span>
+<span class="lineno">  423 </span>-- | Auth method options for a provider.
+<span class="lineno">  424 </span>data AuthOption = AuthOption
+<span class="lineno">  425 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ao_number</span></span></span>  :: Int
+<span class="lineno">  426 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ao_name</span></span></span>    :: Text
+<span class="lineno">  427 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ao_handler</span></span></span> :: AgentEnv -&gt; VaultHandle -&gt; Context -&gt; IO Context
+<span class="lineno">  428 </span>  }
+<span class="lineno">  429 </span>
+<span class="lineno">  430 </span>-- | Available Anthropic auth methods.
+<span class="lineno">  431 </span>anthropicAuthOptions :: AgentEnv -&gt; VaultHandle -&gt; [AuthOption]
+<span class="lineno">  432 </span><span class="decl"><span class="nottickedoff">anthropicAuthOptions env vault =</span>
+<span class="lineno">  433 </span><span class="spaces">  </span><span class="nottickedoff">[ AuthOption 1 &quot;API Key&quot;</span>
+<span class="lineno">  434 </span><span class="spaces">      </span><span class="nottickedoff">(\_ _ ctx -&gt; handleAnthropicApiKey env vault ctx)</span>
+<span class="lineno">  435 </span><span class="spaces">  </span><span class="nottickedoff">, AuthOption 2 &quot;OAuth 2.0&quot;</span>
+<span class="lineno">  436 </span><span class="spaces">      </span><span class="nottickedoff">(\_ _ ctx -&gt; handleAnthropicOAuth env vault ctx)</span>
+<span class="lineno">  437 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  438 </span>
+<span class="lineno">  439 </span>-- | Handle Anthropic API Key authentication.
+<span class="lineno">  440 </span>handleAnthropicApiKey :: AgentEnv -&gt; VaultHandle -&gt; Context -&gt; IO Context
+<span class="lineno">  441 </span><span class="decl"><span class="nottickedoff">handleAnthropicApiKey env vault ctx = do</span>
+<span class="lineno">  442 </span><span class="spaces">  </span><span class="nottickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  443 </span><span class="spaces">      </span><span class="nottickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  444 </span><span class="spaces">  </span><span class="nottickedoff">apiKeyText &lt;- _ch_promptSecret ch &quot;Anthropic API key: &quot;</span>
+<span class="lineno">  445 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- _vh_put vault &quot;ANTHROPIC_API_KEY&quot; (TE.encodeUtf8 apiKeyText)</span>
+<span class="lineno">  446 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  447 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno">  448 </span><span class="spaces">      </span><span class="nottickedoff">send (&quot;Error storing API key: &quot; &lt;&gt; T.pack (show err))</span>
+<span class="lineno">  449 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  450 </span><span class="spaces">    </span><span class="nottickedoff">Right () -&gt; do</span>
+<span class="lineno">  451 </span><span class="spaces">      </span><span class="nottickedoff">send &quot;Anthropic API key configured successfully.&quot;</span>
+<span class="lineno">  452 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  453 </span>
+<span class="lineno">  454 </span>-- | Handle Anthropic OAuth authentication.
+<span class="lineno">  455 </span>handleAnthropicOAuth :: AgentEnv -&gt; VaultHandle -&gt; Context -&gt; IO Context
+<span class="lineno">  456 </span><span class="decl"><span class="nottickedoff">handleAnthropicOAuth env vault ctx = do</span>
+<span class="lineno">  457 </span><span class="spaces">  </span><span class="nottickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  458 </span><span class="spaces">      </span><span class="nottickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  459 </span><span class="spaces">  </span><span class="nottickedoff">send &quot;Starting OAuth flow... (opens browser)&quot;</span>
+<span class="lineno">  460 </span><span class="spaces">  </span><span class="nottickedoff">manager &lt;- HTTP.newTlsManager</span>
+<span class="lineno">  461 </span><span class="spaces">  </span><span class="nottickedoff">oauthTokens &lt;- runOAuthFlow defaultOAuthConfig manager</span>
+<span class="lineno">  462 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- _vh_put vault &quot;ANTHROPIC_OAUTH_TOKENS&quot; (serializeTokens oauthTokens)</span>
+<span class="lineno">  463 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  464 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno">  465 </span><span class="spaces">      </span><span class="nottickedoff">send (&quot;Error storing OAuth tokens: &quot; &lt;&gt; T.pack (show err))</span>
+<span class="lineno">  466 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  467 </span><span class="spaces">    </span><span class="nottickedoff">Right () -&gt; do</span>
+<span class="lineno">  468 </span><span class="spaces">      </span><span class="nottickedoff">send &quot;Anthropic OAuth configured successfully.&quot;</span>
+<span class="lineno">  469 </span><span class="spaces">      </span><span class="nottickedoff">send &quot;Tokens cached in vault and will be auto-refreshed.&quot;</span>
+<span class="lineno">  470 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  471 </span>
+<span class="lineno">  472 </span>-- | Handle Ollama provider configuration.
+<span class="lineno">  473 </span>-- Prompts for base URL (default: http://localhost:11434) and model name.
+<span class="lineno">  474 </span>-- Stores provider, model, and base_url in config.toml (not the vault,
+<span class="lineno">  475 </span>-- since none of these are sensitive credentials).
+<span class="lineno">  476 </span>handleOllamaConfigure :: AgentEnv -&gt; VaultHandle -&gt; Context -&gt; IO Context
+<span class="lineno">  477 </span><span class="decl"><span class="istickedoff">handleOllamaConfigure env _vault ctx = do</span>
+<span class="lineno">  478 </span><span class="spaces">  </span><span class="istickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  479 </span><span class="spaces">      </span><span class="istickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  480 </span><span class="spaces">  </span><span class="istickedoff">urlInput &lt;- _ch_prompt ch <span class="nottickedoff">&quot;Ollama base URL (default: http://localhost:11434): &quot;</span></span>
+<span class="lineno">  481 </span><span class="spaces">  </span><span class="istickedoff">let baseUrl = let stripped = T.strip urlInput</span>
+<span class="lineno">  482 </span><span class="spaces">                </span><span class="istickedoff">in if T.null stripped then &quot;http://localhost:11434&quot; else stripped</span>
+<span class="lineno">  483 </span><span class="spaces">  </span><span class="istickedoff">modelName &lt;- _ch_prompt ch <span class="nottickedoff">&quot;Model name (e.g. llama3, mistral): &quot;</span></span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="istickedoff">let model = T.strip modelName</span>
+<span class="lineno">  485 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">T.null model</span></span>
+<span class="lineno">  486 </span><span class="spaces">    </span><span class="istickedoff">then <span class="nottickedoff">do</span></span>
+<span class="lineno">  487 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">send &quot;Model name is required.&quot;</span></span>
+<span class="lineno">  488 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  489 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  490 </span><span class="spaces">      </span><span class="istickedoff">pureclawDir &lt;- getPureclawDir</span>
+<span class="lineno">  491 </span><span class="spaces">      </span><span class="istickedoff">let configPath = pureclawDir &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno">  492 </span><span class="spaces">      </span><span class="istickedoff">existing &lt;- loadFileConfig configPath</span>
+<span class="lineno">  493 </span><span class="spaces">      </span><span class="istickedoff">let updated = existing</span>
+<span class="lineno">  494 </span><span class="spaces">            </span><span class="istickedoff">{ _fc_provider = Just &quot;ollama&quot;</span>
+<span class="lineno">  495 </span><span class="spaces">            </span><span class="istickedoff">, _fc_model    = Just model</span>
+<span class="lineno">  496 </span><span class="spaces">            </span><span class="istickedoff">, _fc_baseUrl  = if baseUrl == &quot;http://localhost:11434&quot;</span>
+<span class="lineno">  497 </span><span class="spaces">                             </span><span class="istickedoff">then Nothing  -- don't store the default</span>
+<span class="lineno">  498 </span><span class="spaces">                             </span><span class="istickedoff">else Just baseUrl</span>
+<span class="lineno">  499 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  500 </span><span class="spaces">      </span><span class="istickedoff">Dir.createDirectoryIfMissing True pureclawDir</span>
+<span class="lineno">  501 </span><span class="spaces">      </span><span class="istickedoff">writeFileConfig configPath updated</span>
+<span class="lineno">  502 </span><span class="spaces">      </span><span class="istickedoff">-- Hot-swap provider and model in the running session</span>
+<span class="lineno">  503 </span><span class="spaces">      </span><span class="istickedoff">manager &lt;- HTTP.newTlsManager</span>
+<span class="lineno">  504 </span><span class="spaces">      </span><span class="istickedoff">let <span class="nottickedoff">ollamaProvider = if baseUrl == &quot;http://localhost:11434&quot;</span></span>
+<span class="lineno">  505 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">then mkOllamaProvider manager</span></span>
+<span class="lineno">  506 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">else mkOllamaProviderWithUrl manager (T.unpack baseUrl)</span></span>
+<span class="lineno">  507 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_env_provider env) (Just <span class="nottickedoff">(MkProvider ollamaProvider)</span>)</span>
+<span class="lineno">  508 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_env_model env) (ModelId model)</span>
+<span class="lineno">  509 </span><span class="spaces">      </span><span class="istickedoff">send $ &quot;Ollama configured successfully. Model: &quot; &lt;&gt; model &lt;&gt; &quot;, URL: &quot; &lt;&gt; baseUrl</span>
+<span class="lineno">  510 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span></span>
+<span class="lineno">  511 </span>
+<span class="lineno">  512 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  513 </span>-- Vault subcommand execution
+<span class="lineno">  514 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  515 </span>
+<span class="lineno">  516 </span>executeVaultCommand :: AgentEnv -&gt; VaultHandle -&gt; VaultSubCommand -&gt; Context -&gt; IO Context
+<span class="lineno">  517 </span><span class="decl"><span class="istickedoff">executeVaultCommand env vault sub ctx = do</span>
+<span class="lineno">  518 </span><span class="spaces">  </span><span class="istickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  519 </span><span class="spaces">      </span><span class="istickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  520 </span><span class="spaces">  </span><span class="istickedoff">case sub of</span>
+<span class="lineno">  521 </span><span class="spaces">    </span><span class="istickedoff">VaultSetup -&gt;</span>
+<span class="lineno">  522 </span><span class="spaces">      </span><span class="istickedoff">-- VaultSetup is handled before dispatch; should not reach here.</span>
+<span class="lineno">  523 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">send &quot;Use /vault setup to set up or rekey the vault.&quot;</span></span>
+<span class="lineno">  524 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">&gt;&gt; pure ctx</span></span>
+<span class="lineno">  525 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  526 </span><span class="spaces">    </span><span class="istickedoff">VaultAdd name -&gt; do</span>
+<span class="lineno">  527 </span><span class="spaces">      </span><span class="istickedoff">valueResult &lt;- try @IOError (_ch_promptSecret ch <span class="nottickedoff">(&quot;Value for '&quot; &lt;&gt; name &lt;&gt; &quot;': &quot;)</span>)</span>
+<span class="lineno">  528 </span><span class="spaces">      </span><span class="istickedoff">case valueResult of</span>
+<span class="lineno">  529 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt;</span>
+<span class="lineno">  530 </span><span class="spaces">          </span><span class="istickedoff">send (&quot;Error reading secret: &quot; &lt;&gt; T.pack (show e))</span>
+<span class="lineno">  531 </span><span class="spaces">        </span><span class="istickedoff">Right value -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  532 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">result &lt;- _vh_put vault name (TE.encodeUtf8 value)</span></span>
+<span class="lineno">  533 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">case result of</span></span>
+<span class="lineno">  534 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Left err -&gt; send (&quot;Error storing secret: &quot; &lt;&gt; T.pack (show err))</span></span>
+<span class="lineno">  535 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Right () -&gt; send (&quot;Secret '&quot; &lt;&gt; name &lt;&gt; &quot;' stored.&quot;)</span></span>
+<span class="lineno">  536 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  537 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  538 </span><span class="spaces">    </span><span class="istickedoff">VaultList -&gt; do</span>
+<span class="lineno">  539 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- _vh_list vault</span>
+<span class="lineno">  540 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  541 </span><span class="spaces">        </span><span class="istickedoff">Left err  -&gt; <span class="nottickedoff">send (&quot;Error: &quot; &lt;&gt; T.pack (show err))</span></span>
+<span class="lineno">  542 </span><span class="spaces">        </span><span class="istickedoff">Right []  -&gt; send &quot;Vault is empty.&quot;</span>
+<span class="lineno">  543 </span><span class="spaces">        </span><span class="istickedoff">Right names -&gt;</span>
+<span class="lineno">  544 </span><span class="spaces">          </span><span class="istickedoff">send (&quot;Secrets:\n&quot; &lt;&gt; T.unlines (map (&quot;  \x2022 &quot; &lt;&gt;) names))</span>
+<span class="lineno">  545 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  546 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  547 </span><span class="spaces">    </span><span class="istickedoff">VaultDelete name -&gt; do</span>
+<span class="lineno">  548 </span><span class="spaces">      </span><span class="istickedoff">confirm &lt;- _ch_prompt ch <span class="nottickedoff">(&quot;Delete secret '&quot; &lt;&gt; name &lt;&gt; &quot;'? [y/N]: &quot;)</span></span>
+<span class="lineno">  549 </span><span class="spaces">      </span><span class="istickedoff">if T.strip confirm == &quot;y&quot; || T.strip confirm == &quot;Y&quot;</span>
+<span class="lineno">  550 </span><span class="spaces">        </span><span class="istickedoff">then do</span>
+<span class="lineno">  551 </span><span class="spaces">          </span><span class="istickedoff">result &lt;- _vh_delete vault name</span>
+<span class="lineno">  552 </span><span class="spaces">          </span><span class="istickedoff">case result of</span>
+<span class="lineno">  553 </span><span class="spaces">            </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">send (&quot;Error: &quot; &lt;&gt; T.pack (show err))</span></span>
+<span class="lineno">  554 </span><span class="spaces">            </span><span class="istickedoff">Right () -&gt; send (&quot;Secret '&quot; &lt;&gt; name &lt;&gt; &quot;' deleted.&quot;)</span>
+<span class="lineno">  555 </span><span class="spaces">        </span><span class="istickedoff">else send &quot;Cancelled.&quot;</span>
+<span class="lineno">  556 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  557 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  558 </span><span class="spaces">    </span><span class="istickedoff">VaultLock -&gt; do</span>
+<span class="lineno">  559 </span><span class="spaces">      </span><span class="istickedoff">_vh_lock vault</span>
+<span class="lineno">  560 </span><span class="spaces">      </span><span class="istickedoff">send &quot;Vault locked.&quot;</span>
+<span class="lineno">  561 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  562 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  563 </span><span class="spaces">    </span><span class="istickedoff">VaultUnlock -&gt; do</span>
+<span class="lineno">  564 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- _vh_unlock vault</span>
+<span class="lineno">  565 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  566 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">send (&quot;Error unlocking vault: &quot; &lt;&gt; T.pack (show err))</span></span>
+<span class="lineno">  567 </span><span class="spaces">        </span><span class="istickedoff">Right () -&gt; send <span class="nottickedoff">&quot;Vault unlocked.&quot;</span></span>
+<span class="lineno">  568 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  569 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  570 </span><span class="spaces">    </span><span class="istickedoff">VaultStatus' -&gt; do</span>
+<span class="lineno">  571 </span><span class="spaces">      </span><span class="istickedoff">status &lt;- _vh_status vault</span>
+<span class="lineno">  572 </span><span class="spaces">      </span><span class="istickedoff">let lockedText = if <span class="tickonlyfalse">_vs_locked status</span> then <span class="nottickedoff">&quot;Locked&quot;</span> else &quot;Unlocked&quot;</span>
+<span class="lineno">  573 </span><span class="spaces">          </span><span class="istickedoff">msg = T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  574 </span><span class="spaces">            </span><span class="istickedoff">[ &quot;Vault status:&quot;</span>
+<span class="lineno">  575 </span><span class="spaces">            </span><span class="istickedoff">, &quot;  State:   &quot; &lt;&gt; lockedText</span>
+<span class="lineno">  576 </span><span class="spaces">            </span><span class="istickedoff">, &quot;  Secrets: &quot; &lt;&gt; T.pack (show (_vs_secretCount status))</span>
+<span class="lineno">  577 </span><span class="spaces">            </span><span class="istickedoff">, &quot;  Key:     &quot; &lt;&gt; _vs_keyType status</span>
+<span class="lineno">  578 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">  579 </span><span class="spaces">      </span><span class="istickedoff">send msg</span>
+<span class="lineno">  580 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  581 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  582 </span><span class="spaces">    </span><span class="istickedoff">VaultUnknown _ -&gt;</span>
+<span class="lineno">  583 </span><span class="spaces">      </span><span class="istickedoff">send &quot;Unknown vault command. Type /help to see all available commands.&quot;</span>
+<span class="lineno">  584 </span><span class="spaces">      </span><span class="istickedoff">&gt;&gt; pure <span class="nottickedoff">ctx</span></span></span>
+<span class="lineno">  585 </span>
+<span class="lineno">  586 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  587 </span>-- Vault setup wizard
+<span class="lineno">  588 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  589 </span>
+<span class="lineno">  590 </span>-- | Interactive vault setup wizard. Detects auth mechanisms, lets the user
+<span class="lineno">  591 </span>-- choose, then creates or rekeys the vault.
+<span class="lineno">  592 </span>executeVaultSetup :: AgentEnv -&gt; Context -&gt; IO Context
+<span class="lineno">  593 </span><span class="decl"><span class="istickedoff">executeVaultSetup env ctx = do</span>
+<span class="lineno">  594 </span><span class="spaces">  </span><span class="istickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  595 </span><span class="spaces">      </span><span class="istickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  596 </span><span class="spaces">      </span><span class="istickedoff">ph   = _env_pluginHandle env</span>
+<span class="lineno">  597 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  598 </span><span class="spaces">  </span><span class="istickedoff">-- Step 1: Detect available plugins</span>
+<span class="lineno">  599 </span><span class="spaces">  </span><span class="istickedoff">plugins &lt;- _ph_detect ph</span>
+<span class="lineno">  600 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  601 </span><span class="spaces">  </span><span class="istickedoff">-- Step 2: Build choice menu</span>
+<span class="lineno">  602 </span><span class="spaces">  </span><span class="istickedoff">let options = buildSetupOptions plugins</span>
+<span class="lineno">  603 </span><span class="spaces">      </span><span class="istickedoff">menu    = formatSetupMenu options</span>
+<span class="lineno">  604 </span><span class="spaces">  </span><span class="istickedoff">send menu</span>
+<span class="lineno">  605 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  606 </span><span class="spaces">  </span><span class="istickedoff">-- Step 3: Read user's choice</span>
+<span class="lineno">  607 </span><span class="spaces">  </span><span class="istickedoff">choiceText &lt;- _ch_prompt ch <span class="nottickedoff">&quot;Choice: &quot;</span></span>
+<span class="lineno">  608 </span><span class="spaces">  </span><span class="istickedoff">case parseChoice (length options) (T.strip choiceText) of</span>
+<span class="lineno">  609 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  610 </span><span class="spaces">      </span><span class="istickedoff">send &quot;Invalid choice. Setup cancelled.&quot;</span>
+<span class="lineno">  611 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  612 </span><span class="spaces">    </span><span class="istickedoff">Just idx -&gt; do</span>
+<span class="lineno">  613 </span><span class="spaces">      </span><span class="istickedoff">let chosen = snd (options !! idx)</span>
+<span class="lineno">  614 </span><span class="spaces">      </span><span class="istickedoff">-- Step 4: Create encryptor based on choice</span>
+<span class="lineno">  615 </span><span class="spaces">      </span><span class="istickedoff">encResult &lt;- createEncryptorForChoice ch <span class="nottickedoff">ph</span> chosen</span>
+<span class="lineno">  616 </span><span class="spaces">      </span><span class="istickedoff">case encResult of</span>
+<span class="lineno">  617 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; do</span>
+<span class="lineno">  618 </span><span class="spaces">          </span><span class="istickedoff">send err</span>
+<span class="lineno">  619 </span><span class="spaces">          </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  620 </span><span class="spaces">        </span><span class="istickedoff">Right (newEnc, keyLabel, mRecipient, mIdentity) -&gt; do</span>
+<span class="lineno">  621 </span><span class="spaces">          </span><span class="istickedoff">-- Step 5: Init or rekey</span>
+<span class="lineno">  622 </span><span class="spaces">          </span><span class="istickedoff">vaultOpt &lt;- readIORef (_env_vault env)</span>
+<span class="lineno">  623 </span><span class="spaces">          </span><span class="istickedoff">case vaultOpt of</span>
+<span class="lineno">  624 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  625 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">-- No vault handle at all: create from scratch</span></span>
+<span class="lineno">  626 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">setupResult &lt;- firstTimeSetup env newEnc keyLabel</span></span>
+<span class="lineno">  627 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">case setupResult of</span></span>
+<span class="lineno">  628 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">Left err -&gt; send err</span></span>
+<span class="lineno">  629 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">Right () -&gt; do</span></span>
+<span class="lineno">  630 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">send (&quot;Vault created with &quot; &lt;&gt; keyLabel &lt;&gt; &quot; encryption.&quot;)</span></span>
+<span class="lineno">  631 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">updateConfigAfterSetup mRecipient mIdentity keyLabel</span></span>
+<span class="lineno">  632 </span><span class="spaces">            </span><span class="istickedoff">Just vault -&gt; do</span>
+<span class="lineno">  633 </span><span class="spaces">              </span><span class="istickedoff">-- Vault handle exists — but the file may not.</span>
+<span class="lineno">  634 </span><span class="spaces">              </span><span class="istickedoff">-- Try init: if it succeeds, this is first-time setup.</span>
+<span class="lineno">  635 </span><span class="spaces">              </span><span class="istickedoff">-- If VaultAlreadyExists, we need to rekey.</span>
+<span class="lineno">  636 </span><span class="spaces">              </span><span class="istickedoff">initResult &lt;- _vh_init vault</span>
+<span class="lineno">  637 </span><span class="spaces">              </span><span class="istickedoff">case initResult of</span>
+<span class="lineno">  638 </span><span class="spaces">                </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  639 </span><span class="spaces">                  </span><span class="istickedoff">-- First-time init succeeded (file didn't exist)</span>
+<span class="lineno">  640 </span><span class="spaces">                  </span><span class="istickedoff">send (&quot;Vault created with &quot; &lt;&gt; keyLabel &lt;&gt; &quot; encryption.&quot;)</span>
+<span class="lineno">  641 </span><span class="spaces">                  </span><span class="istickedoff">updateConfigAfterSetup mRecipient mIdentity <span class="nottickedoff">keyLabel</span></span>
+<span class="lineno">  642 </span><span class="spaces">                </span><span class="istickedoff">Left VaultAlreadyExists -&gt; do</span>
+<span class="lineno">  643 </span><span class="spaces">                  </span><span class="istickedoff">-- Vault exists — rekey it</span>
+<span class="lineno">  644 </span><span class="spaces">                  </span><span class="istickedoff">let confirmFn msg = do</span>
+<span class="lineno">  645 </span><span class="spaces">                        </span><span class="istickedoff">send <span class="nottickedoff">msg</span></span>
+<span class="lineno">  646 </span><span class="spaces">                        </span><span class="istickedoff">answer &lt;- _ch_prompt ch <span class="nottickedoff">&quot;Proceed? [y/N]: &quot;</span></span>
+<span class="lineno">  647 </span><span class="spaces">                        </span><span class="istickedoff">pure (T.strip answer == &quot;y&quot; || T.strip answer == &quot;Y&quot;)</span>
+<span class="lineno">  648 </span><span class="spaces">                  </span><span class="istickedoff">rekeyResult &lt;- _vh_rekey vault <span class="nottickedoff">newEnc</span> <span class="nottickedoff">keyLabel</span> confirmFn</span>
+<span class="lineno">  649 </span><span class="spaces">                  </span><span class="istickedoff">case rekeyResult of</span>
+<span class="lineno">  650 </span><span class="spaces">                    </span><span class="istickedoff">Left (VaultCorrupted &quot;rekey cancelled by user&quot;) -&gt;</span>
+<span class="lineno">  651 </span><span class="spaces">                      </span><span class="istickedoff">send &quot;Rekey cancelled.&quot;</span>
+<span class="lineno">  652 </span><span class="spaces">                    </span><span class="istickedoff">Left err -&gt;</span>
+<span class="lineno">  653 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">send (&quot;Rekey failed: &quot; &lt;&gt; T.pack (show err))</span></span>
+<span class="lineno">  654 </span><span class="spaces">                    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  655 </span><span class="spaces">                      </span><span class="istickedoff">send (&quot;Vault rekeyed to &quot; &lt;&gt; keyLabel &lt;&gt; &quot;.&quot;)</span>
+<span class="lineno">  656 </span><span class="spaces">                      </span><span class="istickedoff">updateConfigAfterSetup mRecipient mIdentity <span class="nottickedoff">keyLabel</span></span>
+<span class="lineno">  657 </span><span class="spaces">                </span><span class="istickedoff">Left err -&gt;</span>
+<span class="lineno">  658 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">send (&quot;Vault init failed: &quot; &lt;&gt; T.pack (show err))</span></span>
+<span class="lineno">  659 </span><span class="spaces">          </span><span class="istickedoff">pure <span class="nottickedoff">ctx</span></span></span>
+<span class="lineno">  660 </span>
+<span class="lineno">  661 </span>-- | A setup option: either passphrase or a detected plugin.
+<span class="lineno">  662 </span>data SetupOption
+<span class="lineno">  663 </span>  = SetupPassphrase
+<span class="lineno">  664 </span>  | SetupPlugin AgePlugin
+<span class="lineno">  665 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  666 </span>
+<span class="lineno">  667 </span>-- | Build the list of available setup options.
+<span class="lineno">  668 </span>-- Passphrase is always first.
+<span class="lineno">  669 </span>buildSetupOptions :: [AgePlugin] -&gt; [(Text, SetupOption)]
+<span class="lineno">  670 </span><span class="decl"><span class="istickedoff">buildSetupOptions plugins =</span>
+<span class="lineno">  671 </span><span class="spaces">  </span><span class="istickedoff">(&quot;Passphrase&quot;, SetupPassphrase)</span>
+<span class="lineno">  672 </span><span class="spaces">    </span><span class="istickedoff">: [(labelFor p, <span class="nottickedoff">SetupPlugin p</span>) | p &lt;- plugins]</span>
+<span class="lineno">  673 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  674 </span><span class="spaces">    </span><span class="istickedoff">labelFor p = _ap_label p &lt;&gt; &quot; (&quot; &lt;&gt; _ap_name p &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  675 </span>
+<span class="lineno">  676 </span>-- | Format the setup menu for display.
+<span class="lineno">  677 </span>formatSetupMenu :: [(Text, SetupOption)] -&gt; Text
+<span class="lineno">  678 </span><span class="decl"><span class="istickedoff">formatSetupMenu options =</span>
+<span class="lineno">  679 </span><span class="spaces">  </span><span class="istickedoff">T.intercalate &quot;\n&quot; $</span>
+<span class="lineno">  680 </span><span class="spaces">    </span><span class="istickedoff">&quot;Choose your vault authentication method:&quot;</span>
+<span class="lineno">  681 </span><span class="spaces">    </span><span class="istickedoff">: [T.pack (show i) &lt;&gt; &quot;. &quot; &lt;&gt; label | (i, (label, _)) &lt;- zip [(1::Int)..] options]</span></span>
+<span class="lineno">  682 </span>
+<span class="lineno">  683 </span>-- | Parse a numeric choice (1-based) to a 0-based index.
+<span class="lineno">  684 </span>parseChoice :: Int -&gt; Text -&gt; Maybe Int
+<span class="lineno">  685 </span><span class="decl"><span class="istickedoff">parseChoice maxN t =</span>
+<span class="lineno">  686 </span><span class="spaces">  </span><span class="istickedoff">case reads (T.unpack t) of</span>
+<span class="lineno">  687 </span><span class="spaces">    </span><span class="istickedoff">[(n, &quot;&quot;)] | <span class="tickonlytrue">n &gt;= 1 &amp;&amp; n &lt;= maxN</span> -&gt; Just (n - 1)</span>
+<span class="lineno">  688 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; Nothing</span></span>
+<span class="lineno">  689 </span>
+<span class="lineno">  690 </span>-- | Create an encryptor based on the user's setup choice.
+<span class="lineno">  691 </span>-- Returns (encryptor, key label, maybe recipient, maybe identity path).
+<span class="lineno">  692 </span>createEncryptorForChoice
+<span class="lineno">  693 </span>  :: ChannelHandle
+<span class="lineno">  694 </span>  -&gt; PluginHandle
+<span class="lineno">  695 </span>  -&gt; SetupOption
+<span class="lineno">  696 </span>  -&gt; IO (Either Text (VaultEncryptor, Text, Maybe Text, Maybe Text))
+<span class="lineno">  697 </span><span class="decl"><span class="istickedoff">createEncryptorForChoice ch _ph SetupPassphrase = do</span>
+<span class="lineno">  698 </span><span class="spaces">  </span><span class="istickedoff">passResult &lt;- try @IOError (_ch_promptSecret ch <span class="nottickedoff">&quot;Passphrase: &quot;</span>)</span>
+<span class="lineno">  699 </span><span class="spaces">  </span><span class="istickedoff">case passResult of</span>
+<span class="lineno">  700 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt;</span>
+<span class="lineno">  701 </span><span class="spaces">      </span><span class="istickedoff">pure (Left (&quot;Error reading passphrase: &quot; &lt;&gt; T.pack (show e)))</span>
+<span class="lineno">  702 </span><span class="spaces">    </span><span class="istickedoff">Right passphrase -&gt; do</span>
+<span class="lineno">  703 </span><span class="spaces">      </span><span class="istickedoff">enc &lt;- mkPassphraseVaultEncryptor <span class="nottickedoff">(pure (TE.encodeUtf8 passphrase))</span></span>
+<span class="lineno">  704 </span><span class="spaces">      </span><span class="istickedoff">pure (Right (<span class="nottickedoff">enc</span>, &quot;passphrase&quot;, Nothing, Nothing))</span>
+<span class="lineno">  705 </span><span class="spaces"></span><span class="istickedoff">createEncryptorForChoice ch _ph (SetupPlugin plugin) = <span class="nottickedoff">do</span></span>
+<span class="lineno">  706 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">pureclawDir &lt;- getPureclawDir</span></span>
+<span class="lineno">  707 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">let vaultDir      = pureclawDir &lt;/&gt; &quot;vault&quot;</span></span>
+<span class="lineno">  708 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">identityFile  = vaultDir &lt;/&gt; T.unpack (_ap_name plugin) &lt;&gt; &quot;-identity.txt&quot;</span></span>
+<span class="lineno">  709 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">identityFileT = T.pack identityFile</span></span>
+<span class="lineno">  710 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">cmd = T.pack (_ap_binary plugin) &lt;&gt; &quot; --generate --pin-policy never --touch-policy never &gt; &quot; &lt;&gt; identityFileT</span></span>
+<span class="lineno">  711 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">Dir.createDirectoryIfMissing True vaultDir</span></span>
+<span class="lineno">  712 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">_ch_send ch (OutgoingMessage (T.intercalate &quot;\n&quot;</span></span>
+<span class="lineno">  713 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Run this in another terminal to generate a &quot; &lt;&gt; _ap_label plugin &lt;&gt; &quot; identity:&quot;</span></span>
+<span class="lineno">  714 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">, &quot;&quot;</span></span>
+<span class="lineno">  715 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">, &quot;  &quot; &lt;&gt; cmd</span></span>
+<span class="lineno">  716 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">, &quot;&quot;</span></span>
+<span class="lineno">  717 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">, &quot;The plugin will prompt you for a PIN and touch confirmation.&quot;</span></span>
+<span class="lineno">  718 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">, &quot;Press Enter here when done (or 'q' to cancel).&quot;</span></span>
+<span class="lineno">  719 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">]))</span></span>
+<span class="lineno">  720 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">answer &lt;- T.strip &lt;$&gt; _ch_prompt ch &quot;&quot;</span></span>
+<span class="lineno">  721 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">if answer == &quot;q&quot; || answer == &quot;Q&quot;</span></span>
+<span class="lineno">  722 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">then pure (Left &quot;Setup cancelled.&quot;)</span></span>
+<span class="lineno">  723 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">else do</span></span>
+<span class="lineno">  724 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">exists &lt;- Dir.doesFileExist identityFile</span></span>
+<span class="lineno">  725 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">if not exists</span></span>
+<span class="lineno">  726 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">then pure (Left (&quot;Identity file not found: &quot; &lt;&gt; identityFileT))</span></span>
+<span class="lineno">  727 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">else do</span></span>
+<span class="lineno">  728 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">contents &lt;- TIO.readFile identityFile</span></span>
+<span class="lineno">  729 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">let outputLines = T.lines contents</span></span>
+<span class="lineno">  730 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">-- age-plugin-yubikey uses &quot;#    Recipient: age1...&quot;</span></span>
+<span class="lineno">  731 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">-- other plugins may use &quot;# public key: age1...&quot;</span></span>
+<span class="lineno">  732 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">findRecipient = L.find (\l -&gt;</span></span>
+<span class="lineno">  733 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">let stripped = T.strip (T.dropWhile (== '#') (T.strip l))</span></span>
+<span class="lineno">  734 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">in T.isPrefixOf &quot;Recipient:&quot; stripped</span></span>
+<span class="lineno">  735 </span><span class="spaces">                   </span><span class="istickedoff"><span class="nottickedoff">|| T.isPrefixOf &quot;public key:&quot; stripped) outputLines</span></span>
+<span class="lineno">  736 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">case findRecipient of</span></span>
+<span class="lineno">  737 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Nothing -&gt;</span></span>
+<span class="lineno">  738 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure (Left &quot;No recipient found in identity file. Expected a '# Recipient: age1...' line.&quot;)</span></span>
+<span class="lineno">  739 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Just rLine -&gt; do</span></span>
+<span class="lineno">  740 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">-- Extract value after the label (Recipient: or public key:)</span></span>
+<span class="lineno">  741 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">let afterHash = T.strip (T.dropWhile (== '#') (T.strip rLine))</span></span>
+<span class="lineno">  742 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">recipient = T.strip (T.drop 1 (T.dropWhile (/= ':') afterHash))</span></span>
+<span class="lineno">  743 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">ageResult &lt;- mkAgeEncryptor</span></span>
+<span class="lineno">  744 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">case ageResult of</span></span>
+<span class="lineno">  745 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">Left err -&gt;</span></span>
+<span class="lineno">  746 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">pure (Left (&quot;age error: &quot; &lt;&gt; T.pack (show err)))</span></span>
+<span class="lineno">  747 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">Right ageEnc -&gt; do</span></span>
+<span class="lineno">  748 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">let enc = ageVaultEncryptor ageEnc recipient identityFileT</span></span>
+<span class="lineno">  749 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">pure (Right (enc, _ap_label plugin, Just recipient, Just identityFileT))</span></span></span>
+<span class="lineno">  750 </span>
+<span class="lineno">  751 </span>-- | First-time vault setup: create directory, open vault, init, write to IORef.
+<span class="lineno">  752 </span>firstTimeSetup :: AgentEnv -&gt; VaultEncryptor -&gt; Text -&gt; IO (Either Text ())
+<span class="lineno">  753 </span><span class="decl"><span class="nottickedoff">firstTimeSetup env enc keyLabel = do</span>
+<span class="lineno">  754 </span><span class="spaces">  </span><span class="nottickedoff">pureclawDir &lt;- getPureclawDir</span>
+<span class="lineno">  755 </span><span class="spaces">  </span><span class="nottickedoff">let vaultDir = pureclawDir &lt;/&gt; &quot;vault&quot;</span>
+<span class="lineno">  756 </span><span class="spaces">  </span><span class="nottickedoff">Dir.createDirectoryIfMissing True vaultDir</span>
+<span class="lineno">  757 </span><span class="spaces">  </span><span class="nottickedoff">let vaultPath = vaultDir &lt;/&gt; &quot;vault.age&quot;</span>
+<span class="lineno">  758 </span><span class="spaces">      </span><span class="nottickedoff">cfg = VaultConfig</span>
+<span class="lineno">  759 </span><span class="spaces">        </span><span class="nottickedoff">{ _vc_path    = vaultPath</span>
+<span class="lineno">  760 </span><span class="spaces">        </span><span class="nottickedoff">, _vc_keyType = keyLabel</span>
+<span class="lineno">  761 </span><span class="spaces">        </span><span class="nottickedoff">, _vc_unlock  = UnlockOnDemand</span>
+<span class="lineno">  762 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  763 </span><span class="spaces">  </span><span class="nottickedoff">vault &lt;- openVault cfg enc</span>
+<span class="lineno">  764 </span><span class="spaces">  </span><span class="nottickedoff">initResult &lt;- _vh_init vault</span>
+<span class="lineno">  765 </span><span class="spaces">  </span><span class="nottickedoff">case initResult of</span>
+<span class="lineno">  766 </span><span class="spaces">    </span><span class="nottickedoff">Left VaultAlreadyExists -&gt;</span>
+<span class="lineno">  767 </span><span class="spaces">      </span><span class="nottickedoff">pure (Left &quot;A vault file already exists. Use /vault setup to rekey.&quot;)</span>
+<span class="lineno">  768 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt;</span>
+<span class="lineno">  769 </span><span class="spaces">      </span><span class="nottickedoff">pure (Left (&quot;Vault creation failed: &quot; &lt;&gt; T.pack (show err)))</span>
+<span class="lineno">  770 </span><span class="spaces">    </span><span class="nottickedoff">Right () -&gt; do</span>
+<span class="lineno">  771 </span><span class="spaces">      </span><span class="nottickedoff">writeIORef (_env_vault env) (Just vault)</span>
+<span class="lineno">  772 </span><span class="spaces">      </span><span class="nottickedoff">pure (Right ())</span></span>
+<span class="lineno">  773 </span>
+<span class="lineno">  774 </span>-- | Update the config file after a successful setup/rekey.
+<span class="lineno">  775 </span>updateConfigAfterSetup :: Maybe Text -&gt; Maybe Text -&gt; Text -&gt; IO ()
+<span class="lineno">  776 </span><span class="decl"><span class="istickedoff">updateConfigAfterSetup mRecipient mIdentity _keyLabel = do</span>
+<span class="lineno">  777 </span><span class="spaces">  </span><span class="istickedoff">pureclawDir &lt;- getPureclawDir</span>
+<span class="lineno">  778 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True pureclawDir</span>
+<span class="lineno">  779 </span><span class="spaces">  </span><span class="istickedoff">let configPath   = pureclawDir &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno">  780 </span><span class="spaces">      </span><span class="istickedoff">vaultPath    = Set (T.pack (pureclawDir &lt;/&gt; &quot;vault&quot; &lt;/&gt; &quot;vault.age&quot;))</span>
+<span class="lineno">  781 </span><span class="spaces">      </span><span class="istickedoff">unlockMode   = Set &quot;on_demand&quot;</span>
+<span class="lineno">  782 </span><span class="spaces">      </span><span class="istickedoff">recipientUpd = maybe Clear <span class="nottickedoff">Set</span> mRecipient</span>
+<span class="lineno">  783 </span><span class="spaces">      </span><span class="istickedoff">identityUpd  = maybe Clear <span class="nottickedoff">Set</span> mIdentity</span>
+<span class="lineno">  784 </span><span class="spaces">  </span><span class="istickedoff">updateVaultConfig configPath vaultPath recipientUpd identityUpd unlockMode</span></span>
+<span class="lineno">  785 </span>
+<span class="lineno">  786 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  787 </span>-- Channel subcommand execution
+<span class="lineno">  788 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  789 </span>
+<span class="lineno">  790 </span>executeChannelCommand :: AgentEnv -&gt; ChannelSubCommand -&gt; Context -&gt; IO Context
+<span class="lineno">  791 </span><span class="decl"><span class="nottickedoff">executeChannelCommand env ChannelList ctx = do</span>
+<span class="lineno">  792 </span><span class="spaces">  </span><span class="nottickedoff">let send = _ch_send (_env_channel env) . OutgoingMessage</span>
+<span class="lineno">  793 </span><span class="spaces">  </span><span class="nottickedoff">-- Read current config to show status</span>
+<span class="lineno">  794 </span><span class="spaces">  </span><span class="nottickedoff">fileCfg &lt;- loadConfig</span>
+<span class="lineno">  795 </span><span class="spaces">  </span><span class="nottickedoff">let currentChannel = maybe &quot;cli&quot; T.unpack (_fc_defaultChannel fileCfg)</span>
+<span class="lineno">  796 </span><span class="spaces">      </span><span class="nottickedoff">signalConfigured = case _fc_signal fileCfg of</span>
+<span class="lineno">  797 </span><span class="spaces">        </span><span class="nottickedoff">Just sig -&gt; case _fsc_account sig of</span>
+<span class="lineno">  798 </span><span class="spaces">          </span><span class="nottickedoff">Just acct -&gt; &quot; (account: &quot; &lt;&gt; acct &lt;&gt; &quot;)&quot;</span>
+<span class="lineno">  799 </span><span class="spaces">          </span><span class="nottickedoff">Nothing   -&gt; &quot; (not configured)&quot;</span>
+<span class="lineno">  800 </span><span class="spaces">        </span><span class="nottickedoff">Nothing -&gt; &quot; (not configured)&quot;</span>
+<span class="lineno">  801 </span><span class="spaces">  </span><span class="nottickedoff">send $ T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  802 </span><span class="spaces">    </span><span class="nottickedoff">[ &quot;Chat channels:&quot;</span>
+<span class="lineno">  803 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  804 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  cli       \x2014 Terminal stdin/stdout&quot; &lt;&gt; if currentChannel == &quot;cli&quot; then &quot; [active]&quot; else &quot;&quot;</span>
+<span class="lineno">  805 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  signal    \x2014 Signal messenger&quot; &lt;&gt; signalConfigured &lt;&gt; if currentChannel == &quot;signal&quot; then &quot; [active]&quot; else &quot;&quot;</span>
+<span class="lineno">  806 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  telegram  \x2014 Telegram bot (coming soon)&quot;</span>
+<span class="lineno">  807 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  808 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;Set up a channel:  /channel signal&quot;</span>
+<span class="lineno">  809 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;Switch channel:    Set default_channel in config, then restart&quot;</span>
+<span class="lineno">  810 </span><span class="spaces">    </span><span class="nottickedoff">]</span>
+<span class="lineno">  811 </span><span class="spaces">  </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  812 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  813 </span><span class="spaces"></span><span class="nottickedoff">executeChannelCommand env (ChannelSetup channelName) ctx = do</span>
+<span class="lineno">  814 </span><span class="spaces">  </span><span class="nottickedoff">let send = _ch_send (_env_channel env) . OutgoingMessage</span>
+<span class="lineno">  815 </span><span class="spaces">  </span><span class="nottickedoff">case channelName of</span>
+<span class="lineno">  816 </span><span class="spaces">    </span><span class="nottickedoff">&quot;signal&quot;   -&gt; executeSignalSetup env ctx</span>
+<span class="lineno">  817 </span><span class="spaces">    </span><span class="nottickedoff">&quot;telegram&quot; -&gt; do</span>
+<span class="lineno">  818 </span><span class="spaces">      </span><span class="nottickedoff">send &quot;Telegram setup is not yet implemented. Coming soon!&quot;</span>
+<span class="lineno">  819 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  820 </span><span class="spaces">    </span><span class="nottickedoff">other -&gt; do</span>
+<span class="lineno">  821 </span><span class="spaces">      </span><span class="nottickedoff">send $ &quot;Unknown channel: &quot; &lt;&gt; other &lt;&gt; &quot;. Available: signal, telegram&quot;</span>
+<span class="lineno">  822 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  823 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  824 </span><span class="spaces"></span><span class="nottickedoff">executeChannelCommand env (ChannelUnknown sub) ctx = do</span>
+<span class="lineno">  825 </span><span class="spaces">  </span><span class="nottickedoff">_ch_send (_env_channel env) (OutgoingMessage</span>
+<span class="lineno">  826 </span><span class="spaces">    </span><span class="nottickedoff">(&quot;Unknown channel command: &quot; &lt;&gt; sub &lt;&gt; &quot;. Type /channel for available options.&quot;))</span>
+<span class="lineno">  827 </span><span class="spaces">  </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  828 </span>
+<span class="lineno">  829 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  830 </span>-- Signal setup wizard
+<span class="lineno">  831 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  832 </span>
+<span class="lineno">  833 </span>-- | Interactive Signal setup. Checks signal-cli, offers link or register,
+<span class="lineno">  834 </span>-- walks through the flow, writes config.
+<span class="lineno">  835 </span>executeSignalSetup :: AgentEnv -&gt; Context -&gt; IO Context
+<span class="lineno">  836 </span><span class="decl"><span class="nottickedoff">executeSignalSetup env ctx = do</span>
+<span class="lineno">  837 </span><span class="spaces">  </span><span class="nottickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  838 </span><span class="spaces">      </span><span class="nottickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  839 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  840 </span><span class="spaces">  </span><span class="nottickedoff">-- Step 1: Check signal-cli is installed</span>
+<span class="lineno">  841 </span><span class="spaces">  </span><span class="nottickedoff">signalCliCheck &lt;- try @IOException $</span>
+<span class="lineno">  842 </span><span class="spaces">    </span><span class="nottickedoff">P.readProcess (P.proc &quot;signal-cli&quot; [&quot;--version&quot;])</span>
+<span class="lineno">  843 </span><span class="spaces">  </span><span class="nottickedoff">case signalCliCheck of</span>
+<span class="lineno">  844 </span><span class="spaces">    </span><span class="nottickedoff">Left _ -&gt; do</span>
+<span class="lineno">  845 </span><span class="spaces">      </span><span class="nottickedoff">send $ T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  846 </span><span class="spaces">        </span><span class="nottickedoff">[ &quot;signal-cli is not installed.&quot;</span>
+<span class="lineno">  847 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  848 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;Install it first:&quot;</span>
+<span class="lineno">  849 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;  macOS:  brew install signal-cli&quot;</span>
+<span class="lineno">  850 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;  Nix:    nix-env -i signal-cli&quot;</span>
+<span class="lineno">  851 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;  Other:  https://github.com/AsamK/signal-cli&quot;</span>
+<span class="lineno">  852 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  853 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;Then run /channel signal again.&quot;</span>
+<span class="lineno">  854 </span><span class="spaces">        </span><span class="nottickedoff">]</span>
+<span class="lineno">  855 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  856 </span><span class="spaces">    </span><span class="nottickedoff">Right (exitCode, versionOut, _) -&gt; do</span>
+<span class="lineno">  857 </span><span class="spaces">      </span><span class="nottickedoff">let version = T.strip (TE.decodeUtf8 (BL.toStrict versionOut))</span>
+<span class="lineno">  858 </span><span class="spaces">      </span><span class="nottickedoff">case exitCode of</span>
+<span class="lineno">  859 </span><span class="spaces">        </span><span class="nottickedoff">ExitSuccess -&gt;</span>
+<span class="lineno">  860 </span><span class="spaces">          </span><span class="nottickedoff">send $ &quot;Found signal-cli &quot; &lt;&gt; version</span>
+<span class="lineno">  861 </span><span class="spaces">        </span><span class="nottickedoff">_ -&gt;</span>
+<span class="lineno">  862 </span><span class="spaces">          </span><span class="nottickedoff">send &quot;Found signal-cli (version unknown)&quot;</span>
+<span class="lineno">  863 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  864 </span><span class="spaces">      </span><span class="nottickedoff">-- Step 2: Offer link or register</span>
+<span class="lineno">  865 </span><span class="spaces">      </span><span class="nottickedoff">send $ T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  866 </span><span class="spaces">        </span><span class="nottickedoff">[ &quot;&quot;</span>
+<span class="lineno">  867 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;How would you like to connect?&quot;</span>
+<span class="lineno">  868 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;  [1] Link to an existing Signal account (adds PureClaw as secondary device)&quot;</span>
+<span class="lineno">  869 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;  [2] Register with a phone number (becomes primary device for that number)&quot;</span>
+<span class="lineno">  870 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  871 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;Note: Option 2 will take over the number from any existing Signal registration.&quot;</span>
+<span class="lineno">  872 </span><span class="spaces">        </span><span class="nottickedoff">]</span>
+<span class="lineno">  873 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  874 </span><span class="spaces">      </span><span class="nottickedoff">choice &lt;- T.strip &lt;$&gt; _ch_prompt ch &quot;Choice [1]: &quot;</span>
+<span class="lineno">  875 </span><span class="spaces">      </span><span class="nottickedoff">let effectiveChoice = if T.null choice then &quot;1&quot; else choice</span>
+<span class="lineno">  876 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  877 </span><span class="spaces">      </span><span class="nottickedoff">case effectiveChoice of</span>
+<span class="lineno">  878 </span><span class="spaces">        </span><span class="nottickedoff">&quot;1&quot; -&gt; signalLinkFlow env ctx</span>
+<span class="lineno">  879 </span><span class="spaces">        </span><span class="nottickedoff">&quot;2&quot; -&gt; signalRegisterFlow env ctx</span>
+<span class="lineno">  880 </span><span class="spaces">        </span><span class="nottickedoff">_   -&gt; do</span>
+<span class="lineno">  881 </span><span class="spaces">          </span><span class="nottickedoff">send &quot;Invalid choice. Setup cancelled.&quot;</span>
+<span class="lineno">  882 </span><span class="spaces">          </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno">  883 </span>
+<span class="lineno">  884 </span>-- | Link to an existing Signal account by scanning a QR code.
+<span class="lineno">  885 </span>-- signal-cli link outputs the sgnl:// URI, then blocks until the user
+<span class="lineno">  886 </span>-- scans it. We need to stream the output to show the URI immediately.
+<span class="lineno">  887 </span>signalLinkFlow :: AgentEnv -&gt; Context -&gt; IO Context
+<span class="lineno">  888 </span><span class="decl"><span class="nottickedoff">signalLinkFlow env ctx = do</span>
+<span class="lineno">  889 </span><span class="spaces">  </span><span class="nottickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  890 </span><span class="spaces">      </span><span class="nottickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  891 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  892 </span><span class="spaces">  </span><span class="nottickedoff">send &quot;Generating link... (this may take a moment)&quot;</span>
+<span class="lineno">  893 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  894 </span><span class="spaces">  </span><span class="nottickedoff">let procConfig = P.setStdout P.createPipe</span>
+<span class="lineno">  895 </span><span class="spaces">                 </span><span class="nottickedoff">$ P.setStderr P.createPipe</span>
+<span class="lineno">  896 </span><span class="spaces">                 </span><span class="nottickedoff">$ P.proc &quot;signal-cli&quot; [&quot;link&quot;, &quot;-n&quot;, &quot;PureClaw&quot;]</span>
+<span class="lineno">  897 </span><span class="spaces">  </span><span class="nottickedoff">startResult &lt;- try @IOException $ P.startProcess procConfig</span>
+<span class="lineno">  898 </span><span class="spaces">  </span><span class="nottickedoff">case startResult of</span>
+<span class="lineno">  899 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno">  900 </span><span class="spaces">      </span><span class="nottickedoff">send $ &quot;Failed to start signal-cli: &quot; &lt;&gt; T.pack (show err)</span>
+<span class="lineno">  901 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  902 </span><span class="spaces">    </span><span class="nottickedoff">Right process -&gt; do</span>
+<span class="lineno">  903 </span><span class="spaces">      </span><span class="nottickedoff">let stdoutH = P.getStdout process</span>
+<span class="lineno">  904 </span><span class="spaces">          </span><span class="nottickedoff">stderrH = P.getStderr process</span>
+<span class="lineno">  905 </span><span class="spaces">      </span><span class="nottickedoff">-- signal-cli outputs the URI to stderr, then blocks waiting for scan.</span>
+<span class="lineno">  906 </span><span class="spaces">      </span><span class="nottickedoff">-- Read stderr lines until we find the sgnl:// URI.</span>
+<span class="lineno">  907 </span><span class="spaces">      </span><span class="nottickedoff">linkUri &lt;- readUntilLink stderrH stdoutH</span>
+<span class="lineno">  908 </span><span class="spaces">      </span><span class="nottickedoff">case linkUri of</span>
+<span class="lineno">  909 </span><span class="spaces">        </span><span class="nottickedoff">Nothing -&gt; do</span>
+<span class="lineno">  910 </span><span class="spaces">          </span><span class="nottickedoff">-- Process may have exited with error</span>
+<span class="lineno">  911 </span><span class="spaces">          </span><span class="nottickedoff">exitCode &lt;- P.waitExitCode process</span>
+<span class="lineno">  912 </span><span class="spaces">          </span><span class="nottickedoff">send $ &quot;signal-cli link failed (exit &quot; &lt;&gt; T.pack (show exitCode) &lt;&gt; &quot;)&quot;</span>
+<span class="lineno">  913 </span><span class="spaces">          </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  914 </span><span class="spaces">        </span><span class="nottickedoff">Just uri -&gt; do</span>
+<span class="lineno">  915 </span><span class="spaces">          </span><span class="nottickedoff">send $ T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  916 </span><span class="spaces">            </span><span class="nottickedoff">[ &quot;Open Signal on your phone:&quot;</span>
+<span class="lineno">  917 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;  Settings \x2192 Linked Devices \x2192 Link New Device&quot;</span>
+<span class="lineno">  918 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  919 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;Scan this link (or paste into a QR code generator):&quot;</span>
+<span class="lineno">  920 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  921 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;  &quot; &lt;&gt; uri</span>
+<span class="lineno">  922 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  923 </span><span class="spaces">            </span><span class="nottickedoff">, &quot;Waiting for you to scan... (this will complete automatically)&quot;</span>
+<span class="lineno">  924 </span><span class="spaces">            </span><span class="nottickedoff">]</span>
+<span class="lineno">  925 </span><span class="spaces">          </span><span class="nottickedoff">-- Now wait for signal-cli to finish (user scans the code)</span>
+<span class="lineno">  926 </span><span class="spaces">          </span><span class="nottickedoff">exitCode &lt;- P.waitExitCode process</span>
+<span class="lineno">  927 </span><span class="spaces">          </span><span class="nottickedoff">case exitCode of</span>
+<span class="lineno">  928 </span><span class="spaces">            </span><span class="nottickedoff">ExitSuccess -&gt; do</span>
+<span class="lineno">  929 </span><span class="spaces">              </span><span class="nottickedoff">send &quot;Linked successfully!&quot;</span>
+<span class="lineno">  930 </span><span class="spaces">              </span><span class="nottickedoff">detectAndWriteSignalConfig env ctx</span>
+<span class="lineno">  931 </span><span class="spaces">            </span><span class="nottickedoff">_ -&gt; do</span>
+<span class="lineno">  932 </span><span class="spaces">              </span><span class="nottickedoff">send &quot;Link failed or was cancelled.&quot;</span>
+<span class="lineno">  933 </span><span class="spaces">              </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  934 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  935 </span><span class="spaces">    </span><span class="nottickedoff">-- Read lines from both handles looking for a sgnl:// URI.</span>
+<span class="lineno">  936 </span><span class="spaces">    </span><span class="nottickedoff">-- signal-cli typically puts it on stderr.</span>
+<span class="lineno">  937 </span><span class="spaces">    </span><span class="nottickedoff">readUntilLink :: Handle -&gt; Handle -&gt; IO (Maybe Text)</span>
+<span class="lineno">  938 </span><span class="spaces">    </span><span class="nottickedoff">readUntilLink stderrH stdoutH = go (50 :: Int)  -- max 50 lines to prevent infinite loop</span>
+<span class="lineno">  939 </span><span class="spaces">      </span><span class="nottickedoff">where</span>
+<span class="lineno">  940 </span><span class="spaces">        </span><span class="nottickedoff">go 0 = pure Nothing</span>
+<span class="lineno">  941 </span><span class="spaces">        </span><span class="nottickedoff">go n = do</span>
+<span class="lineno">  942 </span><span class="spaces">          </span><span class="nottickedoff">lineResult &lt;- try @IOException (hGetLine stderrH)</span>
+<span class="lineno">  943 </span><span class="spaces">          </span><span class="nottickedoff">case lineResult of</span>
+<span class="lineno">  944 </span><span class="spaces">            </span><span class="nottickedoff">Left _ -&gt; do</span>
+<span class="lineno">  945 </span><span class="spaces">              </span><span class="nottickedoff">-- stderr closed, try stdout</span>
+<span class="lineno">  946 </span><span class="spaces">              </span><span class="nottickedoff">outResult &lt;- try @IOException (hGetLine stdoutH)</span>
+<span class="lineno">  947 </span><span class="spaces">              </span><span class="nottickedoff">case outResult of</span>
+<span class="lineno">  948 </span><span class="spaces">                </span><span class="nottickedoff">Left _    -&gt; pure Nothing</span>
+<span class="lineno">  949 </span><span class="spaces">                </span><span class="nottickedoff">Right line -&gt;</span>
+<span class="lineno">  950 </span><span class="spaces">                  </span><span class="nottickedoff">let t = T.pack line</span>
+<span class="lineno">  951 </span><span class="spaces">                  </span><span class="nottickedoff">in if &quot;sgnl://&quot; `T.isInfixOf` t</span>
+<span class="lineno">  952 </span><span class="spaces">                     </span><span class="nottickedoff">then pure (Just (T.strip t))</span>
+<span class="lineno">  953 </span><span class="spaces">                     </span><span class="nottickedoff">else go (n - 1)</span>
+<span class="lineno">  954 </span><span class="spaces">            </span><span class="nottickedoff">Right line -&gt;</span>
+<span class="lineno">  955 </span><span class="spaces">              </span><span class="nottickedoff">let t = T.pack line</span>
+<span class="lineno">  956 </span><span class="spaces">              </span><span class="nottickedoff">in if &quot;sgnl://&quot; `T.isInfixOf` t</span>
+<span class="lineno">  957 </span><span class="spaces">                 </span><span class="nottickedoff">then pure (Just (T.strip t))</span>
+<span class="lineno">  958 </span><span class="spaces">                 </span><span class="nottickedoff">else go (n - 1)</span></span>
+<span class="lineno">  959 </span>
+<span class="lineno">  960 </span>-- | Register a new phone number.
+<span class="lineno">  961 </span>signalRegisterFlow :: AgentEnv -&gt; Context -&gt; IO Context
+<span class="lineno">  962 </span><span class="decl"><span class="nottickedoff">signalRegisterFlow env ctx = do</span>
+<span class="lineno">  963 </span><span class="spaces">  </span><span class="nottickedoff">let ch   = _env_channel env</span>
+<span class="lineno">  964 </span><span class="spaces">      </span><span class="nottickedoff">send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  965 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  966 </span><span class="spaces">  </span><span class="nottickedoff">phoneNumber &lt;- T.strip &lt;$&gt; _ch_prompt ch &quot;Phone number (E.164 format, e.g. +15555550123): &quot;</span>
+<span class="lineno">  967 </span><span class="spaces">  </span><span class="nottickedoff">if T.null phoneNumber || not (&quot;+&quot; `T.isPrefixOf` phoneNumber)</span>
+<span class="lineno">  968 </span><span class="spaces">    </span><span class="nottickedoff">then do</span>
+<span class="lineno">  969 </span><span class="spaces">      </span><span class="nottickedoff">send &quot;Invalid phone number. Must start with + (E.164 format).&quot;</span>
+<span class="lineno">  970 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  971 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">  972 </span><span class="spaces">      </span><span class="nottickedoff">-- Try register without captcha first, handle captcha if required</span>
+<span class="lineno">  973 </span><span class="spaces">      </span><span class="nottickedoff">signalRegister env ch phoneNumber Nothing ctx</span></span>
+<span class="lineno">  974 </span>
+<span class="lineno">  975 </span>-- | Attempt signal-cli register, handling captcha if required.
+<span class="lineno">  976 </span>signalRegister :: AgentEnv -&gt; ChannelHandle -&gt; Text -&gt; Maybe Text -&gt; Context -&gt; IO Context
+<span class="lineno">  977 </span><span class="decl"><span class="nottickedoff">signalRegister env ch phoneNumber mCaptcha ctx = do</span>
+<span class="lineno">  978 </span><span class="spaces">  </span><span class="nottickedoff">let send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno">  979 </span><span class="spaces">      </span><span class="nottickedoff">args = [&quot;-u&quot;, T.unpack phoneNumber, &quot;register&quot;]</span>
+<span class="lineno">  980 </span><span class="spaces">          </span><span class="nottickedoff">++ maybe [] (\c -&gt; [&quot;--captcha&quot;, T.unpack c]) mCaptcha</span>
+<span class="lineno">  981 </span><span class="spaces">  </span><span class="nottickedoff">send $ &quot;Sending verification SMS to &quot; &lt;&gt; phoneNumber &lt;&gt; &quot;...&quot;</span>
+<span class="lineno">  982 </span><span class="spaces">  </span><span class="nottickedoff">regResult &lt;- try @IOException $</span>
+<span class="lineno">  983 </span><span class="spaces">    </span><span class="nottickedoff">P.readProcess (P.proc &quot;signal-cli&quot; args)</span>
+<span class="lineno">  984 </span><span class="spaces">  </span><span class="nottickedoff">case regResult of</span>
+<span class="lineno">  985 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno">  986 </span><span class="spaces">      </span><span class="nottickedoff">send $ &quot;Registration failed: &quot; &lt;&gt; T.pack (show err)</span>
+<span class="lineno">  987 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno">  988 </span><span class="spaces">    </span><span class="nottickedoff">Right (exitCode, _, errOut) -&gt; do</span>
+<span class="lineno">  989 </span><span class="spaces">      </span><span class="nottickedoff">let errText = T.strip (TE.decodeUtf8 (BL.toStrict errOut))</span>
+<span class="lineno">  990 </span><span class="spaces">      </span><span class="nottickedoff">case exitCode of</span>
+<span class="lineno">  991 </span><span class="spaces">        </span><span class="nottickedoff">ExitSuccess -&gt; signalVerify env ch phoneNumber ctx</span>
+<span class="lineno">  992 </span><span class="spaces">        </span><span class="nottickedoff">_ | &quot;captcha&quot; `T.isInfixOf` T.toLower errText -&gt; do</span>
+<span class="lineno">  993 </span><span class="spaces">              </span><span class="nottickedoff">send $ T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  994 </span><span class="spaces">                </span><span class="nottickedoff">[ &quot;Signal requires a captcha before sending the SMS.&quot;</span>
+<span class="lineno">  995 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno">  996 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;1. Open this URL in a browser:&quot;</span>
+<span class="lineno">  997 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;   https://signalcaptchas.org/registration/generate.html&quot;</span>
+<span class="lineno">  998 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;2. Solve the captcha&quot;</span>
+<span class="lineno">  999 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;3. Open DevTools (F12), go to Network tab&quot;</span>
+<span class="lineno"> 1000 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;4. Click \&quot;Open Signal\&quot; \x2014 find the signalcaptcha:// URL in the Network tab&quot;</span>
+<span class="lineno"> 1001 </span><span class="spaces">                </span><span class="nottickedoff">, &quot;5. Copy and paste the full URL here (starts with signalcaptcha://)&quot;</span>
+<span class="lineno"> 1002 </span><span class="spaces">                </span><span class="nottickedoff">]</span>
+<span class="lineno"> 1003 </span><span class="spaces">              </span><span class="nottickedoff">captchaInput &lt;- T.strip &lt;$&gt; _ch_prompt ch &quot;Captcha token: &quot;</span>
+<span class="lineno"> 1004 </span><span class="spaces">              </span><span class="nottickedoff">let token = T.strip (T.replace &quot;signalcaptcha://&quot; &quot;&quot; captchaInput)</span>
+<span class="lineno"> 1005 </span><span class="spaces">              </span><span class="nottickedoff">if T.null token</span>
+<span class="lineno"> 1006 </span><span class="spaces">                </span><span class="nottickedoff">then do</span>
+<span class="lineno"> 1007 </span><span class="spaces">                  </span><span class="nottickedoff">send &quot;No captcha provided. Setup cancelled.&quot;</span>
+<span class="lineno"> 1008 </span><span class="spaces">                  </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno"> 1009 </span><span class="spaces">                </span><span class="nottickedoff">else signalRegister env ch phoneNumber (Just token) ctx</span>
+<span class="lineno"> 1010 </span><span class="spaces">        </span><span class="nottickedoff">_ -&gt; do</span>
+<span class="lineno"> 1011 </span><span class="spaces">          </span><span class="nottickedoff">send $ &quot;Registration failed: &quot; &lt;&gt; errText</span>
+<span class="lineno"> 1012 </span><span class="spaces">          </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno"> 1013 </span>
+<span class="lineno"> 1014 </span>-- | Verify a phone number after registration SMS was sent.
+<span class="lineno"> 1015 </span>signalVerify :: AgentEnv -&gt; ChannelHandle -&gt; Text -&gt; Context -&gt; IO Context
+<span class="lineno"> 1016 </span><span class="decl"><span class="nottickedoff">signalVerify env ch phoneNumber ctx = do</span>
+<span class="lineno"> 1017 </span><span class="spaces">  </span><span class="nottickedoff">let send = _ch_send ch . OutgoingMessage</span>
+<span class="lineno"> 1018 </span><span class="spaces">  </span><span class="nottickedoff">send &quot;Verification code sent! Check your SMS.&quot;</span>
+<span class="lineno"> 1019 </span><span class="spaces">  </span><span class="nottickedoff">code &lt;- T.strip &lt;$&gt; _ch_prompt ch &quot;Verification code: &quot;</span>
+<span class="lineno"> 1020 </span><span class="spaces">  </span><span class="nottickedoff">verifyResult &lt;- try @IOException $</span>
+<span class="lineno"> 1021 </span><span class="spaces">    </span><span class="nottickedoff">P.readProcess (P.proc &quot;signal-cli&quot;</span>
+<span class="lineno"> 1022 </span><span class="spaces">      </span><span class="nottickedoff">[&quot;-u&quot;, T.unpack phoneNumber, &quot;verify&quot;, T.unpack code])</span>
+<span class="lineno"> 1023 </span><span class="spaces">  </span><span class="nottickedoff">case verifyResult of</span>
+<span class="lineno"> 1024 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno"> 1025 </span><span class="spaces">      </span><span class="nottickedoff">send $ &quot;Verification failed: &quot; &lt;&gt; T.pack (show err)</span>
+<span class="lineno"> 1026 </span><span class="spaces">      </span><span class="nottickedoff">pure ctx</span>
+<span class="lineno"> 1027 </span><span class="spaces">    </span><span class="nottickedoff">Right (verifyExit, _, verifyErr) -&gt; case verifyExit of</span>
+<span class="lineno"> 1028 </span><span class="spaces">      </span><span class="nottickedoff">ExitSuccess -&gt; do</span>
+<span class="lineno"> 1029 </span><span class="spaces">        </span><span class="nottickedoff">send &quot;Phone number verified!&quot;</span>
+<span class="lineno"> 1030 </span><span class="spaces">        </span><span class="nottickedoff">writeSignalConfig env phoneNumber ctx</span>
+<span class="lineno"> 1031 </span><span class="spaces">      </span><span class="nottickedoff">_ -&gt; do</span>
+<span class="lineno"> 1032 </span><span class="spaces">        </span><span class="nottickedoff">send $ &quot;Verification failed: &quot; &lt;&gt; T.strip (TE.decodeUtf8 (BL.toStrict verifyErr))</span>
+<span class="lineno"> 1033 </span><span class="spaces">        </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno"> 1034 </span>
+<span class="lineno"> 1035 </span>-- | Detect the linked account number and write Signal config.
+<span class="lineno"> 1036 </span>detectAndWriteSignalConfig :: AgentEnv -&gt; Context -&gt; IO Context
+<span class="lineno"> 1037 </span><span class="decl"><span class="nottickedoff">detectAndWriteSignalConfig env ctx = do</span>
+<span class="lineno"> 1038 </span><span class="spaces">  </span><span class="nottickedoff">let send = _ch_send (_env_channel env) . OutgoingMessage</span>
+<span class="lineno"> 1039 </span><span class="spaces">  </span><span class="nottickedoff">-- signal-cli stores account info; try to list accounts</span>
+<span class="lineno"> 1040 </span><span class="spaces">  </span><span class="nottickedoff">acctResult &lt;- try @IOException $</span>
+<span class="lineno"> 1041 </span><span class="spaces">    </span><span class="nottickedoff">P.readProcess (P.proc &quot;signal-cli&quot; [&quot;listAccounts&quot;])</span>
+<span class="lineno"> 1042 </span><span class="spaces">  </span><span class="nottickedoff">case acctResult of</span>
+<span class="lineno"> 1043 </span><span class="spaces">    </span><span class="nottickedoff">Left _ -&gt; do</span>
+<span class="lineno"> 1044 </span><span class="spaces">      </span><span class="nottickedoff">-- Can't detect — ask user</span>
+<span class="lineno"> 1045 </span><span class="spaces">      </span><span class="nottickedoff">phoneNumber &lt;- T.strip &lt;$&gt; _ch_prompt (_env_channel env)</span>
+<span class="lineno"> 1046 </span><span class="spaces">        </span><span class="nottickedoff">&quot;What phone number was linked? (E.164 format): &quot;</span>
+<span class="lineno"> 1047 </span><span class="spaces">      </span><span class="nottickedoff">writeSignalConfig env phoneNumber ctx</span>
+<span class="lineno"> 1048 </span><span class="spaces">    </span><span class="nottickedoff">Right (_, out, _) -&gt; do</span>
+<span class="lineno"> 1049 </span><span class="spaces">      </span><span class="nottickedoff">let outText = T.strip (TE.decodeUtf8 (BL.toStrict out))</span>
+<span class="lineno"> 1050 </span><span class="spaces">          </span><span class="nottickedoff">-- Look for a line starting with + (phone number)</span>
+<span class="lineno"> 1051 </span><span class="spaces">          </span><span class="nottickedoff">phones = filter (&quot;+&quot; `T.isPrefixOf`) (map T.strip (T.lines outText))</span>
+<span class="lineno"> 1052 </span><span class="spaces">      </span><span class="nottickedoff">case phones of</span>
+<span class="lineno"> 1053 </span><span class="spaces">        </span><span class="nottickedoff">(phone:_) -&gt; do</span>
+<span class="lineno"> 1054 </span><span class="spaces">          </span><span class="nottickedoff">send $ &quot;Detected account: &quot; &lt;&gt; phone</span>
+<span class="lineno"> 1055 </span><span class="spaces">          </span><span class="nottickedoff">writeSignalConfig env phone ctx</span>
+<span class="lineno"> 1056 </span><span class="spaces">        </span><span class="nottickedoff">[] -&gt; do</span>
+<span class="lineno"> 1057 </span><span class="spaces">          </span><span class="nottickedoff">phoneNumber &lt;- T.strip &lt;$&gt; _ch_prompt (_env_channel env)</span>
+<span class="lineno"> 1058 </span><span class="spaces">            </span><span class="nottickedoff">&quot;Could not detect account. Phone number (E.164 format): &quot;</span>
+<span class="lineno"> 1059 </span><span class="spaces">          </span><span class="nottickedoff">writeSignalConfig env phoneNumber ctx</span></span>
+<span class="lineno"> 1060 </span>
+<span class="lineno"> 1061 </span>-- | Write Signal config to config.toml and confirm.
+<span class="lineno"> 1062 </span>writeSignalConfig :: AgentEnv -&gt; Text -&gt; Context -&gt; IO Context
+<span class="lineno"> 1063 </span><span class="decl"><span class="nottickedoff">writeSignalConfig env phoneNumber ctx = do</span>
+<span class="lineno"> 1064 </span><span class="spaces">  </span><span class="nottickedoff">let send = _ch_send (_env_channel env) . OutgoingMessage</span>
+<span class="lineno"> 1065 </span><span class="spaces">  </span><span class="nottickedoff">pureclawDir &lt;- getPureclawDir</span>
+<span class="lineno"> 1066 </span><span class="spaces">  </span><span class="nottickedoff">Dir.createDirectoryIfMissing True pureclawDir</span>
+<span class="lineno"> 1067 </span><span class="spaces">  </span><span class="nottickedoff">let configPath = pureclawDir &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno"> 1068 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno"> 1069 </span><span class="spaces">  </span><span class="nottickedoff">-- Load existing config, add signal settings</span>
+<span class="lineno"> 1070 </span><span class="spaces">  </span><span class="nottickedoff">existing &lt;- loadFileConfig configPath</span>
+<span class="lineno"> 1071 </span><span class="spaces">  </span><span class="nottickedoff">let updated = existing</span>
+<span class="lineno"> 1072 </span><span class="spaces">        </span><span class="nottickedoff">{ _fc_defaultChannel = Just &quot;signal&quot;</span>
+<span class="lineno"> 1073 </span><span class="spaces">        </span><span class="nottickedoff">, _fc_signal = Just FileSignalConfig</span>
+<span class="lineno"> 1074 </span><span class="spaces">            </span><span class="nottickedoff">{ _fsc_account        = Just phoneNumber</span>
+<span class="lineno"> 1075 </span><span class="spaces">            </span><span class="nottickedoff">, _fsc_dmPolicy       = Just &quot;open&quot;</span>
+<span class="lineno"> 1076 </span><span class="spaces">            </span><span class="nottickedoff">, _fsc_allowFrom      = Nothing</span>
+<span class="lineno"> 1077 </span><span class="spaces">            </span><span class="nottickedoff">, _fsc_textChunkLimit = Nothing  -- use default 6000</span>
+<span class="lineno"> 1078 </span><span class="spaces">            </span><span class="nottickedoff">}</span>
+<span class="lineno"> 1079 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno"> 1080 </span><span class="spaces">  </span><span class="nottickedoff">writeFileConfig configPath updated</span>
+<span class="lineno"> 1081 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno"> 1082 </span><span class="spaces">  </span><span class="nottickedoff">send $ T.intercalate &quot;\n&quot;</span>
+<span class="lineno"> 1083 </span><span class="spaces">    </span><span class="nottickedoff">[ &quot;&quot;</span>
+<span class="lineno"> 1084 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;Signal configured!&quot;</span>
+<span class="lineno"> 1085 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  Account: &quot; &lt;&gt; phoneNumber</span>
+<span class="lineno"> 1086 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  DM policy: open (accepts messages from anyone)&quot;</span>
+<span class="lineno"> 1087 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  Default channel: signal&quot;</span>
+<span class="lineno"> 1088 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno"> 1089 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;To start chatting:&quot;</span>
+<span class="lineno"> 1090 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  1. Restart PureClaw (or run: pureclaw --channel signal)&quot;</span>
+<span class="lineno"> 1091 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  2. Open Signal on your phone&quot;</span>
+<span class="lineno"> 1092 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  3. Send a message to &quot; &lt;&gt; phoneNumber</span>
+<span class="lineno"> 1093 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno"> 1094 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;To restrict access later, edit ~/.pureclaw/config.toml:&quot;</span>
+<span class="lineno"> 1095 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  [signal]&quot;</span>
+<span class="lineno"> 1096 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  dm_policy = \&quot;allowlist\&quot;&quot;</span>
+<span class="lineno"> 1097 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;  allow_from = [\&quot;&lt;your-uuid&gt;\&quot;]&quot;</span>
+<span class="lineno"> 1098 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;&quot;</span>
+<span class="lineno"> 1099 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;Your UUID will appear in the logs on first message.&quot;</span>
+<span class="lineno"> 1100 </span><span class="spaces">    </span><span class="nottickedoff">]</span>
+<span class="lineno"> 1101 </span><span class="spaces">  </span><span class="nottickedoff">pure ctx</span></span>
+<span class="lineno"> 1102 </span>
+<span class="lineno"> 1103 </span>-- ---------------------------------------------------------------------------
+<span class="lineno"> 1104 </span>-- Help rendering — derived from allCommandSpecs
+<span class="lineno"> 1105 </span>-- ---------------------------------------------------------------------------
+<span class="lineno"> 1106 </span>
+<span class="lineno"> 1107 </span>-- | Render the full command reference from 'allCommandSpecs'.
+<span class="lineno"> 1108 </span>renderHelpText :: [CommandSpec] -&gt; Text
+<span class="lineno"> 1109 </span><span class="decl"><span class="istickedoff">renderHelpText specs =</span>
+<span class="lineno"> 1110 </span><span class="spaces">  </span><span class="istickedoff">T.intercalate &quot;\n&quot;</span>
+<span class="lineno"> 1111 </span><span class="spaces">    </span><span class="istickedoff">(&quot;Slash commands:&quot; : concatMap renderGroup [minBound .. maxBound])</span>
+<span class="lineno"> 1112 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno"> 1113 </span><span class="spaces">    </span><span class="istickedoff">renderGroup g =</span>
+<span class="lineno"> 1114 </span><span class="spaces">      </span><span class="istickedoff">let gs = filter ((== g) . _cs_group) specs</span>
+<span class="lineno"> 1115 </span><span class="spaces">      </span><span class="istickedoff">in if <span class="tickonlyfalse">null gs</span></span>
+<span class="lineno"> 1116 </span><span class="spaces">         </span><span class="istickedoff">then <span class="nottickedoff">[]</span></span>
+<span class="lineno"> 1117 </span><span class="spaces">         </span><span class="istickedoff">else &quot;&quot; : (&quot;  &quot; &lt;&gt; groupHeading g &lt;&gt; &quot;:&quot;) : map renderSpec gs</span>
+<span class="lineno"> 1118 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno"> 1119 </span><span class="spaces">    </span><span class="istickedoff">renderSpec spec =</span>
+<span class="lineno"> 1120 </span><span class="spaces">      </span><span class="istickedoff">&quot;    &quot; &lt;&gt; padTo 26 (_cs_syntax spec) &lt;&gt; _cs_description spec</span>
+<span class="lineno"> 1121 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno"> 1122 </span><span class="spaces">    </span><span class="istickedoff">padTo n t = t &lt;&gt; T.replicate (max 1 (n - T.length t)) &quot; &quot;</span></span>
+
+</pre>
+</body>
+</html>

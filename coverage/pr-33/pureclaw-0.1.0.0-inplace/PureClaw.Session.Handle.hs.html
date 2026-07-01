@@ -1,0 +1,55 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Session.Handle
+<span class="lineno">    2 </span>  ( -- * Session handle (WU1 stub)
+<span class="lineno">    3 </span>    SessionHandle (..)
+<span class="lineno">    4 </span>  , mkNoOpSessionHandle
+<span class="lineno">    5 </span>  , noOpSessionHandle
+<span class="lineno">    6 </span>  ) where
+<span class="lineno">    7 </span>
+<span class="lineno">    8 </span>import PureClaw.Handles.Transcript (TranscriptHandle, mkNoOpTranscriptHandle)
+<span class="lineno">    9 </span>
+<span class="lineno">   10 </span>-- | Handle for the current conversation session. WU1 only provides a no-op
+<span class="lineno">   11 </span>-- placeholder so the agent loop can compile with the field added to
+<span class="lineno">   12 </span>-- 'PureClaw.Agent.Env.AgentEnv'. WU2 will extend this with metadata
+<span class="lineno">   13 </span>-- persistence, resume, and transcript directory management.
+<span class="lineno">   14 </span>data SessionHandle = SessionHandle
+<span class="lineno">   15 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_sh_transcript</span></span></span> :: TranscriptHandle
+<span class="lineno">   16 </span>    -- ^ Transcript handle owned by the session. In WU1 this is always the
+<span class="lineno">   17 </span>    -- no-op transcript; WU2 replaces it with a per-session file handle.
+<span class="lineno">   18 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_sh_dir</span></span></span>        :: FilePath
+<span class="lineno">   19 </span>    -- ^ On-disk session directory. Empty in WU1.
+<span class="lineno">   20 </span>  }
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>-- | A no-op session handle for tests and for WU1 (pre-session integration).
+<span class="lineno">   23 </span>mkNoOpSessionHandle :: IO SessionHandle
+<span class="lineno">   24 </span><span class="decl"><span class="istickedoff">mkNoOpSessionHandle = pure <span class="nottickedoff">noOpSessionHandle</span></span></span>
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>-- | Pure no-op session handle. Useful for tests that build 'AgentEnv'
+<span class="lineno">   27 </span>-- records inside pure @let@-bindings without threading 'IO'.
+<span class="lineno">   28 </span>noOpSessionHandle :: SessionHandle
+<span class="lineno">   29 </span><span class="decl"><span class="nottickedoff">noOpSessionHandle = SessionHandle</span>
+<span class="lineno">   30 </span><span class="spaces">  </span><span class="nottickedoff">{ _sh_transcript = mkNoOpTranscriptHandle</span>
+<span class="lineno">   31 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_dir        = &quot;&quot;</span>
+<span class="lineno">   32 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Vault.Passphrase
+<span class="lineno">    2 </span>  ( mkPassphraseVaultEncryptor
+<span class="lineno">    3 </span>  ) where
+<span class="lineno">    4 </span>
+<span class="lineno">    5 </span>import Control.Concurrent.STM
+<span class="lineno">    6 </span>import Crypto.KDF.PBKDF2 (Parameters (..), fastPBKDF2_SHA256)
+<span class="lineno">    7 </span>import Crypto.Random (getRandomBytes)
+<span class="lineno">    8 </span>import Data.ByteString (ByteString)
+<span class="lineno">    9 </span>import Data.ByteString qualified as BS
+<span class="lineno">   10 </span>
+<span class="lineno">   11 </span>import PureClaw.Security.Crypto (decrypt, encrypt)
+<span class="lineno">   12 </span>import PureClaw.Security.Secrets (mkSecretKey)
+<span class="lineno">   13 </span>import PureClaw.Security.Vault.Age (VaultEncryptor (..), VaultError (..))
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>-- Magic header identifying passphrase-encrypted vault files.
+<span class="lineno">   16 </span>magicHeader :: ByteString
+<span class="lineno">   17 </span><span class="decl"><span class="istickedoff">magicHeader = &quot;PCLAWPW1&quot;</span></span>
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>-- Magic prefix prepended to plaintext before encryption for passphrase verification.
+<span class="lineno">   20 </span>checkMagic :: ByteString
+<span class="lineno">   21 </span><span class="decl"><span class="istickedoff">checkMagic = &quot;PCLAWCHK&quot;</span></span>
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>saltLen :: Int
+<span class="lineno">   24 </span><span class="decl"><span class="istickedoff">saltLen = 32</span></span>
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>pbkdf2Params :: Parameters
+<span class="lineno">   27 </span><span class="decl"><span class="istickedoff">pbkdf2Params = Parameters { iterCounts = 100_000, outputLength = 32 }</span></span>
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Derive a 32-byte encryption key from a passphrase and salt using PBKDF2-SHA256.
+<span class="lineno">   30 </span>deriveKey :: ByteString -&gt; ByteString -&gt; ByteString
+<span class="lineno">   31 </span><span class="decl"><span class="istickedoff">deriveKey = fastPBKDF2_SHA256 pbkdf2Params</span></span>
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Create a passphrase-based vault encryptor.
+<span class="lineno">   34 </span>-- The IO action is called at most once to obtain the passphrase, then cached.
+<span class="lineno">   35 </span>mkPassphraseVaultEncryptor :: IO ByteString -&gt; IO VaultEncryptor
+<span class="lineno">   36 </span><span class="decl"><span class="istickedoff">mkPassphraseVaultEncryptor getPass = do</span>
+<span class="lineno">   37 </span><span class="spaces">  </span><span class="istickedoff">cache &lt;- newTVarIO Nothing</span>
+<span class="lineno">   38 </span><span class="spaces">  </span><span class="istickedoff">let getOrPrompt = do</span>
+<span class="lineno">   39 </span><span class="spaces">        </span><span class="istickedoff">c &lt;- readTVarIO cache</span>
+<span class="lineno">   40 </span><span class="spaces">        </span><span class="istickedoff">case c of</span>
+<span class="lineno">   41 </span><span class="spaces">          </span><span class="istickedoff">Just p  -&gt; pure p</span>
+<span class="lineno">   42 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">   43 </span><span class="spaces">            </span><span class="istickedoff">p &lt;- getPass</span>
+<span class="lineno">   44 </span><span class="spaces">            </span><span class="istickedoff">atomically (writeTVar cache (Just p))</span>
+<span class="lineno">   45 </span><span class="spaces">            </span><span class="istickedoff">pure p</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">pure VaultEncryptor</span>
+<span class="lineno">   47 </span><span class="spaces">    </span><span class="istickedoff">{ _ve_encrypt = \plaintext -&gt; do</span>
+<span class="lineno">   48 </span><span class="spaces">        </span><span class="istickedoff">passphrase &lt;- getOrPrompt</span>
+<span class="lineno">   49 </span><span class="spaces">        </span><span class="istickedoff">salt &lt;- getRandomBytes saltLen</span>
+<span class="lineno">   50 </span><span class="spaces">        </span><span class="istickedoff">let key = deriveKey passphrase salt</span>
+<span class="lineno">   51 </span><span class="spaces">        </span><span class="istickedoff">result &lt;- encrypt (mkSecretKey key) (checkMagic &lt;&gt; plaintext)</span>
+<span class="lineno">   52 </span><span class="spaces">        </span><span class="istickedoff">case result of</span>
+<span class="lineno">   53 </span><span class="spaces">          </span><span class="istickedoff">Left  _          -&gt; <span class="nottickedoff">pure (Left (VaultCorrupted &quot;encryption failed&quot;))</span></span>
+<span class="lineno">   54 </span><span class="spaces">          </span><span class="istickedoff">Right ciphertext -&gt; pure (Right (magicHeader &lt;&gt; salt &lt;&gt; ciphertext))</span>
+<span class="lineno">   55 </span><span class="spaces">    </span><span class="istickedoff">, _ve_decrypt = \ciphertext -&gt; do</span>
+<span class="lineno">   56 </span><span class="spaces">        </span><span class="istickedoff">passphrase &lt;- getOrPrompt</span>
+<span class="lineno">   57 </span><span class="spaces">        </span><span class="istickedoff">let (hdr, rest) = BS.splitAt (BS.length magicHeader) ciphertext</span>
+<span class="lineno">   58 </span><span class="spaces">        </span><span class="istickedoff">if hdr /= magicHeader</span>
+<span class="lineno">   59 </span><span class="spaces">          </span><span class="istickedoff">then pure (Left (VaultCorrupted &quot;not a passphrase-encrypted vault&quot;))</span>
+<span class="lineno">   60 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">   61 </span><span class="spaces">            </span><span class="istickedoff">let (salt, encrypted) = BS.splitAt saltLen rest</span>
+<span class="lineno">   62 </span><span class="spaces">            </span><span class="istickedoff">if BS.length salt &lt; saltLen</span>
+<span class="lineno">   63 </span><span class="spaces">              </span><span class="istickedoff">then pure (Left (VaultCorrupted &quot;truncated vault file&quot;))</span>
+<span class="lineno">   64 </span><span class="spaces">              </span><span class="istickedoff">else do</span>
+<span class="lineno">   65 </span><span class="spaces">                </span><span class="istickedoff">let key = deriveKey passphrase salt</span>
+<span class="lineno">   66 </span><span class="spaces">                </span><span class="istickedoff">case decrypt (mkSecretKey key) encrypted of</span>
+<span class="lineno">   67 </span><span class="spaces">                  </span><span class="istickedoff">Left  _ -&gt; <span class="nottickedoff">pure (Left (VaultCorrupted &quot;decryption failed&quot;))</span></span>
+<span class="lineno">   68 </span><span class="spaces">                  </span><span class="istickedoff">Right plain -&gt;</span>
+<span class="lineno">   69 </span><span class="spaces">                    </span><span class="istickedoff">if checkMagic `BS.isPrefixOf` plain</span>
+<span class="lineno">   70 </span><span class="spaces">                      </span><span class="istickedoff">then pure (Right (BS.drop (BS.length checkMagic) plain))</span>
+<span class="lineno">   71 </span><span class="spaces">                      </span><span class="istickedoff">else pure (Left (VaultCorrupted &quot;wrong passphrase&quot;))</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,699 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.AutoSpawn
+<span class="lineno">    3 </span>-- Description : Auto-spawn UX, close, resume, rename, crashed handling
+<span class="lineno">    4 </span>--               (Tabbed Chat WU9, A\/L\/X\/B\/S6\/S10 series).
+<span class="lineno">    5 </span>--
+<span class="lineno">    6 </span>-- The user-visible UX surface for tab creation, close, resume, rename,
+<span class="lineno">    7 </span>-- and crashed-tab handling. The dispatcher (WU5) routes parsed slash
+<span class="lineno">    8 </span>-- commands here; this module owns the @\/N@ switch UX (A-series), the
+<span class="lineno">    9 </span>-- close lifecycle on top of the per-kind factory '_tabHandle_close'
+<span class="lineno">   10 </span>-- (L-series), the crashed-tab retry prompt (X-series), and the rename
+<span class="lineno">   11 </span>-- handler (S10).
+<span class="lineno">   12 </span>--
+<span class="lineno">   13 </span>-- == @\/N@ switch UX (A-series, tmux-style packing model)
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- 'handleSwitch' implements the simple truth table:
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>--   * tab present → focus + recap (and Crashed observation, X1).
+<span class="lineno">   18 </span>--   * tab missing → emit an error banner; do NOT auto-spawn.
+<span class="lineno">   19 </span>--
+<span class="lineno">   20 </span>-- The previous &quot;auto-spawn on missing /N&quot; behaviour was retired in
+<span class="lineno">   21 </span>-- favour of the tmux packing model: tabs always occupy the lowest
+<span class="lineno">   22 </span>-- slots @\/0..K-1@, so @\/N@ with @N &gt;= K@ is always user error.
+<span class="lineno">   23 </span>--
+<span class="lineno">   24 </span>-- == 'handleDefault' first-run UX (K3)
+<span class="lineno">   25 </span>--
+<span class="lineno">   26 </span>-- The first-run case (no tab focused, registry empty) still
+<span class="lineno">   27 </span>-- implicit-spawns '_rc_defaultKind' at index 0 and forwards the typed
+<span class="lineno">   28 </span>-- text. This is what makes a brand-new user with no tabs able to just
+<span class="lineno">   29 </span>-- type a message and start talking — the K3 first-run path is the only
+<span class="lineno">   30 </span>-- surviving implicit-spawn surface after the tmux packing refactor.
+<span class="lineno">   31 </span>--
+<span class="lineno">   32 </span>-- == @\/tab new@ — always-lowest allocation
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- @\/tab new@ no longer accepts a user-supplied index: spawns always
+<span class="lineno">   35 </span>-- land at the lowest free slot via 'Registry.lowestFreeIndex'. The
+<span class="lineno">   36 </span>-- no-kind variant force-prompts the user; the with-kind variant spawns
+<span class="lineno">   37 </span>-- directly.
+<span class="lineno">   38 </span>--
+<span class="lineno">   39 </span>-- == Max-tab cap (S6)
+<span class="lineno">   40 </span>--
+<span class="lineno">   41 </span>-- Every spawn path consults '_rc_maxTabs' BEFORE calling the factory;
+<span class="lineno">   42 </span>-- exceeding the cap surfaces 'TabLimitExceeded' as a dispatcher
+<span class="lineno">   43 </span>-- 'PublicError'. The cap check lives in the dispatcher's 'spawnTabWith'
+<span class="lineno">   44 </span>-- helper (WU5) so AutoSpawn does not duplicate the bookkeeping; we
+<span class="lineno">   45 </span>-- merely surface the redacted error to the user.
+<span class="lineno">   46 </span>--
+<span class="lineno">   47 </span>-- == Crashed UX (X-series)
+<span class="lineno">   48 </span>--
+<span class="lineno">   49 </span>-- Original spawn args are retained per-tab in a @Map Int SpawnArgs@
+<span class="lineno">   50 </span>-- carried by the dispatcher's 'DispatcherState' so the X2\/X3 retry
+<span class="lineno">   51 </span>-- path can replay the exact original args (per design OQ-6: original
+<span class="lineno">   52 </span>-- args, not current defaults).
+<span class="lineno">   53 </span>--
+<span class="lineno">   54 </span>-- See @docs\/tabbed-chat.md@ §&quot;Auto-spawn behavior (A-series)&quot;,
+<span class="lineno">   55 </span>-- §&quot;Lifecycle \/ close (L-series)&quot;, §&quot;Crashed tab UX (X-series)&quot;,
+<span class="lineno">   56 </span>-- §&quot;Dashboard (B-series)&quot;, and §&quot;Security (S-series)&quot; S6 \/ S10.
+<span class="lineno">   57 </span>module PureClaw.Routing.AutoSpawn
+<span class="lineno">   58 </span>  ( -- * Spawn-args record (retained per-tab for X2\/X3 retry)
+<span class="lineno">   59 </span>    SpawnArgs (..)
+<span class="lineno">   60 </span>    -- * Banner-emit + spawn-IO injection types
+<span class="lineno">   61 </span>  , BannerEmit
+<span class="lineno">   62 </span>  , SpawnIO
+<span class="lineno">   63 </span>  , RenumberCallback
+<span class="lineno">   64 </span>    -- * Entry points (called by Dispatcher)
+<span class="lineno">   65 </span>  , handleSwitch
+<span class="lineno">   66 </span>  , handleDefault
+<span class="lineno">   67 </span>  , handleNew
+<span class="lineno">   68 </span>  , handleClose
+<span class="lineno">   69 </span>  , handleFocus
+<span class="lineno">   70 </span>  , handleRename
+<span class="lineno">   71 </span>  , handleResume
+<span class="lineno">   72 </span>  , handleListTabs
+<span class="lineno">   73 </span>    -- * Helpers exported for testing
+<span class="lineno">   74 </span>  , tabKindArgToKind
+<span class="lineno">   75 </span>  , kindKeyword
+<span class="lineno">   76 </span>  , splitArgs
+<span class="lineno">   77 </span>  , recapText
+<span class="lineno">   78 </span>  , rememberArgsForTest
+<span class="lineno">   79 </span>  , missingTabBanner
+<span class="lineno">   80 </span>  , shiftMapKeysAfter
+<span class="lineno">   81 </span>  ) where
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>import Control.Exception (SomeException, try)
+<span class="lineno">   84 </span>import Data.IORef
+<span class="lineno">   85 </span>  ( IORef
+<span class="lineno">   86 </span>  , atomicModifyIORef'
+<span class="lineno">   87 </span>  , modifyIORef'
+<span class="lineno">   88 </span>  , readIORef
+<span class="lineno">   89 </span>  , writeIORef
+<span class="lineno">   90 </span>  )
+<span class="lineno">   91 </span>import Data.Map.Strict (Map)
+<span class="lineno">   92 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   93 </span>import Data.Text (Text)
+<span class="lineno">   94 </span>import Data.Text qualified as T
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>import PureClaw.Agent.Env (AgentEnv (..))
+<span class="lineno">   97 </span>import PureClaw.Agent.SlashCommands (TabKindArg (..))
+<span class="lineno">   98 </span>import PureClaw.Core.Types (ModelId (..), ProviderId (..), SessionId (..))
+<span class="lineno">   99 </span>import PureClaw.Handles.Tab
+<span class="lineno">  100 </span>  ( CloseMode (..)
+<span class="lineno">  101 </span>  , NameError (..)
+<span class="lineno">  102 </span>  , TabError (..)
+<span class="lineno">  103 </span>  , TabHandle (..)
+<span class="lineno">  104 </span>  , TabIndex
+<span class="lineno">  105 </span>  , TabKind (..)
+<span class="lineno">  106 </span>  , TabStatus (..)
+<span class="lineno">  107 </span>  , mkTabIndex
+<span class="lineno">  108 </span>  , toPublicTabError
+<span class="lineno">  109 </span>  , unPublicTabError
+<span class="lineno">  110 </span>  , unTabIndex
+<span class="lineno">  111 </span>  , unTabName
+<span class="lineno">  112 </span>  )
+<span class="lineno">  113 </span>import PureClaw.Session.Kind
+<span class="lineno">  114 </span>  ( HarnessFlavour (..)
+<span class="lineno">  115 </span>  , HarnessSpec (..)
+<span class="lineno">  116 </span>  , ProviderSpec (..)
+<span class="lineno">  117 </span>  , SessionKind (..)
+<span class="lineno">  118 </span>  , SshConfig (..)
+<span class="lineno">  119 </span>  , TerminalBackend (..)
+<span class="lineno">  120 </span>  , TmuxConfig (..)
+<span class="lineno">  121 </span>  )
+<span class="lineno">  122 </span>import PureClaw.Routing.Dashboard (renderDashboard)
+<span class="lineno">  123 </span>import PureClaw.Routing.PromptRenderer (PromptRenderer (..))
+<span class="lineno">  124 </span>import PureClaw.Routing.Registry qualified as Registry
+<span class="lineno">  125 </span>import PureClaw.Routing.Types (RoutingConfig (..))
+<span class="lineno">  126 </span>
+<span class="lineno">  127 </span>
+<span class="lineno">  128 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  129 </span>-- SpawnArgs — retained per-tab for X2\/X3 retry
+<span class="lineno">  130 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  131 </span>
+<span class="lineno">  132 </span>-- | The kind + raw argument list originally supplied to a tab's spawn
+<span class="lineno">  133 </span>-- factory. Retained per-tab so the X2\/X3 crashed-tab retry path can
+<span class="lineno">  134 </span>-- replay the exact args (per design OQ-6).
+<span class="lineno">  135 </span>data SpawnArgs = SpawnArgs
+<span class="lineno">  136 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sa_kind</span></span></span> :: !TabKind
+<span class="lineno">  137 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sa_args</span></span></span> :: ![Text]
+<span class="lineno">  138 </span>  }
+<span class="lineno">  139 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>
+<span class="lineno">  142 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  143 </span>-- Entry-point injection types — minimised to avoid an import cycle
+<span class="lineno">  144 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>-- | Production-side spawn function injected by the dispatcher into
+<span class="lineno">  147 </span>-- AutoSpawn at call time. Mirrors the dispatcher's @spawnTab@ shape
+<span class="lineno">  148 </span>-- without introducing an import cycle (Dispatcher imports AutoSpawn,
+<span class="lineno">  149 </span>-- not the other way round).
+<span class="lineno">  150 </span>type SpawnIO =
+<span class="lineno">  151 </span>     TabKind
+<span class="lineno">  152 </span>  -&gt; [Text]
+<span class="lineno">  153 </span>  -&gt; IO (Either TabError TabIndex)
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>-- | Banner emitter — wraps the dispatcher's @emitDispatcherBanner@ so
+<span class="lineno">  156 </span>-- AutoSpawn does not need to import 'Routing.Dispatcher' (which would
+<span class="lineno">  157 </span>-- create a cycle).
+<span class="lineno">  158 </span>type BannerEmit = Text -&gt; IO ()
+<span class="lineno">  159 </span>
+<span class="lineno">  160 </span>
+<span class="lineno">  161 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  162 </span>-- handleSwitch — /N (tmux packing model)
+<span class="lineno">  163 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  164 </span>
+<span class="lineno">  165 </span>-- | Handle @\/N@ (Switch). Truth table (tmux packing model):
+<span class="lineno">  166 </span>--
+<span class="lineno">  167 </span>-- * tab present → focus, emit recap, observe Crashed status (X1).
+<span class="lineno">  168 </span>-- * tab missing → emit an error banner ('missingTabBanner'); no
+<span class="lineno">  169 </span>--   auto-spawn.
+<span class="lineno">  170 </span>--
+<span class="lineno">  171 </span>-- The previous &quot;auto-spawn on missing /N&quot; behaviour was retired with
+<span class="lineno">  172 </span>-- the tmux packing refactor: because tabs are always packed in the
+<span class="lineno">  173 </span>-- lowest slots, @\/N@ for any @N@ outside the open range is always
+<span class="lineno">  174 </span>-- user error. The K3 first-run UX (no focus, registry empty, plain
+<span class="lineno">  175 </span>-- text) still implicit-spawns via 'handleDefault'.
+<span class="lineno">  176 </span>handleSwitch
+<span class="lineno">  177 </span>  :: AgentEnv
+<span class="lineno">  178 </span>  -&gt; BannerEmit
+<span class="lineno">  179 </span>  -&gt; TabIndex
+<span class="lineno">  180 </span>  -&gt; IO ()
+<span class="lineno">  181 </span><span class="decl"><span class="istickedoff">handleSwitch env emit idx = do</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="istickedoff">mTab &lt;- Registry.lookupTab (_env_tabs env) idx</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">case mTab of</span>
+<span class="lineno">  184 </span><span class="spaces">    </span><span class="istickedoff">Just h  -&gt; focusExisting env emit idx h</span>
+<span class="lineno">  185 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; emit (missingTabBanner idx)</span></span>
+<span class="lineno">  186 </span>
+<span class="lineno">  187 </span>-- | Banner emitted when @\/N@ references a tab that does not exist.
+<span class="lineno">  188 </span>--
+<span class="lineno">  189 </span>-- Phrased to nudge the user toward the (always-allocating) @\/tab new@
+<span class="lineno">  190 </span>-- command rather than the old &quot;auto-spawn at the requested index&quot;
+<span class="lineno">  191 </span>-- behaviour, which no longer exists.
+<span class="lineno">  192 </span>missingTabBanner :: TabIndex -&gt; Text
+<span class="lineno">  193 </span><span class="decl"><span class="istickedoff">missingTabBanner idx =</span>
+<span class="lineno">  194 </span><span class="spaces">  </span><span class="istickedoff">&quot;/&quot; &lt;&gt; tShowIdx idx</span>
+<span class="lineno">  195 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; &quot;: no such tab — use /tab new to create one&quot;</span></span>
+<span class="lineno">  196 </span>
+<span class="lineno">  197 </span>
+<span class="lineno">  198 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  199 </span>-- handleDefault — Default text input with empty focus (L6 + K3)
+<span class="lineno">  200 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  201 </span>
+<span class="lineno">  202 </span>-- | Handle the case where the channel layer delivered a plain-text
+<span class="lineno">  203 </span>-- 'PureClaw.Routing.Types.Default' input AND '_env_focus' is 'Nothing'
+<span class="lineno">  204 </span>-- (no tab focused).
+<span class="lineno">  205 </span>--
+<span class="lineno">  206 </span>-- L6 \/ K3 specifies: implicitly spawn '_rc_defaultKind' at the lowest
+<span class="lineno">  207 </span>-- free index (typically 0), then enqueue the text on the new tab.
+<span class="lineno">  208 </span>--
+<span class="lineno">  209 </span>-- If the spawn fails (e.g. rate-limit, max-tabs hit), surface the
+<span class="lineno">  210 </span>-- redacted public error via the banner emitter.
+<span class="lineno">  211 </span>handleDefault
+<span class="lineno">  212 </span>  :: AgentEnv
+<span class="lineno">  213 </span>  -&gt; SpawnIO
+<span class="lineno">  214 </span>  -&gt; BannerEmit
+<span class="lineno">  215 </span>  -&gt; IORef (Map Int SpawnArgs)
+<span class="lineno">  216 </span>  -&gt; Text
+<span class="lineno">  217 </span>  -&gt; IO ()
+<span class="lineno">  218 </span><span class="decl"><span class="istickedoff">handleDefault env spawnIO emit argsRef text = do</span>
+<span class="lineno">  219 </span><span class="spaces">  </span><span class="istickedoff">let rc = _env_routingConfig env</span>
+<span class="lineno">  220 </span><span class="spaces">      </span><span class="istickedoff">kind = _rc_defaultKind rc</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">r &lt;- spawnIO kind []</span>
+<span class="lineno">  222 </span><span class="spaces">  </span><span class="istickedoff">case r of</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt;</span>
+<span class="lineno">  224 </span><span class="spaces">      </span><span class="istickedoff">emit (&quot;/0: &quot; &lt;&gt; unPublicTabError (toPublicTabError e))</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="istickedoff">Right newIdx -&gt; do</span>
+<span class="lineno">  226 </span><span class="spaces">      </span><span class="istickedoff">rememberArgs argsRef newIdx kind []</span>
+<span class="lineno">  227 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_env_focus env) (Just newIdx)</span>
+<span class="lineno">  228 </span><span class="spaces">      </span><span class="istickedoff">enqueuePayloadOn env <span class="nottickedoff">emit</span> newIdx text</span></span>
+<span class="lineno">  229 </span>
+<span class="lineno">  230 </span>
+<span class="lineno">  231 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  232 </span>-- handleNew — /tab new [&lt;kind&gt; [&lt;args&gt;]]
+<span class="lineno">  233 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  234 </span>
+<span class="lineno">  235 </span>-- | Handle @\/tab new [\&lt;kind\&gt; [\&lt;arg-text\&gt;]]@ (tmux packing model).
+<span class="lineno">  236 </span>--
+<span class="lineno">  237 </span>-- Truth table:
+<span class="lineno">  238 </span>--
+<span class="lineno">  239 </span>-- * @\/tab new@ (no kind)            → force-prompt at the next free
+<span class="lineno">  240 </span>--   slot.
+<span class="lineno">  241 </span>-- * @\/tab new \&lt;kind\&gt; [\&lt;args\&gt;]@  → spawn at the lowest free slot
+<span class="lineno">  242 </span>--   via 'SpawnIO' (the dispatcher's rate-limited factory), focus it,
+<span class="lineno">  243 </span>--   and emit a confirmation banner.
+<span class="lineno">  244 </span>-- * Spawn failure (rate-limit, cap, factory failure, etc.) → redacted
+<span class="lineno">  245 </span>--   'PublicError' banner.
+<span class="lineno">  246 </span>--
+<span class="lineno">  247 </span>-- The previous &quot;user picks the slot&quot; behaviour is gone: new tabs are
+<span class="lineno">  248 </span>-- always allocated at the lowest free index (matches tmux
+<span class="lineno">  249 </span>-- @renumber-windows on@ semantics). The slot for the force-prompt
+<span class="lineno">  250 </span>-- banner is determined by 'Registry.lowestFreeIndex' so the prompt
+<span class="lineno">  251 </span>-- text shows the user where the spawn would land.
+<span class="lineno">  252 </span>handleNew
+<span class="lineno">  253 </span>  :: AgentEnv
+<span class="lineno">  254 </span>  -&gt; PromptRenderer
+<span class="lineno">  255 </span>  -&gt; SpawnIO
+<span class="lineno">  256 </span>  -&gt; BannerEmit
+<span class="lineno">  257 </span>  -&gt; IORef (Map Int SpawnArgs)
+<span class="lineno">  258 </span>  -&gt; Maybe TabKindArg  -- ^ kind keyword, if supplied
+<span class="lineno">  259 </span>  -&gt; Maybe Text        -- ^ arg text, if supplied
+<span class="lineno">  260 </span>  -&gt; IO ()
+<span class="lineno">  261 </span><span class="decl"><span class="istickedoff">handleNew env renderer spawnIO emit argsRef mKind mArgs = do</span>
+<span class="lineno">  262 </span><span class="spaces">  </span><span class="istickedoff">let rc = _env_routingConfig env</span>
+<span class="lineno">  263 </span><span class="spaces">  </span><span class="istickedoff">case mKind of</span>
+<span class="lineno">  264 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  265 </span><span class="spaces">      </span><span class="istickedoff">-- Force-prompt: surface the index where the spawn would land so</span>
+<span class="lineno">  266 </span><span class="spaces">      </span><span class="istickedoff">-- the prompt UX has a target to render. If the cap is full, we</span>
+<span class="lineno">  267 </span><span class="spaces">      </span><span class="istickedoff">-- emit a redacted PublicError instead of a prompt for a slot</span>
+<span class="lineno">  268 </span><span class="spaces">      </span><span class="istickedoff">-- that doesn't exist.</span>
+<span class="lineno">  269 </span><span class="spaces">      </span><span class="istickedoff">mFree &lt;- Registry.lowestFreeIndex (_env_tabs env) (_rc_maxTabs rc)</span>
+<span class="lineno">  270 </span><span class="spaces">      </span><span class="istickedoff">case mFree of</span>
+<span class="lineno">  271 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  272 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">emit (&quot;/tab new: &quot;</span></span>
+<span class="lineno">  273 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; unPublicTabError</span></span>
+<span class="lineno">  274 </span><span class="spaces">                     </span><span class="istickedoff"><span class="nottickedoff">(toPublicTabError (TabLimitExceeded (_rc_maxTabs rc))))</span></span>
+<span class="lineno">  275 </span><span class="spaces">        </span><span class="istickedoff">Just idx -&gt;</span>
+<span class="lineno">  276 </span><span class="spaces">          </span><span class="istickedoff">emit (_pr_renderSpawnPrompt renderer idx Nothing)</span>
+<span class="lineno">  277 </span><span class="spaces">    </span><span class="istickedoff">Just kindArg -&gt; do</span>
+<span class="lineno">  278 </span><span class="spaces">      </span><span class="istickedoff">let kind = tabKindArgToKind kindArg</span>
+<span class="lineno">  279 </span><span class="spaces">          </span><span class="istickedoff">args = splitArgs mArgs</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- spawnIO kind args</span>
+<span class="lineno">  281 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  282 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt;</span>
+<span class="lineno">  283 </span><span class="spaces">          </span><span class="istickedoff">-- We don't have a known target index at this point — the</span>
+<span class="lineno">  284 </span><span class="spaces">          </span><span class="istickedoff">-- spawn never assigned one. Emit a generic /tab new banner.</span>
+<span class="lineno">  285 </span><span class="spaces">          </span><span class="istickedoff">emit (&quot;/tab new: &quot;</span>
+<span class="lineno">  286 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; unPublicTabError (toPublicTabError e))</span>
+<span class="lineno">  287 </span><span class="spaces">        </span><span class="istickedoff">Right newIdx -&gt; do</span>
+<span class="lineno">  288 </span><span class="spaces">          </span><span class="istickedoff">rememberArgs argsRef newIdx kind args</span>
+<span class="lineno">  289 </span><span class="spaces">          </span><span class="istickedoff">writeIORef (_env_focus env) (Just newIdx)</span>
+<span class="lineno">  290 </span><span class="spaces">          </span><span class="istickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx newIdx &lt;&gt; &quot;: spawned (&quot;</span>
+<span class="lineno">  291 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; kindKeyword kind &lt;&gt; &quot;)&quot;)</span></span>
+<span class="lineno">  292 </span>
+<span class="lineno">  293 </span>
+<span class="lineno">  294 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  295 </span>-- handleClose — /tab close N [--force] (tmux-style renumber)
+<span class="lineno">  296 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  297 </span>
+<span class="lineno">  298 </span>-- | The post-close renumber callback. The dispatcher passes in a
+<span class="lineno">  299 </span>-- closure that shifts its side-maps (spawn-args, pending-retry, etc.)
+<span class="lineno">  300 </span>-- down by one starting at @closedIdx + 1@. AutoSpawn calls this AFTER
+<span class="lineno">  301 </span>-- it has driven the registry-side renumber so the side maps stay in
+<span class="lineno">  302 </span>-- sync with the registry's view of slot ownership.
+<span class="lineno">  303 </span>type RenumberCallback = Int -&gt; IO ()
+<span class="lineno">  304 </span>
+<span class="lineno">  305 </span>-- | Handle @\/tab close N [--force]@ with tmux-style packing.
+<span class="lineno">  306 </span>--
+<span class="lineno">  307 </span>-- Truth table:
+<span class="lineno">  308 </span>--
+<span class="lineno">  309 </span>-- * N missing  → 'TabNotFound' (L5).
+<span class="lineno">  310 </span>-- * N present  → '_tabHandle_close' (graceful or force);
+<span class="lineno">  311 </span>--   remove the registry entry; shift every remaining tab at index
+<span class="lineno">  312 </span>--   @\&gt; N@ down by one (tmux @renumber-windows on@ model); drop the
+<span class="lineno">  313 </span>--   SpawnArgs entry for @N@ then shift remaining SpawnArgs keys;
+<span class="lineno">  314 </span>--   reconcile '_env_focus' (was N → cleared; was \&gt; N → decremented).
+<span class="lineno">  315 </span>--
+<span class="lineno">  316 </span>-- The renumber pass is done under a single 'atomicModifyIORef'' for
+<span class="lineno">  317 </span>-- '_env_tabs' and '_env_runners' so a concurrent reader (the
+<span class="lineno">  318 </span>-- dispatcher is the only writer per E3) always observes a consistent
+<span class="lineno">  319 </span>-- contiguous slot layout. The 'RenumberCallback' lets the caller
+<span class="lineno">  320 </span>-- (Dispatcher) apply the same shift to side maps that AutoSpawn does
+<span class="lineno">  321 </span>-- not own.
+<span class="lineno">  322 </span>--
+<span class="lineno">  323 </span>-- The 'TabHandle._tabHandle_index' field of any remaining handle is
+<span class="lineno">  324 </span>-- /not/ rewritten — it reflects the creation index and is treated as
+<span class="lineno">  325 </span>-- advisory after a renumber. The authoritative current slot is the
+<span class="lineno">  326 </span>-- registry key.
+<span class="lineno">  327 </span>handleClose
+<span class="lineno">  328 </span>  :: AgentEnv
+<span class="lineno">  329 </span>  -&gt; BannerEmit
+<span class="lineno">  330 </span>  -&gt; IORef (Map Int SpawnArgs)
+<span class="lineno">  331 </span>  -&gt; RenumberCallback  -- ^ side-map shift (dispatcher passes the
+<span class="lineno">  332 </span>                       --   callback that shifts pendingRetry etc.)
+<span class="lineno">  333 </span>  -&gt; Int               -- ^ requested index
+<span class="lineno">  334 </span>  -&gt; Bool              -- ^ True = --force
+<span class="lineno">  335 </span>  -&gt; IO ()
+<span class="lineno">  336 </span><span class="decl"><span class="istickedoff">handleClose env emit argsRef renumber rawIdx force =</span>
+<span class="lineno">  337 </span><span class="spaces">  </span><span class="istickedoff">case mkTabIndex rawIdx of</span>
+<span class="lineno">  338 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt;</span>
+<span class="lineno">  339 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">emit (&quot;/&quot; &lt;&gt; T.pack (show rawIdx) &lt;&gt; &quot;: tab: invalid index&quot;)</span></span>
+<span class="lineno">  340 </span><span class="spaces">    </span><span class="istickedoff">Just idx -&gt; do</span>
+<span class="lineno">  341 </span><span class="spaces">      </span><span class="istickedoff">removed &lt;- Registry.removeTab (_env_tabs env) idx</span>
+<span class="lineno">  342 </span><span class="spaces">      </span><span class="istickedoff">case removed of</span>
+<span class="lineno">  343 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: &quot;</span>
+<span class="lineno">  344 </span><span class="spaces">                          </span><span class="istickedoff">&lt;&gt; unPublicTabError</span>
+<span class="lineno">  345 </span><span class="spaces">                               </span><span class="istickedoff">(toPublicTabError (TabNotFound rawIdx)))</span>
+<span class="lineno">  346 </span><span class="spaces">        </span><span class="istickedoff">Just h  -&gt; do</span>
+<span class="lineno">  347 </span><span class="spaces">          </span><span class="istickedoff">safeIgnore (_tabHandle_close h closeMode)</span>
+<span class="lineno">  348 </span><span class="spaces">          </span><span class="istickedoff">-- tmux packing: shift every remaining tab &gt; closedIdx down</span>
+<span class="lineno">  349 </span><span class="spaces">          </span><span class="istickedoff">-- by one so the registry stays contiguous starting at 0.</span>
+<span class="lineno">  350 </span><span class="spaces">          </span><span class="istickedoff">let closedN = unTabIndex idx</span>
+<span class="lineno">  351 </span><span class="spaces">          </span><span class="istickedoff">atomicModifyIORef' (_env_tabs env) $ \m -&gt;</span>
+<span class="lineno">  352 </span><span class="spaces">            </span><span class="istickedoff">(Registry.packAfterRemove closedN m, ())</span>
+<span class="lineno">  353 </span><span class="spaces">          </span><span class="istickedoff">atomicModifyIORef' (_env_runners env) $ \m -&gt;</span>
+<span class="lineno">  354 </span><span class="spaces">            </span><span class="istickedoff">(Registry.packAfterRemove <span class="nottickedoff">closedN</span> m, ())</span>
+<span class="lineno">  355 </span><span class="spaces">          </span><span class="istickedoff">-- Side-map shifts: drop the spawn-args for the closed slot,</span>
+<span class="lineno">  356 </span><span class="spaces">          </span><span class="istickedoff">-- then shift remaining keys down. The dispatcher's</span>
+<span class="lineno">  357 </span><span class="spaces">          </span><span class="istickedoff">-- 'RenumberCallback' handles its own pending-retry map and</span>
+<span class="lineno">  358 </span><span class="spaces">          </span><span class="istickedoff">-- any other dispatcher-owned side state.</span>
+<span class="lineno">  359 </span><span class="spaces">          </span><span class="istickedoff">atomicModifyIORef' argsRef $ \m -&gt;</span>
+<span class="lineno">  360 </span><span class="spaces">            </span><span class="istickedoff">( shiftMapKeysAfter closedN (Map.delete closedN m), () )</span>
+<span class="lineno">  361 </span><span class="spaces">          </span><span class="istickedoff">renumber closedN</span>
+<span class="lineno">  362 </span><span class="spaces">          </span><span class="istickedoff">-- Reconcile focus: closed tab → Nothing; tabs above → -1.</span>
+<span class="lineno">  363 </span><span class="spaces">          </span><span class="istickedoff">updateFocusOnClose env idx</span>
+<span class="lineno">  364 </span><span class="spaces">          </span><span class="istickedoff">emit <span class="nottickedoff">(&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: closed&quot;)</span></span>
+<span class="lineno">  365 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  366 </span><span class="spaces">    </span><span class="istickedoff">closeMode = if force then CloseForce else CloseGraceful</span></span>
+<span class="lineno">  367 </span>
+<span class="lineno">  368 </span>-- | After a close (with tmux-style renumber), reconcile '_env_focus':
+<span class="lineno">  369 </span>--
+<span class="lineno">  370 </span>--   * focused tab was the closed one → clear focus (the dispatcher's
+<span class="lineno">  371 </span>--     K3 implicit-spawn path will pick up the next 'Default' input);
+<span class="lineno">  372 </span>--   * focused tab was strictly greater than the closed one →
+<span class="lineno">  373 </span>--     decrement the focus index by one (it just got renumbered);
+<span class="lineno">  374 </span>--   * focused tab was strictly less than the closed one → unchanged.
+<span class="lineno">  375 </span>updateFocusOnClose :: AgentEnv -&gt; TabIndex -&gt; IO ()
+<span class="lineno">  376 </span><span class="decl"><span class="istickedoff">updateFocusOnClose env closedIdx = do</span>
+<span class="lineno">  377 </span><span class="spaces">  </span><span class="istickedoff">mFocus &lt;- readIORef (_env_focus env)</span>
+<span class="lineno">  378 </span><span class="spaces">  </span><span class="istickedoff">case mFocus of</span>
+<span class="lineno">  379 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  380 </span><span class="spaces">    </span><span class="istickedoff">Just f</span>
+<span class="lineno">  381 </span><span class="spaces">      </span><span class="istickedoff">| f == closedIdx -&gt;</span>
+<span class="lineno">  382 </span><span class="spaces">          </span><span class="istickedoff">writeIORef (_env_focus env) Nothing</span>
+<span class="lineno">  383 </span><span class="spaces">      </span><span class="istickedoff">| unTabIndex f &gt; unTabIndex closedIdx -&gt;</span>
+<span class="lineno">  384 </span><span class="spaces">          </span><span class="istickedoff">-- The focused tab was renumbered down by one.</span>
+<span class="lineno">  385 </span><span class="spaces">          </span><span class="istickedoff">writeIORef (_env_focus env) (mkTabIndex (unTabIndex f - 1))</span>
+<span class="lineno">  386 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  387 </span>
+<span class="lineno">  388 </span>-- | Shift the keys of a 'Data.Map.Strict.Map' (Int-keyed) down by one
+<span class="lineno">  389 </span>-- for every key strictly greater than @k@. Mirrors
+<span class="lineno">  390 </span>-- 'Registry.packAfterRemove' for 'IntMap' but works on the generic
+<span class="lineno">  391 </span>-- 'Map' that the dispatcher uses for spawn-args and pending-retry side
+<span class="lineno">  392 </span>-- state.
+<span class="lineno">  393 </span>shiftMapKeysAfter :: Int -&gt; Map Int v -&gt; Map Int v
+<span class="lineno">  394 </span><span class="decl"><span class="istickedoff">shiftMapKeysAfter k = Map.foldlWithKey'</span>
+<span class="lineno">  395 </span><span class="spaces">  </span><span class="istickedoff">(\acc i v -&gt;</span>
+<span class="lineno">  396 </span><span class="spaces">     </span><span class="istickedoff">if <span class="tickonlytrue">i &gt; k</span></span>
+<span class="lineno">  397 </span><span class="spaces">       </span><span class="istickedoff">then Map.insert (i - 1) v acc</span>
+<span class="lineno">  398 </span><span class="spaces">       </span><span class="istickedoff">else <span class="nottickedoff">Map.insert i v acc</span>)</span>
+<span class="lineno">  399 </span><span class="spaces">  </span><span class="istickedoff">Map.empty</span></span>
+<span class="lineno">  400 </span>
+<span class="lineno">  401 </span>
+<span class="lineno">  402 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  403 </span>-- handleFocus — /tab focus N (functional alias of /N)
+<span class="lineno">  404 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  405 </span>
+<span class="lineno">  406 </span>-- | Handle @\/tab focus N@. Functional alias of @\/N@; delegates to
+<span class="lineno">  407 </span>-- 'handleSwitch'.
+<span class="lineno">  408 </span>handleFocus
+<span class="lineno">  409 </span>  :: AgentEnv
+<span class="lineno">  410 </span>  -&gt; BannerEmit
+<span class="lineno">  411 </span>  -&gt; Int     -- ^ requested index
+<span class="lineno">  412 </span>  -&gt; IO ()
+<span class="lineno">  413 </span><span class="decl"><span class="istickedoff">handleFocus env emit rawIdx =</span>
+<span class="lineno">  414 </span><span class="spaces">  </span><span class="istickedoff">case mkTabIndex rawIdx of</span>
+<span class="lineno">  415 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt;</span>
+<span class="lineno">  416 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">emit (&quot;/&quot; &lt;&gt; T.pack (show rawIdx) &lt;&gt; &quot;: tab: invalid index&quot;)</span></span>
+<span class="lineno">  417 </span><span class="spaces">    </span><span class="istickedoff">Just idx -&gt;</span>
+<span class="lineno">  418 </span><span class="spaces">      </span><span class="istickedoff">handleSwitch env emit idx</span></span>
+<span class="lineno">  419 </span>
+<span class="lineno">  420 </span>
+<span class="lineno">  421 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  422 </span>-- handleRename — /tab rename N &lt;name&gt; (S10)
+<span class="lineno">  423 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  424 </span>
+<span class="lineno">  425 </span>-- | Handle @\/tab rename N \&lt;name\&gt;@. The user-supplied name passes
+<span class="lineno">  426 </span>-- through the caller-supplied sanitizer (typically
+<span class="lineno">  427 </span>-- 'PureClaw.Routing.Parse.sanitizeTabName'); on success the new name
+<span class="lineno">  428 </span>-- is announced; on failure a redacted public error is emitted.
+<span class="lineno">  429 </span>--
+<span class="lineno">  430 </span>-- /WU9 scope note:/ rename in v1 is observable-only at the registry
+<span class="lineno">  431 </span>-- level — the new name is reported back to the user; persisting the
+<span class="lineno">  432 </span>-- renamed label requires mutating the 'TabHandle' record (currently
+<span class="lineno">  433 </span>-- sealed). For v1 we surface the rename intent and the sanitization
+<span class="lineno">  434 </span>-- outcome; the in-place name swap lands in a v1.5 refinement that
+<span class="lineno">  435 </span>-- replaces the 'TabHandle' field with a mutable 'IORef TabName'.
+<span class="lineno">  436 </span>handleRename
+<span class="lineno">  437 </span>  :: AgentEnv
+<span class="lineno">  438 </span>  -&gt; BannerEmit
+<span class="lineno">  439 </span>  -&gt; (Text -&gt; Either NameError Text)  -- ^ sanitizer
+<span class="lineno">  440 </span>  -&gt; Int       -- ^ requested index
+<span class="lineno">  441 </span>  -&gt; Text      -- ^ requested new name (raw)
+<span class="lineno">  442 </span>  -&gt; IO ()
+<span class="lineno">  443 </span><span class="decl"><span class="istickedoff">handleRename env emit sanitize rawIdx rawName =</span>
+<span class="lineno">  444 </span><span class="spaces">  </span><span class="istickedoff">case mkTabIndex rawIdx of</span>
+<span class="lineno">  445 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt;</span>
+<span class="lineno">  446 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">emit (&quot;/&quot; &lt;&gt; T.pack (show rawIdx) &lt;&gt; &quot;: tab: invalid index&quot;)</span></span>
+<span class="lineno">  447 </span><span class="spaces">    </span><span class="istickedoff">Just idx -&gt; do</span>
+<span class="lineno">  448 </span><span class="spaces">      </span><span class="istickedoff">mTab &lt;- Registry.lookupTab (_env_tabs env) idx</span>
+<span class="lineno">  449 </span><span class="spaces">      </span><span class="istickedoff">case mTab of</span>
+<span class="lineno">  450 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  451 </span><span class="spaces">          </span><span class="istickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: &quot;</span>
+<span class="lineno">  452 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; unPublicTabError</span>
+<span class="lineno">  453 </span><span class="spaces">                     </span><span class="istickedoff">(toPublicTabError (TabNotFound rawIdx)))</span>
+<span class="lineno">  454 </span><span class="spaces">        </span><span class="istickedoff">Just h -&gt; case sanitize rawName of</span>
+<span class="lineno">  455 </span><span class="spaces">          </span><span class="istickedoff">Left  nameErr -&gt;</span>
+<span class="lineno">  456 </span><span class="spaces">            </span><span class="istickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: &quot;</span>
+<span class="lineno">  457 </span><span class="spaces">                  </span><span class="istickedoff">&lt;&gt; unPublicTabError</span>
+<span class="lineno">  458 </span><span class="spaces">                       </span><span class="istickedoff">(toPublicTabError (TabInvalidName nameErr)))</span>
+<span class="lineno">  459 </span><span class="spaces">          </span><span class="istickedoff">Right safeName -&gt; do</span>
+<span class="lineno">  460 </span><span class="spaces">            </span><span class="istickedoff">let oldName = unTabName (_tabHandle_name h)</span>
+<span class="lineno">  461 </span><span class="spaces">                </span><span class="istickedoff">redactedSuffix =</span>
+<span class="lineno">  462 </span><span class="spaces">                  </span><span class="istickedoff">if safeName == rawName</span>
+<span class="lineno">  463 </span><span class="spaces">                    </span><span class="istickedoff">then &quot;&quot;</span>
+<span class="lineno">  464 </span><span class="spaces">                    </span><span class="istickedoff">else &quot; (redacted host/path fragment)&quot;</span>
+<span class="lineno">  465 </span><span class="spaces">            </span><span class="istickedoff">emit (&quot;Renamed /&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot; &quot;</span>
+<span class="lineno">  466 </span><span class="spaces">                   </span><span class="istickedoff">&lt;&gt; oldName &lt;&gt; &quot; to \&quot;&quot; &lt;&gt; safeName &lt;&gt; &quot;\&quot;&quot;</span>
+<span class="lineno">  467 </span><span class="spaces">                   </span><span class="istickedoff">&lt;&gt; redactedSuffix)</span></span>
+<span class="lineno">  468 </span>
+<span class="lineno">  469 </span>
+<span class="lineno">  470 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  471 </span>-- handleResume — /tab resume &lt;session-id&gt; (L7)
+<span class="lineno">  472 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  473 </span>
+<span class="lineno">  474 </span>-- | Handle @\/tab resume \&lt;session-id\&gt;@.
+<span class="lineno">  475 </span>--
+<span class="lineno">  476 </span>-- The parser has already validated the session id via
+<span class="lineno">  477 </span>-- 'PureClaw.Routing.Parse.mkSessionId' (S3 \/ P15a) — the dispatcher
+<span class="lineno">  478 </span>-- only reaches here with a 'SessionId' value the validator accepted.
+<span class="lineno">  479 </span>--
+<span class="lineno">  480 </span>-- /WU9 scope note:/ the full resume-into-a-tab pipeline requires
+<span class="lineno">  481 </span>-- threading 'PureClaw.Session.Handle.resolveSessionRef' and
+<span class="lineno">  482 </span>-- 'PureClaw.Session.Handle.resumeSession' through the spawn factory —
+<span class="lineno">  483 </span>-- work that the WU10 'PureClaw.Agent.Loop' refactor will do properly.
+<span class="lineno">  484 </span>-- For WU9 we emit a redacted-but-actionable banner so the user sees
+<span class="lineno">  485 </span>-- feedback; the production wiring lands when WU10 integrates the
+<span class="lineno">  486 </span>-- Tab.Ai factory with the existing session machinery.
+<span class="lineno">  487 </span>handleResume
+<span class="lineno">  488 </span>  :: AgentEnv
+<span class="lineno">  489 </span>  -&gt; BannerEmit
+<span class="lineno">  490 </span>  -&gt; SessionId
+<span class="lineno">  491 </span>  -&gt; IO ()
+<span class="lineno">  492 </span><span class="decl"><span class="nottickedoff">handleResume _env emit sid =</span>
+<span class="lineno">  493 </span><span class="spaces">  </span><span class="nottickedoff">emit (&quot;/tab resume &quot; &lt;&gt; sidText sid</span>
+<span class="lineno">  494 </span><span class="spaces">         </span><span class="nottickedoff">&lt;&gt; &quot;: resume-into-tab wiring lands in WU10&quot;)</span>
+<span class="lineno">  495 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  496 </span><span class="spaces">    </span><span class="nottickedoff">sidText :: SessionId -&gt; Text</span>
+<span class="lineno">  497 </span><span class="spaces">    </span><span class="nottickedoff">sidText (SessionId t) = t</span></span>
+<span class="lineno">  498 </span>
+<span class="lineno">  499 </span>
+<span class="lineno">  500 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  501 </span>-- handleListTabs — /tab list (B-series)
+<span class="lineno">  502 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  503 </span>
+<span class="lineno">  504 </span>-- | Handle @\/tab list@ (and the @\/tabs@ alias). Renders the
+<span class="lineno">  505 </span>-- dashboard via 'PureClaw.Routing.Dashboard.renderDashboard' and emits
+<span class="lineno">  506 </span>-- the result as a single 'BannerLine'.
+<span class="lineno">  507 </span>handleListTabs :: AgentEnv -&gt; BannerEmit -&gt; IO ()
+<span class="lineno">  508 </span><span class="decl"><span class="istickedoff">handleListTabs env emit = do</span>
+<span class="lineno">  509 </span><span class="spaces">  </span><span class="istickedoff">body &lt;- renderDashboard env</span>
+<span class="lineno">  510 </span><span class="spaces">  </span><span class="istickedoff">emit body</span></span>
+<span class="lineno">  511 </span>
+<span class="lineno">  512 </span>
+<span class="lineno">  513 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  514 </span>-- Internal helpers
+<span class="lineno">  515 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  516 </span>
+<span class="lineno">  517 </span>-- | Focus an existing tab + emit the recap and (when applicable) the
+<span class="lineno">  518 </span>-- Crashed banner.
+<span class="lineno">  519 </span>focusExisting :: AgentEnv -&gt; BannerEmit -&gt; TabIndex -&gt; TabHandle -&gt; IO ()
+<span class="lineno">  520 </span><span class="decl"><span class="istickedoff">focusExisting env emit idx h = do</span>
+<span class="lineno">  521 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_env_focus env) (Just idx)</span>
+<span class="lineno">  522 </span><span class="spaces">  </span><span class="istickedoff">st &lt;- safeStatus h</span>
+<span class="lineno">  523 </span><span class="spaces">  </span><span class="istickedoff">case st of</span>
+<span class="lineno">  524 </span><span class="spaces">    </span><span class="istickedoff">Just (Crashed pe) -&gt;</span>
+<span class="lineno">  525 </span><span class="spaces">      </span><span class="istickedoff">-- X1: surface Crashed status as a one-line PublicError + retry</span>
+<span class="lineno">  526 </span><span class="spaces">      </span><span class="istickedoff">-- \/ close prompt.</span>
+<span class="lineno">  527 </span><span class="spaces">      </span><span class="istickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot; crashed: &quot;</span>
+<span class="lineno">  528 </span><span class="spaces">             </span><span class="istickedoff">&lt;&gt; unPublicTabError pe</span>
+<span class="lineno">  529 </span><span class="spaces">             </span><span class="istickedoff">&lt;&gt; &quot; — [1] retry [2] close&quot;)</span>
+<span class="lineno">  530 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  531 </span><span class="spaces">      </span><span class="istickedoff">let recap = recapText (_env_routingConfig env) idx</span>
+<span class="lineno">  532 </span><span class="spaces">      </span><span class="istickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: focused&quot;)</span>
+<span class="lineno">  533 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlyfalse">T.null recap</span> then <span class="nottickedoff">pure ()</span> else emit recap</span></span>
+<span class="lineno">  534 </span>
+<span class="lineno">  535 </span>-- | Construct the (WU9-minimal) recap banner. WU10's
+<span class="lineno">  536 </span>-- 'PureClaw.Agent.Loop' refactor will replace this with a transcript
+<span class="lineno">  537 </span>-- replay; for v1 we surface the per-tab recap budget so the user
+<span class="lineno">  538 </span>-- knows what the budget would have been.
+<span class="lineno">  539 </span>recapText :: RoutingConfig -&gt; TabIndex -&gt; Text
+<span class="lineno">  540 </span><span class="decl"><span class="istickedoff">recapText rc idx =</span>
+<span class="lineno">  541 </span><span class="spaces">  </span><span class="istickedoff">let n     = _rc_switchRecap rc</span>
+<span class="lineno">  542 </span><span class="spaces">      </span><span class="istickedoff">nTxt  = T.pack (show n)</span>
+<span class="lineno">  543 </span><span class="spaces">  </span><span class="istickedoff">in if n &lt;= 0</span>
+<span class="lineno">  544 </span><span class="spaces">       </span><span class="istickedoff">then &quot;&quot;</span>
+<span class="lineno">  545 </span><span class="spaces">       </span><span class="istickedoff">else &quot;(recap: last &quot; &lt;&gt; nTxt &lt;&gt; &quot; messages from /&quot;</span>
+<span class="lineno">  546 </span><span class="spaces">              </span><span class="istickedoff">&lt;&gt; tShowIdx idx &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  547 </span>
+<span class="lineno">  548 </span>-- | Enqueue a payload on a tab via '_tabHandle_send', surfacing send
+<span class="lineno">  549 </span>-- failures as a redacted dispatcher banner.
+<span class="lineno">  550 </span>enqueuePayloadOn :: AgentEnv -&gt; BannerEmit -&gt; TabIndex -&gt; Text -&gt; IO ()
+<span class="lineno">  551 </span><span class="decl"><span class="istickedoff">enqueuePayloadOn env emit idx payload = do</span>
+<span class="lineno">  552 </span><span class="spaces">  </span><span class="istickedoff">mTab &lt;- Registry.lookupTab (_env_tabs env) idx</span>
+<span class="lineno">  553 </span><span class="spaces">  </span><span class="istickedoff">case mTab of</span>
+<span class="lineno">  554 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  555 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: &quot;</span></span>
+<span class="lineno">  556 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; unPublicTabError</span></span>
+<span class="lineno">  557 </span><span class="spaces">                 </span><span class="istickedoff"><span class="nottickedoff">(toPublicTabError (TabNotFound (unTabIndex idx))))</span></span>
+<span class="lineno">  558 </span><span class="spaces">    </span><span class="istickedoff">Just h -&gt; do</span>
+<span class="lineno">  559 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- safeEnqueue h payload</span>
+<span class="lineno">  560 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  561 </span><span class="spaces">        </span><span class="istickedoff">Right ()  -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  562 </span><span class="spaces">        </span><span class="istickedoff">Left  e   -&gt; <span class="nottickedoff">emit (&quot;/&quot; &lt;&gt; tShowIdx idx &lt;&gt; &quot;: &quot;</span></span>
+<span class="lineno">  563 </span><span class="spaces">                           </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; unPublicTabError (toPublicTabError e))</span></span></span>
+<span class="lineno">  564 </span>
+<span class="lineno">  565 </span>-- | Tolerant '_tabHandle_send' wrapper: any synchronous exception
+<span class="lineno">  566 </span>-- collapses to a redacted 'TabConcurrencyLimit'.
+<span class="lineno">  567 </span>safeEnqueue :: TabHandle -&gt; Text -&gt; IO (Either TabError ())
+<span class="lineno">  568 </span><span class="decl"><span class="istickedoff">safeEnqueue h payload = do</span>
+<span class="lineno">  569 </span><span class="spaces">  </span><span class="istickedoff">r &lt;- try @SomeException (_tabHandle_send h payload)</span>
+<span class="lineno">  570 </span><span class="spaces">  </span><span class="istickedoff">pure $ case r of</span>
+<span class="lineno">  571 </span><span class="spaces">    </span><span class="istickedoff">Left  _e    -&gt; <span class="nottickedoff">Left (TabConcurrencyLimit 0)</span></span>
+<span class="lineno">  572 </span><span class="spaces">    </span><span class="istickedoff">Right inner -&gt; inner</span></span>
+<span class="lineno">  573 </span>
+<span class="lineno">  574 </span>-- | Read '_tabHandle_status' tolerantly. A buggy factory could throw;
+<span class="lineno">  575 </span>-- in that case we collapse the result to 'Nothing' (treated as
+<span class="lineno">  576 </span>-- &quot;unknown status&quot; — no Crashed banner emitted).
+<span class="lineno">  577 </span>safeStatus :: TabHandle -&gt; IO (Maybe TabStatus)
+<span class="lineno">  578 </span><span class="decl"><span class="istickedoff">safeStatus h = do</span>
+<span class="lineno">  579 </span><span class="spaces">  </span><span class="istickedoff">r &lt;- try @SomeException (_tabHandle_status h)</span>
+<span class="lineno">  580 </span><span class="spaces">  </span><span class="istickedoff">pure $ case r of</span>
+<span class="lineno">  581 </span><span class="spaces">    </span><span class="istickedoff">Left _  -&gt; Nothing</span>
+<span class="lineno">  582 </span><span class="spaces">    </span><span class="istickedoff">Right s -&gt; Just s</span></span>
+<span class="lineno">  583 </span>
+<span class="lineno">  584 </span>-- | Best-effort: run an IO action and swallow synchronous failures.
+<span class="lineno">  585 </span>safeIgnore :: IO () -&gt; IO ()
+<span class="lineno">  586 </span><span class="decl"><span class="istickedoff">safeIgnore m = do</span>
+<span class="lineno">  587 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- try @SomeException m</span>
+<span class="lineno">  588 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  589 </span>
+<span class="lineno">  590 </span>-- | Convert a parser-level 'TabKindArg' to the canonical 'TabKind'.
+<span class="lineno">  591 </span>--
+<span class="lineno">  592 </span>-- The payload in the resulting 'TabKind' is a /placeholder/ — the real
+<span class="lineno">  593 </span>-- configuration (provider, model, harness flavour, SSH host, etc.) is
+<span class="lineno">  594 </span>-- constructed by the per-kind factory from its spawn-args, not from
+<span class="lineno">  595 </span>-- the 'TabKind' value. The 'TabKind' here is used only for dispatch.
+<span class="lineno">  596 </span>tabKindArgToKind :: TabKindArg -&gt; TabKind
+<span class="lineno">  597 </span><span class="decl"><span class="istickedoff">tabKindArgToKind k = case k of</span>
+<span class="lineno">  598 </span><span class="spaces">  </span><span class="istickedoff">TkaAi       -&gt; TkSession (SkProvider placeholderProviderSpec)</span>
+<span class="lineno">  599 </span><span class="spaces">  </span><span class="istickedoff">TkaProvider -&gt; TkSession (SkProvider placeholderProviderSpec)</span>
+<span class="lineno">  600 </span><span class="spaces">  </span><span class="istickedoff">TkaHarness  -&gt; TkSession (SkHarness placeholderHarnessSpec)</span>
+<span class="lineno">  601 </span><span class="spaces">  </span><span class="istickedoff">TkaShell    -&gt; TkRawShell TbLocal</span>
+<span class="lineno">  602 </span><span class="spaces">  </span><span class="istickedoff">TkaSsh      -&gt; TkRawShell (TbSsh placeholderSshConfig)</span>
+<span class="lineno">  603 </span><span class="spaces">  </span><span class="istickedoff">TkaTmux     -&gt; TkRawShell (TbTmux placeholderTmuxConfig)</span></span>
+<span class="lineno">  604 </span>
+<span class="lineno">  605 </span>-- | Project a 'TabKind' to its short keyword (mirrors
+<span class="lineno">  606 </span>-- 'PureClaw.Routing.Config.tabKindCodec').
+<span class="lineno">  607 </span>kindKeyword :: TabKind -&gt; Text
+<span class="lineno">  608 </span><span class="decl"><span class="istickedoff">kindKeyword k = case k of</span>
+<span class="lineno">  609 </span><span class="spaces">  </span><span class="istickedoff">TkSession (SkProvider _)   -&gt; &quot;ai&quot;</span>
+<span class="lineno">  610 </span><span class="spaces">  </span><span class="istickedoff">TkSession (SkHarness _)    -&gt; &quot;harness&quot;</span>
+<span class="lineno">  611 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell TbLocal         -&gt; &quot;shell&quot;</span>
+<span class="lineno">  612 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell (TbSsh _)       -&gt; &quot;ssh&quot;</span>
+<span class="lineno">  613 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell (TbTmux _)      -&gt; &quot;tmux&quot;</span>
+<span class="lineno">  614 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell (TbContainer _) -&gt; <span class="nottickedoff">&quot;container&quot;</span></span></span>
+<span class="lineno">  615 </span>
+<span class="lineno">  616 </span>-- | Placeholder 'ProviderSpec' used when 'tabKindArgToKind' produces
+<span class="lineno">  617 </span>-- a 'TkSession (SkProvider _)'. The factory ignores this payload;
+<span class="lineno">  618 </span>-- the real provider\/model comes from 'AgentEnv' and spawn-args.
+<span class="lineno">  619 </span>placeholderProviderSpec :: ProviderSpec
+<span class="lineno">  620 </span><span class="decl"><span class="istickedoff">placeholderProviderSpec = ProviderSpec</span>
+<span class="lineno">  621 </span><span class="spaces">  </span><span class="istickedoff">{ _ps_provider = ProviderId &quot;anthropic&quot;</span>
+<span class="lineno">  622 </span><span class="spaces">  </span><span class="istickedoff">, _ps_model    = ModelId &quot;placeholder&quot;</span>
+<span class="lineno">  623 </span><span class="spaces">  </span><span class="istickedoff">, _ps_agent    = Nothing</span>
+<span class="lineno">  624 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  625 </span>
+<span class="lineno">  626 </span>-- | Placeholder 'HarnessSpec' used when 'tabKindArgToKind' produces
+<span class="lineno">  627 </span>-- a 'TkSession (SkHarness _)'. The factory ignores this payload.
+<span class="lineno">  628 </span>placeholderHarnessSpec :: HarnessSpec
+<span class="lineno">  629 </span><span class="decl"><span class="istickedoff">placeholderHarnessSpec = HarnessSpec</span>
+<span class="lineno">  630 </span><span class="spaces">  </span><span class="istickedoff">{ _h_flavour = HClaudeCode</span>
+<span class="lineno">  631 </span><span class="spaces">  </span><span class="istickedoff">, _h_backend = TbLocal</span>
+<span class="lineno">  632 </span><span class="spaces">  </span><span class="istickedoff">, _h_cwd     = Nothing</span>
+<span class="lineno">  633 </span><span class="spaces">  </span><span class="istickedoff">, _h_args    = []</span>
+<span class="lineno">  634 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  635 </span>
+<span class="lineno">  636 </span>-- | Placeholder 'SshConfig' used when 'tabKindArgToKind' produces
+<span class="lineno">  637 </span>-- 'TkRawShell (TbSsh _)'. The factory ignores this payload.
+<span class="lineno">  638 </span>placeholderSshConfig :: SshConfig
+<span class="lineno">  639 </span><span class="decl"><span class="istickedoff">placeholderSshConfig = SshConfig</span>
+<span class="lineno">  640 </span><span class="spaces">  </span><span class="istickedoff">{ _sc_user = &quot;placeholder&quot;</span>
+<span class="lineno">  641 </span><span class="spaces">  </span><span class="istickedoff">, _sc_host = &quot;placeholder&quot;</span>
+<span class="lineno">  642 </span><span class="spaces">  </span><span class="istickedoff">, _sc_port = Nothing</span>
+<span class="lineno">  643 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  644 </span>
+<span class="lineno">  645 </span>-- | Placeholder 'TmuxConfig' used when 'tabKindArgToKind' produces
+<span class="lineno">  646 </span>-- 'TkRawShell (TbTmux _)'. The factory ignores this payload.
+<span class="lineno">  647 </span>placeholderTmuxConfig :: TmuxConfig
+<span class="lineno">  648 </span><span class="decl"><span class="istickedoff">placeholderTmuxConfig = TmuxConfig</span>
+<span class="lineno">  649 </span><span class="spaces">  </span><span class="istickedoff">{ _tc_session = &quot;placeholder&quot;</span>
+<span class="lineno">  650 </span><span class="spaces">  </span><span class="istickedoff">, _tc_window  = &quot;placeholder&quot;</span>
+<span class="lineno">  651 </span><span class="spaces">  </span><span class="istickedoff">, _tc_pane    = Nothing</span>
+<span class="lineno">  652 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  653 </span>
+<span class="lineno">  654 </span>-- | Split the @[args-text]@ field (a single 'Text' parsed greedily
+<span class="lineno">  655 </span>-- after the kind keyword) into a list of arguments by whitespace.
+<span class="lineno">  656 </span>splitArgs :: Maybe Text -&gt; [Text]
+<span class="lineno">  657 </span><span class="decl"><span class="istickedoff">splitArgs Nothing  = []</span>
+<span class="lineno">  658 </span><span class="spaces"></span><span class="istickedoff">splitArgs (Just t) = T.words t</span></span>
+<span class="lineno">  659 </span>
+<span class="lineno">  660 </span>-- | Format a 'TabIndex' as the user-facing decimal string.
+<span class="lineno">  661 </span>tShowIdx :: TabIndex -&gt; Text
+<span class="lineno">  662 </span><span class="decl"><span class="istickedoff">tShowIdx = T.pack . show . unTabIndex</span></span>
+<span class="lineno">  663 </span>
+<span class="lineno">  664 </span>-- | Record the spawn args for a given tab so X2\/X3 retry can replay.
+<span class="lineno">  665 </span>rememberArgs :: IORef (Map Int SpawnArgs) -&gt; TabIndex -&gt; TabKind -&gt; [Text] -&gt; IO ()
+<span class="lineno">  666 </span><span class="decl"><span class="istickedoff">rememberArgs ref idx kind args =</span>
+<span class="lineno">  667 </span><span class="spaces">  </span><span class="istickedoff">modifyIORef' ref</span>
+<span class="lineno">  668 </span><span class="spaces">    </span><span class="istickedoff">(Map.insert (unTabIndex idx) SpawnArgs { _sa_kind = kind, _sa_args = args })</span></span>
+<span class="lineno">  669 </span>
+<span class="lineno">  670 </span>-- | Public alias of 'rememberArgs' exposed for tests that want to seed
+<span class="lineno">  671 </span>-- a spawn-args map without going through the full dispatchOne path.
+<span class="lineno">  672 </span>-- Production code should never call this directly; the public
+<span class="lineno">  673 </span>-- 'handleNew' \/ 'handleDefault' paths invoke 'rememberArgs' internally
+<span class="lineno">  674 </span>-- on every successful spawn.
+<span class="lineno">  675 </span>rememberArgsForTest :: IORef (Map Int SpawnArgs) -&gt; TabIndex -&gt; TabKind -&gt; [Text] -&gt; IO ()
+<span class="lineno">  676 </span><span class="decl"><span class="istickedoff">rememberArgsForTest = rememberArgs</span></span>
+
+</pre>
+</body>
+</html>

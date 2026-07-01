@@ -1,0 +1,976 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Session.Handle
+<span class="lineno">    2 </span>  ( -- * Session handle
+<span class="lineno">    3 </span>    SessionHandle (..)
+<span class="lineno">    4 </span>  , mkSessionHandle
+<span class="lineno">    5 </span>  , mkNoOpSessionHandle
+<span class="lineno">    6 </span>  , noOpSessionHandle
+<span class="lineno">    7 </span>  , noOpOnFirstStreamDoneRef
+<span class="lineno">    8 </span>    -- * Resume
+<span class="lineno">    9 </span>  , ResumeError (..)
+<span class="lineno">   10 </span>  , resumeSession
+<span class="lineno">   11 </span>    -- * Branch
+<span class="lineno">   12 </span>  , BranchError (..)
+<span class="lineno">   13 </span>  , BranchSpec (..)
+<span class="lineno">   14 </span>  , BranchSeed (..)
+<span class="lineno">   15 </span>  , resolveBranchSeed
+<span class="lineno">   16 </span>    -- * Enumeration and lookup
+<span class="lineno">   17 </span>  , listSessions
+<span class="lineno">   18 </span>  , tryLoad
+<span class="lineno">   19 </span>  , ResolveError (..)
+<span class="lineno">   20 </span>  , resolveSessionRef
+<span class="lineno">   21 </span>    -- * Runtime validation
+<span class="lineno">   22 </span>  , ResolvedRuntime (..)
+<span class="lineno">   23 </span>  , validateRuntime
+<span class="lineno">   24 </span>  , resolveResumedTarget
+<span class="lineno">   25 </span>    -- * Bootstrap consumption
+<span class="lineno">   26 </span>  , markBootstrapConsumed
+<span class="lineno">   27 </span>  , setSourceIfAbsent
+<span class="lineno">   28 </span>    -- * Archive flag (disk-only)
+<span class="lineno">   29 </span>  , setArchived
+<span class="lineno">   30 </span>  , SetArchivedError (..)
+<span class="lineno">   31 </span>    -- * Description (disk-only)
+<span class="lineno">   32 </span>  , setDescription
+<span class="lineno">   33 </span>  , SetDescriptionError (..)
+<span class="lineno">   34 </span>    -- * Last-active (disk-only)
+<span class="lineno">   35 </span>  , touchSessionLastActive
+<span class="lineno">   36 </span>    -- * Resume context reload
+<span class="lineno">   37 </span>  , loadRecentMessages
+<span class="lineno">   38 </span>    -- * Frozen system prompt (read from transcript)
+<span class="lineno">   39 </span>  , frozenSystemPrompt
+<span class="lineno">   40 </span>    -- * Per-session model (read from transcript)
+<span class="lineno">   41 </span>  , lastRequestModel
+<span class="lineno">   42 </span>  ) where
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>import Control.Exception (IOException, try)
+<span class="lineno">   45 </span>import Control.Monad (guard, when)
+<span class="lineno">   46 </span>import System.IO.Unsafe (unsafePerformIO)
+<span class="lineno">   47 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   48 </span>import Data.Aeson.KeyMap qualified as KM
+<span class="lineno">   49 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   50 </span>import Data.ByteString.Lazy.Char8 qualified as LBSC
+<span class="lineno">   51 </span>import Data.IORef
+<span class="lineno">   52 </span>  ( IORef
+<span class="lineno">   53 </span>  , atomicModifyIORef'
+<span class="lineno">   54 </span>  , newIORef
+<span class="lineno">   55 </span>  , readIORef
+<span class="lineno">   56 </span>  )
+<span class="lineno">   57 </span>import Data.List (sortOn)
+<span class="lineno">   58 </span>import Data.Map.Strict (Map)
+<span class="lineno">   59 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   60 </span>import Data.Maybe (fromMaybe, mapMaybe)
+<span class="lineno">   61 </span>import Data.Ord (Down (..))
+<span class="lineno">   62 </span>import Data.Text (Text)
+<span class="lineno">   63 </span>import Data.Text qualified as T
+<span class="lineno">   64 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   65 </span>import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
+<span class="lineno">   66 </span>import Data.Vector qualified as V
+<span class="lineno">   67 </span>import System.Directory
+<span class="lineno">   68 </span>  ( createDirectoryIfMissing
+<span class="lineno">   69 </span>  , doesDirectoryExist
+<span class="lineno">   70 </span>  , doesFileExist
+<span class="lineno">   71 </span>  , listDirectory
+<span class="lineno">   72 </span>  , renameFile
+<span class="lineno">   73 </span>  )
+<span class="lineno">   74 </span>import System.FilePath ((&lt;/&gt;))
+<span class="lineno">   75 </span>import System.Posix.Files (setFileMode)
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>import PureClaw.Agent.AgentDef (AgentName)
+<span class="lineno">   78 </span>import PureClaw.Agent.Compaction (compactionMetadataKey)
+<span class="lineno">   79 </span>import PureClaw.Core.Types
+<span class="lineno">   80 </span>  ( MessageSource
+<span class="lineno">   81 </span>  , MessageTarget (..)
+<span class="lineno">   82 </span>  , ModelId (..)
+<span class="lineno">   83 </span>  , SessionId (..)
+<span class="lineno">   84 </span>  , parseSessionId
+<span class="lineno">   85 </span>  )
+<span class="lineno">   86 </span>import PureClaw.Frontend.BroadcastingTranscript
+<span class="lineno">   87 </span>  ( mkBroadcastingFileTranscriptHandle
+<span class="lineno">   88 </span>  )
+<span class="lineno">   89 </span>import PureClaw.Frontend.StreamBroker (StreamBroker)
+<span class="lineno">   90 </span>import PureClaw.Handles.Harness (HarnessHandle)
+<span class="lineno">   91 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   92 </span>import PureClaw.Handles.Transcript
+<span class="lineno">   93 </span>  ( TranscriptHandle (..)
+<span class="lineno">   94 </span>  , mkNoOpTranscriptHandle
+<span class="lineno">   95 </span>  )
+<span class="lineno">   96 </span>import PureClaw.Providers.Class
+<span class="lineno">   97 </span>  ( ContentBlock (..)
+<span class="lineno">   98 </span>  , Message (..)
+<span class="lineno">   99 </span>  , Role (..)
+<span class="lineno">  100 </span>  )
+<span class="lineno">  101 </span>import PureClaw.Transcript.Types
+<span class="lineno">  102 </span>  ( Direction (..)
+<span class="lineno">  103 </span>  , TranscriptEntry (..)
+<span class="lineno">  104 </span>  , TranscriptFilter (..)
+<span class="lineno">  105 </span>  )
+<span class="lineno">  106 </span>import PureClaw.Session.Types
+<span class="lineno">  107 </span>  ( SessionKind (..)
+<span class="lineno">  108 </span>  , SessionMeta (..)
+<span class="lineno">  109 </span>  , ProviderSpec (..)
+<span class="lineno">  110 </span>  , HarnessSpec (..)
+<span class="lineno">  111 </span>  , HarnessFlavour (..)
+<span class="lineno">  112 </span>  , inferProviderId
+<span class="lineno">  113 </span>  )
+<span class="lineno">  114 </span>
+<span class="lineno">  115 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  116 </span>-- Types
+<span class="lineno">  117 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  118 </span>
+<span class="lineno">  119 </span>-- | Handle for the current conversation session.
+<span class="lineno">  120 </span>--
+<span class="lineno">  121 </span>-- Owns the on-disk session directory (mode @0o700@), the @session.json@
+<span class="lineno">  122 </span>-- metadata file (mode @0o600@), and the per-session transcript handle
+<span class="lineno">  123 </span>-- writing to @transcript.jsonl@ (mode @0o600@).
+<span class="lineno">  124 </span>data SessionHandle = SessionHandle
+<span class="lineno">  125 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_meta</span></span></span>       :: IORef SessionMeta
+<span class="lineno">  126 </span>    -- ^ Mutable session metadata. Updated by callers (e.g. to bump
+<span class="lineno">  127 </span>    -- @last_active@) and persisted by '_sh_save'.
+<span class="lineno">  128 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_transcript</span></span></span> :: TranscriptHandle
+<span class="lineno">  129 </span>    -- ^ Transcript handle owned by the session.
+<span class="lineno">  130 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_dir</span></span></span>        :: FilePath
+<span class="lineno">  131 </span>    -- ^ On-disk session directory, i.e. @&lt;baseDir&gt;/&lt;sessionId&gt;/@.
+<span class="lineno">  132 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_save</span></span></span>       :: IO ()
+<span class="lineno">  133 </span>    -- ^ Persist '_sh_meta' to @session.json@ atomically (write to
+<span class="lineno">  134 </span>    -- @session.json.tmp@ then rename).
+<span class="lineno">  135 </span>  }
+<span class="lineno">  136 </span>
+<span class="lineno">  137 </span>-- | Reasons a resume attempt can fail.
+<span class="lineno">  138 </span>data ResumeError
+<span class="lineno">  139 </span>  = ResumeMissingMetadata FilePath
+<span class="lineno">  140 </span>    -- ^ No @session.json@ at the expected path.
+<span class="lineno">  141 </span>  | ResumeCorruptedMetadata FilePath String
+<span class="lineno">  142 </span>    -- ^ @session.json@ exists but does not parse as 'SessionMeta'.
+<span class="lineno">  143 </span>    -- The second field is a human-readable recovery hint.
+<span class="lineno">  144 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>-- | Lookup result for 'resolveSessionRef'.
+<span class="lineno">  147 </span>data ResolveError
+<span class="lineno">  148 </span>  = NotFound
+<span class="lineno">  149 </span>  | Ambiguous [SessionId]
+<span class="lineno">  150 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | Result of 'validateRuntime'. 'RuntimeFallback' carries the chosen
+<span class="lineno">  153 </span>-- fallback target plus a warning message suitable for logging.
+<span class="lineno">  154 </span>data ResolvedRuntime
+<span class="lineno">  155 </span>  = RuntimeOk MessageTarget
+<span class="lineno">  156 </span>  | RuntimeFallback MessageTarget Text
+<span class="lineno">  157 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  158 </span>
+<span class="lineno">  159 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  160 </span>-- Creation
+<span class="lineno">  161 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  162 </span>
+<span class="lineno">  163 </span>-- | Create a brand-new on-disk session handle.
+<span class="lineno">  164 </span>--
+<span class="lineno">  165 </span>-- Creates @\&lt;baseDir\&gt;/\&lt;sessionId\&gt;/@ with mode @0o700@, writes the
+<span class="lineno">  166 </span>-- initial @session.json@ (mode @0o600@) via 'saveMeta', and opens
+<span class="lineno">  167 </span>-- @transcript.jsonl@ (mode @0o600@) through
+<span class="lineno">  168 </span>-- 'mkBroadcastingFileTranscriptHandle'. When the optional broker is
+<span class="lineno">  169 </span>-- 'Nothing' the helper falls back to a plain file handle; when 'Just',
+<span class="lineno">  170 </span>-- transcript writes are broadcast to the supplied 'StreamBroker' in
+<span class="lineno">  171 </span>-- addition to being persisted.
+<span class="lineno">  172 </span>mkSessionHandle
+<span class="lineno">  173 </span>  :: Maybe StreamBroker
+<span class="lineno">  174 </span>  -&gt; LogHandle
+<span class="lineno">  175 </span>  -&gt; FilePath
+<span class="lineno">  176 </span>  -&gt; SessionMeta
+<span class="lineno">  177 </span>  -&gt; IO SessionHandle
+<span class="lineno">  178 </span><span class="decl"><span class="istickedoff">mkSessionHandle mBroker logger baseDir meta = do</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">let sid  = unSessionId (_sm_id meta)</span>
+<span class="lineno">  180 </span><span class="spaces">      </span><span class="istickedoff">dir  = baseDir &lt;/&gt; T.unpack sid</span>
+<span class="lineno">  181 </span><span class="spaces">      </span><span class="istickedoff">txp  = dir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="istickedoff">createDirectoryIfMissing True dir</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">setFileMode dir 0o700</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">metaRef &lt;- newIORef meta</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">saveMeta dir metaRef</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">tx &lt;- mkBroadcastingFileTranscriptHandle mBroker (_sm_id meta) <span class="nottickedoff">logger</span> txp</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">let save = saveMeta dir metaRef</span>
+<span class="lineno">  188 </span><span class="spaces">      </span><span class="istickedoff">tx'  = touchLastActive metaRef save tx</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">pure SessionHandle</span>
+<span class="lineno">  190 </span><span class="spaces">    </span><span class="istickedoff">{ _sh_meta       = metaRef</span>
+<span class="lineno">  191 </span><span class="spaces">    </span><span class="istickedoff">, _sh_transcript = tx'</span>
+<span class="lineno">  192 </span><span class="spaces">    </span><span class="istickedoff">, _sh_dir        = dir</span>
+<span class="lineno">  193 </span><span class="spaces">    </span><span class="istickedoff">, _sh_save       = save</span>
+<span class="lineno">  194 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  195 </span>
+<span class="lineno">  196 </span>-- | Atomically persist the metadata IORef to @\&lt;dir\&gt;/session.json@ by
+<span class="lineno">  197 </span>-- writing to a sibling @session.json.tmp@ with mode @0o600@ then
+<span class="lineno">  198 </span>-- 'renameFile'-ing it into place. The rename is atomic on POSIX, so a
+<span class="lineno">  199 </span>-- crash mid-write leaves the previous @session.json@ intact.
+<span class="lineno">  200 </span>saveMeta :: FilePath -&gt; IORef SessionMeta -&gt; IO ()
+<span class="lineno">  201 </span><span class="decl"><span class="istickedoff">saveMeta dir ref = do</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="istickedoff">meta &lt;- readIORef ref</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">let finalP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">tmpP   = finalP &lt;&gt; &quot;.tmp&quot;</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">LBS.writeFile tmpP (Aeson.encode meta)</span>
+<span class="lineno">  206 </span><span class="spaces">  </span><span class="istickedoff">setFileMode tmpP 0o600</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">renameFile tmpP finalP</span></span>
+<span class="lineno">  208 </span>
+<span class="lineno">  209 </span>-- | Wrap a 'TranscriptHandle' so that after every successful
+<span class="lineno">  210 </span>-- '_th_record' call, @_sm_lastActive@ is bumped to 'getCurrentTime'
+<span class="lineno">  211 </span>-- and the session metadata is persisted to disk via the supplied save
+<span class="lineno">  212 </span>-- action. This keeps the sidebar's &quot;last active&quot; column accurate
+<span class="lineno">  213 </span>-- without requiring every transcript call site to remember the bump.
+<span class="lineno">  214 </span>touchLastActive :: IORef SessionMeta -&gt; IO () -&gt; TranscriptHandle -&gt; TranscriptHandle
+<span class="lineno">  215 </span><span class="decl"><span class="istickedoff">touchLastActive metaRef save th = th</span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="istickedoff">{ _th_record = \entry -&gt; do</span>
+<span class="lineno">  217 </span><span class="spaces">      </span><span class="istickedoff">_th_record th entry</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  219 </span><span class="spaces">      </span><span class="istickedoff">atomicModifyIORef' metaRef (\m -&gt; (m { _sm_lastActive = now }, ()))</span>
+<span class="lineno">  220 </span><span class="spaces">      </span><span class="istickedoff">save</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  222 </span>
+<span class="lineno">  223 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  224 </span>-- No-op handle
+<span class="lineno">  225 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  226 </span>
+<span class="lineno">  227 </span>-- | A no-op session handle for tests and for the backward-compat
+<span class="lineno">  228 </span>-- no-session path.
+<span class="lineno">  229 </span>mkNoOpSessionHandle :: IO SessionHandle
+<span class="lineno">  230 </span><span class="decl"><span class="istickedoff">mkNoOpSessionHandle = do</span>
+<span class="lineno">  231 </span><span class="spaces">  </span><span class="istickedoff">ref &lt;- newIORef noOpMeta</span>
+<span class="lineno">  232 </span><span class="spaces">  </span><span class="istickedoff">pure SessionHandle</span>
+<span class="lineno">  233 </span><span class="spaces">    </span><span class="istickedoff">{ _sh_meta       = ref</span>
+<span class="lineno">  234 </span><span class="spaces">    </span><span class="istickedoff">, _sh_transcript = mkNoOpTranscriptHandle</span>
+<span class="lineno">  235 </span><span class="spaces">    </span><span class="istickedoff">, _sh_dir        = &quot;&quot;</span>
+<span class="lineno">  236 </span><span class="spaces">    </span><span class="istickedoff">, _sh_save       = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  237 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  238 </span>
+<span class="lineno">  239 </span>-- | Pure no-op session handle placeholder — kept for the many test
+<span class="lineno">  240 </span>-- call sites that need a 'SessionHandle' inside a pure @let@ binding.
+<span class="lineno">  241 </span>-- Prefer 'mkNoOpSessionHandle' anywhere IO is already in scope.
+<span class="lineno">  242 </span>--
+<span class="lineno">  243 </span>-- The '_sh_meta' 'IORef' is created once at module load via
+<span class="lineno">  244 </span>-- 'unsafePerformIO' with 'NOINLINE' so every reference shares the
+<span class="lineno">  245 </span>-- same sentinel cell.
+<span class="lineno">  246 </span>noOpSessionHandle :: SessionHandle
+<span class="lineno">  247 </span><span class="decl"><span class="nottickedoff">noOpSessionHandle = SessionHandle</span>
+<span class="lineno">  248 </span><span class="spaces">  </span><span class="nottickedoff">{ _sh_meta       = noOpMetaRef</span>
+<span class="lineno">  249 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_transcript = mkNoOpTranscriptHandle</span>
+<span class="lineno">  250 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_dir        = &quot;&quot;</span>
+<span class="lineno">  251 </span><span class="spaces">  </span><span class="nottickedoff">, _sh_save       = pure ()</span>
+<span class="lineno">  252 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  253 </span>
+<span class="lineno">  254 </span>{-# NOINLINE noOpMetaRef #-}
+<span class="lineno">  255 </span>noOpMetaRef :: IORef SessionMeta
+<span class="lineno">  256 </span><span class="decl"><span class="nottickedoff">noOpMetaRef = unsafePerformIO (newIORef noOpMeta)</span></span>
+<span class="lineno">  257 </span>
+<span class="lineno">  258 </span>-- | Shared no-op callback slot for tests that do not care about
+<span class="lineno">  259 </span>-- bootstrap consumption. Equivalent in spirit to 'noOpMetaRef': tests
+<span class="lineno">  260 </span>-- that only READ or only set-to-'Nothing' can share the same cell.
+<span class="lineno">  261 </span>-- Tests that need to OBSERVE the callback firing should create their
+<span class="lineno">  262 </span>-- own @IORef (Maybe (IO ()))@ rather than using this sentinel.
+<span class="lineno">  263 </span>{-# NOINLINE noOpOnFirstStreamDoneRef #-}
+<span class="lineno">  264 </span>noOpOnFirstStreamDoneRef :: IORef (Maybe (IO ()))
+<span class="lineno">  265 </span><span class="decl"><span class="istickedoff">noOpOnFirstStreamDoneRef = unsafePerformIO (newIORef Nothing)</span></span>
+<span class="lineno">  266 </span>
+<span class="lineno">  267 </span>-- | Static default metadata for no-op handles.
+<span class="lineno">  268 </span>noOpMeta :: SessionMeta
+<span class="lineno">  269 </span><span class="decl"><span class="istickedoff">noOpMeta = SessionMeta</span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="istickedoff">{ _sm_id                = parseSessionId &quot;noop&quot;</span>
+<span class="lineno">  271 </span><span class="spaces">  </span><span class="istickedoff">, _sm_agent             = Nothing</span>
+<span class="lineno">  272 </span><span class="spaces">  </span><span class="istickedoff">, _sm_kind              = SkProvider (ProviderSpec (inferProviderId &quot;&quot;) (ModelId &quot;&quot;) Nothing)</span>
+<span class="lineno">  273 </span><span class="spaces">  </span><span class="istickedoff">, _sm_model             = <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  274 </span><span class="spaces">  </span><span class="istickedoff">, _sm_channel           = <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  275 </span><span class="spaces">  </span><span class="istickedoff">, _sm_createdAt         = <span class="nottickedoff">epoch</span></span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">, _sm_lastActive        = <span class="nottickedoff">epoch</span></span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="istickedoff">, _sm_bootstrapConsumed = <span class="nottickedoff">False</span></span>
+<span class="lineno">  278 </span><span class="spaces">  </span><span class="istickedoff">, _sm_archived          = <span class="nottickedoff">False</span></span>
+<span class="lineno">  279 </span><span class="spaces">  </span><span class="istickedoff">, _sm_description       = <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  280 </span><span class="spaces">  </span><span class="istickedoff">, _sm_autoSummary       = <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  281 </span><span class="spaces">  </span><span class="istickedoff">, _sm_source            = Nothing</span>
+<span class="lineno">  282 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">  283 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">epoch = UTCTime (fromGregorian 1970 1 1) (secondsToDiffTime 0)</span></span></span>
+<span class="lineno">  285 </span>
+<span class="lineno">  286 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  287 </span>-- Resume
+<span class="lineno">  288 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  289 </span>
+<span class="lineno">  290 </span>-- | Reopen an existing session by ID. Reads @session.json@, validates
+<span class="lineno">  291 </span>-- the JSON, and reopens @transcript.jsonl@ for append. When the optional
+<span class="lineno">  292 </span>-- broker is 'Just', the reopened transcript handle broadcasts records to
+<span class="lineno">  293 </span>-- it; 'Nothing' yields a plain file handle.
+<span class="lineno">  294 </span>resumeSession
+<span class="lineno">  295 </span>  :: Maybe StreamBroker
+<span class="lineno">  296 </span>  -&gt; LogHandle
+<span class="lineno">  297 </span>  -&gt; FilePath
+<span class="lineno">  298 </span>  -&gt; SessionId
+<span class="lineno">  299 </span>  -&gt; IO (Either ResumeError SessionHandle)
+<span class="lineno">  300 </span><span class="decl"><span class="istickedoff">resumeSession mBroker logger baseDir sid = do</span>
+<span class="lineno">  301 </span><span class="spaces">  </span><span class="istickedoff">let dir    = baseDir &lt;/&gt; T.unpack (unSessionId sid)</span>
+<span class="lineno">  302 </span><span class="spaces">      </span><span class="istickedoff">metaP  = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  303 </span><span class="spaces">      </span><span class="istickedoff">txP    = dir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  304 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesFileExist metaP</span>
+<span class="lineno">  305 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  306 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (ResumeMissingMetadata metaP))</span>
+<span class="lineno">  307 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  308 </span><span class="spaces">      </span><span class="istickedoff">raw &lt;- LBS.readFile metaP</span>
+<span class="lineno">  309 </span><span class="spaces">      </span><span class="istickedoff">case Aeson.eitherDecode' raw of</span>
+<span class="lineno">  310 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure</span>
+<span class="lineno">  311 </span><span class="spaces">          </span><span class="istickedoff">(Left (ResumeCorruptedMetadata metaP</span>
+<span class="lineno">  312 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">(&quot;failed to parse session metadata: &quot; &lt;&gt; err</span></span>
+<span class="lineno">  313 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; — recovery hint: inspect or remove &quot; &lt;&gt; metaP)</span>))</span>
+<span class="lineno">  314 </span><span class="spaces">        </span><span class="istickedoff">Right meta -&gt; do</span>
+<span class="lineno">  315 </span><span class="spaces">          </span><span class="istickedoff">metaRef &lt;- newIORef (meta :: SessionMeta)</span>
+<span class="lineno">  316 </span><span class="spaces">          </span><span class="istickedoff">tx &lt;- mkBroadcastingFileTranscriptHandle mBroker <span class="nottickedoff">sid</span> <span class="nottickedoff">logger</span> txP</span>
+<span class="lineno">  317 </span><span class="spaces">          </span><span class="istickedoff">let save = saveMeta dir metaRef</span>
+<span class="lineno">  318 </span><span class="spaces">              </span><span class="istickedoff">tx'  = touchLastActive metaRef save tx</span>
+<span class="lineno">  319 </span><span class="spaces">          </span><span class="istickedoff">pure (Right SessionHandle</span>
+<span class="lineno">  320 </span><span class="spaces">            </span><span class="istickedoff">{ _sh_meta       = metaRef</span>
+<span class="lineno">  321 </span><span class="spaces">            </span><span class="istickedoff">, _sh_transcript = tx'</span>
+<span class="lineno">  322 </span><span class="spaces">            </span><span class="istickedoff">, _sh_dir        = dir</span>
+<span class="lineno">  323 </span><span class="spaces">            </span><span class="istickedoff">, _sh_save       = <span class="nottickedoff">save</span></span>
+<span class="lineno">  324 </span><span class="spaces">            </span><span class="istickedoff">})</span></span>
+<span class="lineno">  325 </span>
+<span class="lineno">  326 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  327 </span>-- Branch
+<span class="lineno">  328 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  329 </span>
+<span class="lineno">  330 </span>-- | Reasons a branch seed cannot be resolved from a source session.
+<span class="lineno">  331 </span>-- Constructors carry diagnostic payloads for parity with the existing
+<span class="lineno">  332 </span>-- 'ResumeError' style.
+<span class="lineno">  333 </span>data BranchError
+<span class="lineno">  334 </span>  = BranchInvalidSourceId Text
+<span class="lineno">  335 </span>    -- ^ The supplied source session id failed the traversal-safety guard
+<span class="lineno">  336 </span>    -- (empty / contains @..@ or @\/@). The 'Text' is the offending id.
+<span class="lineno">  337 </span>  | BranchSourceMissing FilePath
+<span class="lineno">  338 </span>    -- ^ No @session.json@ at the expected path for the source session.
+<span class="lineno">  339 </span>  | BranchSourceNotProvider
+<span class="lineno">  340 </span>    -- ^ The source session is harness-backed; branching is provider-only.
+<span class="lineno">  341 </span>  | BranchEntryNotFound Text
+<span class="lineno">  342 </span>    -- ^ No transcript entry with the requested @_te_id@ exists in the
+<span class="lineno">  343 </span>    -- source transcript. The 'Text' is the requested entry id.
+<span class="lineno">  344 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>-- | A client-supplied branch request: the source session to copy from and
+<span class="lineno">  347 </span>-- the transcript entry id at which to cut the (inclusive) prefix.
+<span class="lineno">  348 </span>data BranchSpec = BranchSpec
+<span class="lineno">  349 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_bs_sourceSessionId</span></span></span> :: Text
+<span class="lineno">  350 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bs_upToEntryId</span></span></span>     :: Text
+<span class="lineno">  351 </span>  }
+<span class="lineno">  352 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  353 </span>
+<span class="lineno">  354 </span>-- | Wire shape: @{ &quot;session_id&quot;: ..., &quot;up_to_entry_id&quot;: ... }@. Defined
+<span class="lineno">  355 </span>-- here (not in the API module) so it is not an orphan instance.
+<span class="lineno">  356 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON BranchSpec</span></span></span></span> where
+<span class="lineno">  357 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;BranchSpec&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  358 </span><span class="spaces">    </span><span class="istickedoff">BranchSpec</span>
+<span class="lineno">  359 </span><span class="spaces">      </span><span class="istickedoff">&lt;$&gt; o Aeson..: &quot;session_id&quot;</span>
+<span class="lineno">  360 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o Aeson..: &quot;up_to_entry_id&quot;</span></span>
+<span class="lineno">  361 </span>
+<span class="lineno">  362 </span>-- | The resolved ingredients for seeding a branched session, read entirely
+<span class="lineno">  363 </span>-- from the on-disk source session (never from client-supplied payloads).
+<span class="lineno">  364 </span>data BranchSeed = BranchSeed
+<span class="lineno">  365 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_bseed_prefix</span></span></span>       :: [TranscriptEntry]
+<span class="lineno">  366 </span>    -- ^ Source transcript entries @[0..boundary]@ (inclusive), in order.
+<span class="lineno">  367 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bseed_sourceMeta</span></span></span>   :: SessionMeta
+<span class="lineno">  368 </span>    -- ^ Source session metadata, so the branch can inherit
+<span class="lineno">  369 </span>    -- @_sm_kind@ / @_sm_model@ / @_sm_agent@.
+<span class="lineno">  370 </span>  }
+<span class="lineno">  371 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  372 </span>
+<span class="lineno">  373 </span>-- | Traversal-safety guard for a branch source session id. Mirrors
+<span class="lineno">  374 </span>-- @PureClaw.Frontend.API.isValidSessionId@; replicated locally to avoid an
+<span class="lineno">  375 </span>-- import cycle (the API module imports this module). Rejects the empty
+<span class="lineno">  376 </span>-- string and anything containing @..@ or @\/@.
+<span class="lineno">  377 </span>isValidBranchSourceId :: Text -&gt; Bool
+<span class="lineno">  378 </span><span class="decl"><span class="istickedoff">isValidBranchSourceId sid</span>
+<span class="lineno">  379 </span><span class="spaces">  </span><span class="istickedoff">| T.null sid = False</span>
+<span class="lineno">  380 </span><span class="spaces">  </span><span class="istickedoff">| T.isInfixOf &quot;..&quot; sid = False</span>
+<span class="lineno">  381 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">T.isInfixOf &quot;/&quot; sid</span> = <span class="nottickedoff">False</span></span>
+<span class="lineno">  382 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = True</span></span>
+<span class="lineno">  383 </span>
+<span class="lineno">  384 </span>-- | Resolve a 'BranchSpec' against the on-disk source session under
+<span class="lineno">  385 </span>-- @baseDir@, producing a 'BranchSeed' or a typed 'BranchError'.
+<span class="lineno">  386 </span>--
+<span class="lineno">  387 </span>-- Validates (in order): the source id is traversal-safe, the source
+<span class="lineno">  388 </span>-- @session.json@ exists and decodes, the source is provider-backed, and
+<span class="lineno">  389 </span>-- the requested entry id is present in the source @transcript.jsonl@. On
+<span class="lineno">  390 </span>-- success returns the inclusive prefix @[0..boundary]@ and the source meta.
+<span class="lineno">  391 </span>--
+<span class="lineno">  392 </span>-- The frozen system prompt and last-used model ride in the copied
+<span class="lineno">  393 </span>-- transcript prefix (see @docs/session-branching.md@ §9), so the seed does
+<span class="lineno">  394 </span>-- not carry the source's @custom-prompt.md@; the fork inherits the agent
+<span class="lineno">  395 </span>-- identity from the source meta instead.
+<span class="lineno">  396 </span>--
+<span class="lineno">  397 </span>-- The prefix is read verbatim from the source transcript on disk — never
+<span class="lineno">  398 </span>-- from any caller-supplied payload — so a branch cannot inject history.
+<span class="lineno">  399 </span>resolveBranchSeed :: FilePath -&gt; BranchSpec -&gt; IO (Either BranchError BranchSeed)
+<span class="lineno">  400 </span><span class="decl"><span class="istickedoff">resolveBranchSeed baseDir bs</span>
+<span class="lineno">  401 </span><span class="spaces">  </span><span class="istickedoff">| not (isValidBranchSourceId sourceId) =</span>
+<span class="lineno">  402 </span><span class="spaces">      </span><span class="istickedoff">pure (Left (BranchInvalidSourceId sourceId))</span>
+<span class="lineno">  403 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">  404 </span><span class="spaces">      </span><span class="istickedoff">let dir   = baseDir &lt;/&gt; T.unpack sourceId</span>
+<span class="lineno">  405 </span><span class="spaces">          </span><span class="istickedoff">metaP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  406 </span><span class="spaces">          </span><span class="istickedoff">txP   = dir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  407 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- doesFileExist metaP</span>
+<span class="lineno">  408 </span><span class="spaces">      </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  409 </span><span class="spaces">        </span><span class="istickedoff">then pure (Left (BranchSourceMissing metaP))</span>
+<span class="lineno">  410 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  411 </span><span class="spaces">          </span><span class="istickedoff">raw &lt;- LBS.readFile metaP</span>
+<span class="lineno">  412 </span><span class="spaces">          </span><span class="istickedoff">case Aeson.eitherDecode' raw of</span>
+<span class="lineno">  413 </span><span class="spaces">            </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">pure (Left (BranchSourceMissing metaP))</span></span>
+<span class="lineno">  414 </span><span class="spaces">            </span><span class="istickedoff">Right meta -&gt; case _sm_kind (meta :: SessionMeta) of</span>
+<span class="lineno">  415 </span><span class="spaces">              </span><span class="istickedoff">SkHarness _ -&gt; pure (Left BranchSourceNotProvider)</span>
+<span class="lineno">  416 </span><span class="spaces">              </span><span class="istickedoff">SkProvider _ -&gt; do</span>
+<span class="lineno">  417 </span><span class="spaces">                </span><span class="istickedoff">entries &lt;- readTranscriptEntries txP</span>
+<span class="lineno">  418 </span><span class="spaces">                </span><span class="istickedoff">case sliceInclusivePrefix (_bs_upToEntryId bs) entries of</span>
+<span class="lineno">  419 </span><span class="spaces">                  </span><span class="istickedoff">Nothing -&gt; pure (Left (BranchEntryNotFound (_bs_upToEntryId bs)))</span>
+<span class="lineno">  420 </span><span class="spaces">                  </span><span class="istickedoff">Just prefix -&gt;</span>
+<span class="lineno">  421 </span><span class="spaces">                    </span><span class="istickedoff">pure (Right BranchSeed</span>
+<span class="lineno">  422 </span><span class="spaces">                      </span><span class="istickedoff">{ _bseed_prefix     = prefix</span>
+<span class="lineno">  423 </span><span class="spaces">                      </span><span class="istickedoff">, _bseed_sourceMeta = meta</span>
+<span class="lineno">  424 </span><span class="spaces">                      </span><span class="istickedoff">})</span>
+<span class="lineno">  425 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  426 </span><span class="spaces">    </span><span class="istickedoff">sourceId = _bs_sourceSessionId bs</span></span>
+<span class="lineno">  427 </span>
+<span class="lineno">  428 </span>-- | Read and decode a @transcript.jsonl@ file into 'TranscriptEntry'
+<span class="lineno">  429 </span>-- values, in file (oldest-first) order. Missing files and undecodable
+<span class="lineno">  430 </span>-- lines yield @[]@ / skipped lines respectively. This is a read-only path,
+<span class="lineno">  431 </span>-- so it intentionally does not open a file transcript /handle/ (those are
+<span class="lineno">  432 </span>-- reserved for write sites that must reach the broker).
+<span class="lineno">  433 </span>readTranscriptEntries :: FilePath -&gt; IO [TranscriptEntry]
+<span class="lineno">  434 </span><span class="decl"><span class="istickedoff">readTranscriptEntries path = do</span>
+<span class="lineno">  435 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesFileExist path</span>
+<span class="lineno">  436 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">not exists</span></span>
+<span class="lineno">  437 </span><span class="spaces">    </span><span class="istickedoff">then <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  438 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  439 </span><span class="spaces">      </span><span class="istickedoff">eRaw &lt;- try (LBS.readFile path) :: IO (Either IOException LBS.ByteString)</span>
+<span class="lineno">  440 </span><span class="spaces">      </span><span class="istickedoff">case eRaw of</span>
+<span class="lineno">  441 </span><span class="spaces">        </span><span class="istickedoff">Left _    -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  442 </span><span class="spaces">        </span><span class="istickedoff">Right raw -&gt; pure (mapMaybe Aeson.decode' (splitJsonlLines raw))</span></span>
+<span class="lineno">  443 </span>
+<span class="lineno">  444 </span>-- | Split a lazy 'LBS.ByteString' into non-empty newline-delimited chunks.
+<span class="lineno">  445 </span>splitJsonlLines :: LBS.ByteString -&gt; [LBS.ByteString]
+<span class="lineno">  446 </span><span class="decl"><span class="istickedoff">splitJsonlLines = filter (not . LBS.null) . LBSC.split '\n'</span></span>
+<span class="lineno">  447 </span>
+<span class="lineno">  448 </span>-- | Return the inclusive prefix @[0..idx]@ up to and including the first
+<span class="lineno">  449 </span>-- entry whose @_te_id@ matches the target, or 'Nothing' if no such entry
+<span class="lineno">  450 </span>-- exists.
+<span class="lineno">  451 </span>sliceInclusivePrefix :: Text -&gt; [TranscriptEntry] -&gt; Maybe [TranscriptEntry]
+<span class="lineno">  452 </span><span class="decl"><span class="istickedoff">sliceInclusivePrefix target = go []</span>
+<span class="lineno">  453 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  454 </span><span class="spaces">    </span><span class="istickedoff">go _   [] = Nothing</span>
+<span class="lineno">  455 </span><span class="spaces">    </span><span class="istickedoff">go acc (e:es)</span>
+<span class="lineno">  456 </span><span class="spaces">      </span><span class="istickedoff">| _te_id e == target = Just (reverse (e : acc))</span>
+<span class="lineno">  457 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>          = go (e : acc) es</span></span>
+<span class="lineno">  458 </span>
+<span class="lineno">  459 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  460 </span>-- Enumeration and lookup
+<span class="lineno">  461 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  462 </span>
+<span class="lineno">  463 </span>-- | Read all @session.json@ files under @baseDir@, optionally filtering
+<span class="lineno">  464 </span>-- by agent name, sorted by @last_active@ descending, and capped at
+<span class="lineno">  465 </span>-- @limit@ entries.
+<span class="lineno">  466 </span>--
+<span class="lineno">  467 </span>-- Silently skips entries that fail to decode so that a single corrupted
+<span class="lineno">  468 </span>-- metadata file does not hide the remaining sessions from the user.
+<span class="lineno">  469 </span>listSessions :: FilePath -&gt; Maybe AgentName -&gt; Int -&gt; IO [SessionMeta]
+<span class="lineno">  470 </span><span class="decl"><span class="istickedoff">listSessions baseDir mAgent limit = do</span>
+<span class="lineno">  471 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesDirectoryExist baseDir</span>
+<span class="lineno">  472 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  473 </span><span class="spaces">    </span><span class="istickedoff">then pure []</span>
+<span class="lineno">  474 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  475 </span><span class="spaces">      </span><span class="istickedoff">entries &lt;- listDirectory baseDir</span>
+<span class="lineno">  476 </span><span class="spaces">      </span><span class="istickedoff">metas &lt;- fmap catMaybes' (traverse (tryLoad baseDir) entries)</span>
+<span class="lineno">  477 </span><span class="spaces">      </span><span class="istickedoff">let filtered = case mAgent of</span>
+<span class="lineno">  478 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; metas</span>
+<span class="lineno">  479 </span><span class="spaces">            </span><span class="istickedoff">Just a  -&gt; filter (\m -&gt; _sm_agent m == Just a) metas</span>
+<span class="lineno">  480 </span><span class="spaces">          </span><span class="istickedoff">sorted = sortOn (Down . _sm_lastActive) filtered</span>
+<span class="lineno">  481 </span><span class="spaces">      </span><span class="istickedoff">pure (take limit sorted)</span>
+<span class="lineno">  482 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  483 </span><span class="spaces">    </span><span class="istickedoff">catMaybes' = foldr (\mx acc -&gt; case mx of</span>
+<span class="lineno">  484 </span><span class="spaces">                          </span><span class="istickedoff">Just x  -&gt; x : acc</span>
+<span class="lineno">  485 </span><span class="spaces">                          </span><span class="istickedoff">Nothing -&gt; acc) []</span></span>
+<span class="lineno">  486 </span>
+<span class="lineno">  487 </span>-- | Attempt to load @\&lt;baseDir\&gt;/\&lt;name\&gt;/session.json@. Returns
+<span class="lineno">  488 </span>-- 'Nothing' if the path is not a directory, the metadata file is
+<span class="lineno">  489 </span>-- missing, unreadable, or malformed.
+<span class="lineno">  490 </span>tryLoad :: FilePath -&gt; FilePath -&gt; IO (Maybe SessionMeta)
+<span class="lineno">  491 </span><span class="decl"><span class="istickedoff">tryLoad baseDir name = do</span>
+<span class="lineno">  492 </span><span class="spaces">  </span><span class="istickedoff">let dir   = baseDir &lt;/&gt; name</span>
+<span class="lineno">  493 </span><span class="spaces">      </span><span class="istickedoff">metaP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  494 </span><span class="spaces">  </span><span class="istickedoff">isDir &lt;- doesDirectoryExist dir</span>
+<span class="lineno">  495 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">not isDir</span></span>
+<span class="lineno">  496 </span><span class="spaces">    </span><span class="istickedoff">then <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  497 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  498 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- doesFileExist metaP</span>
+<span class="lineno">  499 </span><span class="spaces">      </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  500 </span><span class="spaces">        </span><span class="istickedoff">then pure Nothing</span>
+<span class="lineno">  501 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  502 </span><span class="spaces">          </span><span class="istickedoff">eBytes &lt;- try (LBS.readFile metaP) :: IO (Either IOException LBS.ByteString)</span>
+<span class="lineno">  503 </span><span class="spaces">          </span><span class="istickedoff">case eBytes of</span>
+<span class="lineno">  504 </span><span class="spaces">            </span><span class="istickedoff">Left _     -&gt; <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  505 </span><span class="spaces">            </span><span class="istickedoff">Right raw  -&gt; case Aeson.decode' raw of</span>
+<span class="lineno">  506 </span><span class="spaces">              </span><span class="istickedoff">Just m  -&gt; pure (Just m)</span>
+<span class="lineno">  507 </span><span class="spaces">              </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure Nothing</span></span></span>
+<span class="lineno">  508 </span>
+<span class="lineno">  509 </span>-- | Resolve a user-supplied reference (exact ID or prefix) to a concrete
+<span class="lineno">  510 </span>-- 'SessionId'. Exact matches win outright; otherwise the match set is
+<span class="lineno">  511 </span>-- computed by 'T.isPrefixOf' over the full ID string.
+<span class="lineno">  512 </span>resolveSessionRef
+<span class="lineno">  513 </span>  :: FilePath
+<span class="lineno">  514 </span>  -&gt; Text
+<span class="lineno">  515 </span>  -&gt; IO (Either ResolveError SessionId)
+<span class="lineno">  516 </span><span class="decl"><span class="istickedoff">resolveSessionRef baseDir ref = do</span>
+<span class="lineno">  517 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesDirectoryExist baseDir</span>
+<span class="lineno">  518 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  519 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left NotFound)</span>
+<span class="lineno">  520 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  521 </span><span class="spaces">      </span><span class="istickedoff">entries &lt;- listDirectory baseDir</span>
+<span class="lineno">  522 </span><span class="spaces">      </span><span class="istickedoff">-- Keep only entries that actually have a session.json — avoids</span>
+<span class="lineno">  523 </span><span class="spaces">      </span><span class="istickedoff">-- matching stray directories created by unrelated tests or users.</span>
+<span class="lineno">  524 </span><span class="spaces">      </span><span class="istickedoff">valid &lt;- filterM hasMetadata entries</span>
+<span class="lineno">  525 </span><span class="spaces">      </span><span class="istickedoff">let ids = map (SessionId . T.pack) valid</span>
+<span class="lineno">  526 </span><span class="spaces">      </span><span class="istickedoff">if ref `elem` map (\(SessionId t) -&gt; t) ids</span>
+<span class="lineno">  527 </span><span class="spaces">        </span><span class="istickedoff">then pure (Right (SessionId ref))</span>
+<span class="lineno">  528 </span><span class="spaces">        </span><span class="istickedoff">else case filter (\(SessionId t) -&gt; ref `T.isPrefixOf` t) ids of</span>
+<span class="lineno">  529 </span><span class="spaces">          </span><span class="istickedoff">[]  -&gt; pure (Left NotFound)</span>
+<span class="lineno">  530 </span><span class="spaces">          </span><span class="istickedoff">[x] -&gt; pure (Right x)</span>
+<span class="lineno">  531 </span><span class="spaces">          </span><span class="istickedoff">xs  -&gt; pure (Left (Ambiguous xs))</span>
+<span class="lineno">  532 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  533 </span><span class="spaces">    </span><span class="istickedoff">hasMetadata name = do</span>
+<span class="lineno">  534 </span><span class="spaces">      </span><span class="istickedoff">let metaP = baseDir &lt;/&gt; name &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  535 </span><span class="spaces">      </span><span class="istickedoff">doesFileExist metaP</span>
+<span class="lineno">  536 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  537 </span><span class="spaces">    </span><span class="istickedoff">-- Local strict filterM to avoid pulling in Control.Monad just for this.</span>
+<span class="lineno">  538 </span><span class="spaces">    </span><span class="istickedoff">filterM _ []     = pure []</span>
+<span class="lineno">  539 </span><span class="spaces">    </span><span class="istickedoff">filterM p (x:xs) = do</span>
+<span class="lineno">  540 </span><span class="spaces">      </span><span class="istickedoff">keep &lt;- p x</span>
+<span class="lineno">  541 </span><span class="spaces">      </span><span class="istickedoff">rest &lt;- filterM p xs</span>
+<span class="lineno">  542 </span><span class="spaces">      </span><span class="istickedoff">pure (if <span class="tickonlytrue">keep</span> then x : rest else <span class="nottickedoff">rest</span>)</span></span>
+<span class="lineno">  543 </span>
+<span class="lineno">  544 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  545 </span>-- Runtime validation
+<span class="lineno">  546 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  547 </span>
+<span class="lineno">  548 </span>-- | Validate a 'SessionKind' against the currently-running harnesses.
+<span class="lineno">  549 </span>--
+<span class="lineno">  550 </span>-- * 'SkProvider' always resolves to @RuntimeOk TargetProvider@.
+<span class="lineno">  551 </span>-- * @'SkHarness' spec@ resolves to @RuntimeOk (TargetHarness name)@ if
+<span class="lineno">  552 </span>--   a harness with that name is present in the map (name derived from
+<span class="lineno">  553 </span>--   the harness flavour).
+<span class="lineno">  554 </span>-- * @'SkHarness' spec@ resolves to @RuntimeFallback TargetProvider msg@
+<span class="lineno">  555 </span>--   if the harness is absent, where @msg@ explains the fallback for
+<span class="lineno">  556 </span>--   logging at warn level.
+<span class="lineno">  557 </span>validateRuntime :: Map Text HarnessHandle -&gt; SessionKind -&gt; ResolvedRuntime
+<span class="lineno">  558 </span><span class="decl"><span class="istickedoff">validateRuntime _ (SkProvider _) = RuntimeOk TargetProvider</span>
+<span class="lineno">  559 </span><span class="spaces"></span><span class="istickedoff">validateRuntime harnesses (SkHarness spec) =</span>
+<span class="lineno">  560 </span><span class="spaces">  </span><span class="istickedoff">let name = sessionKindHarnessName spec</span>
+<span class="lineno">  561 </span><span class="spaces">  </span><span class="istickedoff">in if Map.member name harnesses</span>
+<span class="lineno">  562 </span><span class="spaces">       </span><span class="istickedoff">then RuntimeOk (TargetHarness name)</span>
+<span class="lineno">  563 </span><span class="spaces">       </span><span class="istickedoff">else let msg = &quot;harness '&quot; &lt;&gt; name &lt;&gt; &quot;' is not running, falling back to provider&quot;</span>
+<span class="lineno">  564 </span><span class="spaces">            </span><span class="istickedoff">in RuntimeFallback TargetProvider msg</span></span>
+<span class="lineno">  565 </span>
+<span class="lineno">  566 </span>-- | Extract the harness name from a 'HarnessSpec' by rendering its flavour.
+<span class="lineno">  567 </span>sessionKindHarnessName :: HarnessSpec -&gt; Text
+<span class="lineno">  568 </span><span class="decl"><span class="istickedoff">sessionKindHarnessName spec = case _h_flavour spec of</span>
+<span class="lineno">  569 </span><span class="spaces">  </span><span class="istickedoff">HClaudeCode -&gt; <span class="nottickedoff">&quot;claude-code&quot;</span></span>
+<span class="lineno">  570 </span><span class="spaces">  </span><span class="istickedoff">HCodex      -&gt; <span class="nottickedoff">&quot;codex&quot;</span></span>
+<span class="lineno">  571 </span><span class="spaces">  </span><span class="istickedoff">HOpenCode   -&gt; <span class="nottickedoff">&quot;opencode&quot;</span></span>
+<span class="lineno">  572 </span><span class="spaces">  </span><span class="istickedoff">HHermes     -&gt; <span class="nottickedoff">&quot;hermes&quot;</span></span>
+<span class="lineno">  573 </span><span class="spaces">  </span><span class="istickedoff">HPureClaw   -&gt; <span class="nottickedoff">&quot;pureclaw&quot;</span></span>
+<span class="lineno">  574 </span><span class="spaces">  </span><span class="istickedoff">HCustom n   -&gt; n</span></span>
+<span class="lineno">  575 </span>
+<span class="lineno">  576 </span>-- | Resolve a resumed session's 'SessionKind' to a concrete
+<span class="lineno">  577 </span>-- 'MessageTarget' given the currently-running harness map, logging a
+<span class="lineno">  578 </span>-- warning if the recorded runtime is no longer available.
+<span class="lineno">  579 </span>--
+<span class="lineno">  580 </span>-- Wraps 'validateRuntime': on 'RuntimeFallback' the provided warning
+<span class="lineno">  581 </span>-- message is routed to @_lh_logWarn@ and the fallback target (always
+<span class="lineno">  582 </span>-- 'TargetProvider') is returned; on 'RuntimeOk' the target is returned
+<span class="lineno">  583 </span>-- without logging.
+<span class="lineno">  584 </span>resolveResumedTarget
+<span class="lineno">  585 </span>  :: LogHandle
+<span class="lineno">  586 </span>  -&gt; Map Text HarnessHandle
+<span class="lineno">  587 </span>  -&gt; SessionKind
+<span class="lineno">  588 </span>  -&gt; IO MessageTarget
+<span class="lineno">  589 </span><span class="decl"><span class="istickedoff">resolveResumedTarget logger harnesses sk = case validateRuntime harnesses sk of</span>
+<span class="lineno">  590 </span><span class="spaces">  </span><span class="istickedoff">RuntimeOk tgt -&gt; pure tgt</span>
+<span class="lineno">  591 </span><span class="spaces">  </span><span class="istickedoff">RuntimeFallback tgt warning -&gt; do</span>
+<span class="lineno">  592 </span><span class="spaces">    </span><span class="istickedoff">_lh_logWarn logger warning</span>
+<span class="lineno">  593 </span><span class="spaces">    </span><span class="istickedoff">pure tgt</span></span>
+<span class="lineno">  594 </span>
+<span class="lineno">  595 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  596 </span>-- Bootstrap consumption
+<span class="lineno">  597 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  598 </span>
+<span class="lineno">  599 </span>-- | Flip '_sm_bootstrapConsumed' to 'True' in the session metadata
+<span class="lineno">  600 </span>-- 'IORef' and persist the change to @session.json@ via '_sh_save'.
+<span class="lineno">  601 </span>--
+<span class="lineno">  602 </span>-- Called by the agent loop the first time a provider response completes
+<span class="lineno">  603 </span>-- ('StreamDone'), via the one-shot callback installed on
+<span class="lineno">  604 </span>-- @_env_onFirstStreamDone@. Idempotent: re-invocations re-save the same
+<span class="lineno">  605 </span>-- metadata without error.
+<span class="lineno">  606 </span>markBootstrapConsumed :: SessionHandle -&gt; IO ()
+<span class="lineno">  607 </span><span class="decl"><span class="istickedoff">markBootstrapConsumed sh = do</span>
+<span class="lineno">  608 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' (_sh_meta sh) $ \m -&gt;</span>
+<span class="lineno">  609 </span><span class="spaces">    </span><span class="istickedoff">(m { _sm_bootstrapConsumed = True }, ())</span>
+<span class="lineno">  610 </span><span class="spaces">  </span><span class="istickedoff">_sh_save sh</span></span>
+<span class="lineno">  611 </span>
+<span class="lineno">  612 </span>-- | Record the session origin ('MessageSource') set-once: write '_sm_source'
+<span class="lineno">  613 </span>-- only if it is currently 'Nothing', and persist via '_sh_save' IFF the
+<span class="lineno">  614 </span>-- value actually changed. A second call with a different source is a no-op
+<span class="lineno">  615 </span>-- (the first sender wins and no redundant save occurs).
+<span class="lineno">  616 </span>--
+<span class="lineno">  617 </span>-- Same atomicity pattern as 'markBootstrapConsumed' / 'touchSessionLastActive'
+<span class="lineno">  618 </span>-- ('atomicModifyIORef'' on '_sh_meta'); the changed-flag avoids a wasteful
+<span class="lineno">  619 </span>-- re-save on the already-set path.
+<span class="lineno">  620 </span>--
+<span class="lineno">  621 </span>-- SECURITY: '_sm_source' is attacker-asserted provenance — it MUST NOT feed
+<span class="lineno">  622 </span>-- any access-control decision.
+<span class="lineno">  623 </span>setSourceIfAbsent :: SessionHandle -&gt; MessageSource -&gt; IO ()
+<span class="lineno">  624 </span><span class="decl"><span class="istickedoff">setSourceIfAbsent sh src = do</span>
+<span class="lineno">  625 </span><span class="spaces">  </span><span class="istickedoff">changed &lt;- atomicModifyIORef' (_sh_meta sh) $ \m -&gt;</span>
+<span class="lineno">  626 </span><span class="spaces">    </span><span class="istickedoff">case _sm_source m of</span>
+<span class="lineno">  627 </span><span class="spaces">      </span><span class="istickedoff">Just _  -&gt; (m, False)</span>
+<span class="lineno">  628 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; (m { _sm_source = Just src }, True)</span>
+<span class="lineno">  629 </span><span class="spaces">  </span><span class="istickedoff">when changed (_sh_save sh)</span></span>
+<span class="lineno">  630 </span>
+<span class="lineno">  631 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  632 </span>-- Archive flag
+<span class="lineno">  633 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  634 </span>
+<span class="lineno">  635 </span>-- | Reasons 'setArchived' may fail. The session directory and transcript
+<span class="lineno">  636 </span>-- are never touched, so failure leaves on-disk state unchanged.
+<span class="lineno">  637 </span>data SetArchivedError
+<span class="lineno">  638 </span>  = SetArchivedSessionMissing
+<span class="lineno">  639 </span>    -- ^ @\&lt;baseDir\&gt;/\&lt;sid\&gt;/session.json@ does not exist.
+<span class="lineno">  640 </span>  | SetArchivedParseFailed Text
+<span class="lineno">  641 </span>    -- ^ session.json was unreadable or did not decode as 'SessionMeta'.
+<span class="lineno">  642 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  643 </span>
+<span class="lineno">  644 </span>-- | Toggle 'SessionMeta._sm_archived' for a session that may or may not
+<span class="lineno">  645 </span>-- have a live 'SessionHandle'. Operates directly on the on-disk
+<span class="lineno">  646 </span>-- @session.json@: reads, updates the archive flag, writes back via the
+<span class="lineno">  647 </span>-- usual tmp-file + rename atomicity pattern.
+<span class="lineno">  648 </span>--
+<span class="lineno">  649 </span>-- Crucially, this is **display state only** — neither the session
+<span class="lineno">  650 </span>-- directory nor the transcript is removed. Unarchiving restores the
+<span class="lineno">  651 </span>-- session to &quot;Recent Sessions&quot; with all history intact.
+<span class="lineno">  652 </span>setArchived :: FilePath -&gt; SessionId -&gt; Bool -&gt; IO (Either SetArchivedError ())
+<span class="lineno">  653 </span><span class="decl"><span class="istickedoff">setArchived baseDir sid archived =</span>
+<span class="lineno">  654 </span><span class="spaces">  </span><span class="istickedoff">updateSessionMeta baseDir sid (\m -&gt; m { _sm_archived = archived })</span>
+<span class="lineno">  655 </span><span class="spaces">    </span><span class="istickedoff">SetArchivedSessionMissing <span class="nottickedoff">SetArchivedParseFailed</span></span></span>
+<span class="lineno">  656 </span>
+<span class="lineno">  657 </span>-- | Reasons 'setDescription' may fail. Same shape as 'SetArchivedError'.
+<span class="lineno">  658 </span>data SetDescriptionError
+<span class="lineno">  659 </span>  = SetDescriptionSessionMissing
+<span class="lineno">  660 </span>  | SetDescriptionParseFailed Text
+<span class="lineno">  661 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  662 </span>
+<span class="lineno">  663 </span>-- | Set or clear the user-provided session description. Passing 'Just t'
+<span class="lineno">  664 </span>-- stores the description (trimmed of surrounding whitespace; an empty
+<span class="lineno">  665 </span>-- result is treated as 'Nothing' so callers can pass through what the
+<span class="lineno">  666 </span>-- user typed without preprocessing). Passing 'Nothing' clears it,
+<span class="lineno">  667 </span>-- letting display surfaces fall back to '_sm_autoSummary' or a
+<span class="lineno">  668 </span>-- transcript-derived snippet.
+<span class="lineno">  669 </span>setDescription :: FilePath -&gt; SessionId -&gt; Maybe Text -&gt; IO (Either SetDescriptionError ())
+<span class="lineno">  670 </span><span class="decl"><span class="istickedoff">setDescription baseDir sid mDesc =</span>
+<span class="lineno">  671 </span><span class="spaces">  </span><span class="istickedoff">let normalized = mDesc &gt;&gt;= \t -&gt; let s = T.strip t in if T.null s then Nothing else Just s</span>
+<span class="lineno">  672 </span><span class="spaces">  </span><span class="istickedoff">in  updateSessionMeta baseDir sid (\m -&gt; m { _sm_description = normalized })</span>
+<span class="lineno">  673 </span><span class="spaces">        </span><span class="istickedoff">SetDescriptionSessionMissing <span class="nottickedoff">SetDescriptionParseFailed</span></span></span>
+<span class="lineno">  674 </span>
+<span class="lineno">  675 </span>-- | Best-effort bump of @_sm_lastActive@ to the current time, operating
+<span class="lineno">  676 </span>-- directly on the on-disk @session.json@ under @\&lt;baseDir\&gt;/\&lt;sid\&gt;/@ — no
+<span class="lineno">  677 </span>-- live 'SessionHandle' required.
+<span class="lineno">  678 </span>--
+<span class="lineno">  679 </span>-- The frontend gateway records transcript entries through a raw
+<span class="lineno">  680 </span>-- broadcasting handle (see @doCompletion@), not the
+<span class="lineno">  681 </span>-- 'touchLastActive'-wrapped 'SessionHandle' transcript, so the automatic
+<span class="lineno">  682 </span>-- bump never fires on that path. Without this call a provider session's
+<span class="lineno">  683 </span>-- @_sm_lastActive@ stays pinned at @_sm_createdAt@ and the sidebar's &quot;age&quot;
+<span class="lineno">  684 </span>-- pill shows the session's start time instead of its most recent activity.
+<span class="lineno">  685 </span>--
+<span class="lineno">  686 </span>-- Silent on a missing or corrupt @session.json@: keeping the sidebar pill
+<span class="lineno">  687 </span>-- fresh must never fail a completion the user already received.
+<span class="lineno">  688 </span>touchSessionLastActive :: FilePath -&gt; SessionId -&gt; IO ()
+<span class="lineno">  689 </span><span class="decl"><span class="istickedoff">touchSessionLastActive baseDir sid = do</span>
+<span class="lineno">  690 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  691 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- updateSessionMeta baseDir sid (\m -&gt; m { _sm_lastActive = now })</span>
+<span class="lineno">  692 </span><span class="spaces">         </span><span class="istickedoff"><span class="nottickedoff">()</span> <span class="nottickedoff">(const ())</span></span>
+<span class="lineno">  693 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  694 </span>
+<span class="lineno">  695 </span>-- | Shared read-modify-write helper for the disk-only meta mutators.
+<span class="lineno">  696 </span>-- Reads @session.json@, applies @f@, and writes back via tmp-file +
+<span class="lineno">  697 </span>-- rename. @missing@ and @parseFail@ are the caller's error
+<span class="lineno">  698 </span>-- constructors so each public mutator returns its own error type.
+<span class="lineno">  699 </span>updateSessionMeta
+<span class="lineno">  700 </span>  :: FilePath
+<span class="lineno">  701 </span>  -&gt; SessionId
+<span class="lineno">  702 </span>  -&gt; (SessionMeta -&gt; SessionMeta)
+<span class="lineno">  703 </span>  -&gt; e
+<span class="lineno">  704 </span>  -&gt; (Text -&gt; e)
+<span class="lineno">  705 </span>  -&gt; IO (Either e ())
+<span class="lineno">  706 </span><span class="decl"><span class="istickedoff">updateSessionMeta baseDir sid f missing parseFail = do</span>
+<span class="lineno">  707 </span><span class="spaces">  </span><span class="istickedoff">let dir    = baseDir &lt;/&gt; T.unpack (unSessionId sid)</span>
+<span class="lineno">  708 </span><span class="spaces">      </span><span class="istickedoff">finalP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  709 </span><span class="spaces">      </span><span class="istickedoff">tmpP   = finalP &lt;&gt; &quot;.tmp&quot;</span>
+<span class="lineno">  710 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesFileExist finalP</span>
+<span class="lineno">  711 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  712 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left missing)</span>
+<span class="lineno">  713 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  714 </span><span class="spaces">      </span><span class="istickedoff">eBytes &lt;- try (LBS.readFile finalP) :: IO (Either IOException LBS.ByteString)</span>
+<span class="lineno">  715 </span><span class="spaces">      </span><span class="istickedoff">case eBytes of</span>
+<span class="lineno">  716 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (Left (parseFail (T.pack (show e))))</span></span>
+<span class="lineno">  717 </span><span class="spaces">        </span><span class="istickedoff">Right raw -&gt; case Aeson.eitherDecode' raw of</span>
+<span class="lineno">  718 </span><span class="spaces">          </span><span class="istickedoff">Left  err  -&gt; <span class="nottickedoff">pure (Left (parseFail (T.pack err)))</span></span>
+<span class="lineno">  719 </span><span class="spaces">          </span><span class="istickedoff">Right meta -&gt; do</span>
+<span class="lineno">  720 </span><span class="spaces">            </span><span class="istickedoff">LBS.writeFile tmpP (Aeson.encode (f meta))</span>
+<span class="lineno">  721 </span><span class="spaces">            </span><span class="istickedoff">setFileMode tmpP 0o600</span>
+<span class="lineno">  722 </span><span class="spaces">            </span><span class="istickedoff">renameFile tmpP finalP</span>
+<span class="lineno">  723 </span><span class="spaces">            </span><span class="istickedoff">pure (Right ())</span></span>
+<span class="lineno">  724 </span>
+<span class="lineno">  725 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  726 </span>-- Resume context reload
+<span class="lineno">  727 </span>-- ----------------------------------------------------------------------------
+<span class="lineno">  728 </span>
+<span class="lineno">  729 </span>-- | Load a bounded window of recent 'Message' values from a session's
+<span class="lineno">  730 </span>-- transcript, oldest-first.
+<span class="lineno">  731 </span>--
+<span class="lineno">  732 </span>-- @loadRecentMessages th maxCount maxTokens@ reads every recorded
+<span class="lineno">  733 </span>-- transcript entry via '_th_query', converts each to a text 'Message'
+<span class="lineno">  734 </span>-- (mapping 'Request' → 'User' and 'Response' → 'Assistant'), keeps at
+<span class="lineno">  735 </span>-- most the last @maxCount@, then walks that window from newest back to
+<span class="lineno">  736 </span>-- oldest accumulating an estimated token budget (computed as
+<span class="lineno">  737 </span>-- @T.length payload `div` 4@ — a rough heuristic, not a true tokenizer).
+<span class="lineno">  738 </span>-- Once the budget is exhausted no further messages are added.
+<span class="lineno">  739 </span>--
+<span class="lineno">  740 </span>-- If the transcript contains a compaction boundary (an entry whose
+<span class="lineno">  741 </span>-- metadata includes the 'compactionMetadataKey'), only entries from the
+<span class="lineno">  742 </span>-- last such boundary onward are considered.  The compaction entry itself
+<span class="lineno">  743 </span>-- is included — its payload carries the summary text that replaces the
+<span class="lineno">  744 </span>-- earlier conversation.  This ensures that after a gateway restart the
+<span class="lineno">  745 </span>-- agent resumes with the compacted view rather than double-counting
+<span class="lineno">  746 </span>-- messages that were folded into the summary.
+<span class="lineno">  747 </span>--
+<span class="lineno">  748 </span>-- Returns the surviving messages in chronological (oldest-first) order
+<span class="lineno">  749 </span>-- so they can be replayed directly into the context.
+<span class="lineno">  750 </span>loadRecentMessages :: TranscriptHandle -&gt; Int -&gt; Int -&gt; IO [Message]
+<span class="lineno">  751 </span><span class="decl"><span class="istickedoff">loadRecentMessages th maxCount maxTokens = do</span>
+<span class="lineno">  752 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- _th_query th TranscriptFilter</span>
+<span class="lineno">  753 </span><span class="spaces">    </span><span class="istickedoff">{ _tf_harness   = Nothing</span>
+<span class="lineno">  754 </span><span class="spaces">    </span><span class="istickedoff">, _tf_model     = Nothing</span>
+<span class="lineno">  755 </span><span class="spaces">    </span><span class="istickedoff">, _tf_direction = Nothing</span>
+<span class="lineno">  756 </span><span class="spaces">    </span><span class="istickedoff">, _tf_timeRange = Nothing</span>
+<span class="lineno">  757 </span><span class="spaces">    </span><span class="istickedoff">, _tf_limit     = Nothing</span>
+<span class="lineno">  758 </span><span class="spaces">    </span><span class="istickedoff">}</span>
+<span class="lineno">  759 </span><span class="spaces">  </span><span class="istickedoff">let -- Trim to entries from the last compaction boundary onward.</span>
+<span class="lineno">  760 </span><span class="spaces">      </span><span class="istickedoff">postCompaction = trimToLastCompaction entries</span>
+<span class="lineno">  761 </span><span class="spaces">      </span><span class="istickedoff">total     = length postCompaction</span>
+<span class="lineno">  762 </span><span class="spaces">      </span><span class="istickedoff">countWin  = if total &gt; maxCount</span>
+<span class="lineno">  763 </span><span class="spaces">                    </span><span class="istickedoff">then drop (total - maxCount) postCompaction</span>
+<span class="lineno">  764 </span><span class="spaces">                    </span><span class="istickedoff">else postCompaction</span>
+<span class="lineno">  765 </span><span class="spaces">      </span><span class="istickedoff">-- Walk newest→oldest, adding to the budget; stop at the first</span>
+<span class="lineno">  766 </span><span class="spaces">      </span><span class="istickedoff">-- entry that would push us OVER the limit. Always include at</span>
+<span class="lineno">  767 </span><span class="spaces">      </span><span class="istickedoff">-- least one entry if the window is non-empty, so a single</span>
+<span class="lineno">  768 </span><span class="spaces">      </span><span class="istickedoff">-- oversized message is not silently dropped.</span>
+<span class="lineno">  769 </span><span class="spaces">      </span><span class="istickedoff">reversed  = reverse countWin</span>
+<span class="lineno">  770 </span><span class="spaces">      </span><span class="istickedoff">budgeted  = goBudget 0 <span class="nottickedoff">True</span> reversed</span>
+<span class="lineno">  771 </span><span class="spaces">      </span><span class="istickedoff">goBudget _    _     [] = []</span>
+<span class="lineno">  772 </span><span class="spaces">      </span><span class="istickedoff">goBudget used first (e:es) =</span>
+<span class="lineno">  773 </span><span class="spaces">        </span><span class="istickedoff">let cost  = T.length (_te_payload e) `div` 4</span>
+<span class="lineno">  774 </span><span class="spaces">            </span><span class="istickedoff">used' = used + cost</span>
+<span class="lineno">  775 </span><span class="spaces">        </span><span class="istickedoff">in if used' &gt; maxTokens &amp;&amp; not first</span>
+<span class="lineno">  776 </span><span class="spaces">             </span><span class="istickedoff">then []</span>
+<span class="lineno">  777 </span><span class="spaces">             </span><span class="istickedoff">else e : goBudget used' False es</span>
+<span class="lineno">  778 </span><span class="spaces">  </span><span class="istickedoff">pure (map entryToMessage (reverse budgeted))</span>
+<span class="lineno">  779 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  780 </span><span class="spaces">    </span><span class="istickedoff">-- Extract just the NEW message text from a recorded provider</span>
+<span class="lineno">  781 </span><span class="spaces">    </span><span class="istickedoff">-- request/response JSON payload — NOT the entire envelope. Falls back</span>
+<span class="lineno">  782 </span><span class="spaces">    </span><span class="istickedoff">-- to the raw payload when the JSON shape doesn't match (custom-harness</span>
+<span class="lineno">  783 </span><span class="spaces">    </span><span class="istickedoff">-- transcripts, plain-text test fixtures), so unrelated callers keep</span>
+<span class="lineno">  784 </span><span class="spaces">    </span><span class="istickedoff">-- working.</span>
+<span class="lineno">  785 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  786 </span><span class="spaces">    </span><span class="istickedoff">-- Why this is non-obvious: '_te_payload' is the full provider API</span>
+<span class="lineno">  787 </span><span class="spaces">    </span><span class="istickedoff">-- body (correct for debugging — you can replay the exact request).</span>
+<span class="lineno">  788 </span><span class="spaces">    </span><span class="istickedoff">-- But if we feed that ENTIRE envelope back into the next turn as</span>
+<span class="lineno">  789 </span><span class="spaces">    </span><span class="istickedoff">-- &quot;message text&quot;, we get recursive wrapping: turn 2's request</span>
+<span class="lineno">  790 </span><span class="spaces">    </span><span class="istickedoff">-- contains turn 1's request-as-JSON, turn 3 contains turn 2's</span>
+<span class="lineno">  791 </span><span class="spaces">    </span><span class="istickedoff">-- request-as-JSON (which contains turn 1's request-as-JSON), and so</span>
+<span class="lineno">  792 </span><span class="spaces">    </span><span class="istickedoff">-- on. After a few turns the LLM sees a huge nested-escape-encoded</span>
+<span class="lineno">  793 </span><span class="spaces">    </span><span class="istickedoff">-- blob instead of a clean conversation. See the matching parse in</span>
+<span class="lineno">  794 </span><span class="spaces">    </span><span class="istickedoff">-- 'transcriptToMessages' in 'frontend/src/App.tsx' — both sides</span>
+<span class="lineno">  795 </span><span class="spaces">    </span><span class="istickedoff">-- need to do the same extraction.</span>
+<span class="lineno">  796 </span><span class="spaces">    </span><span class="istickedoff">entryToMessage e =</span>
+<span class="lineno">  797 </span><span class="spaces">      </span><span class="istickedoff">let role = case _te_direction e of</span>
+<span class="lineno">  798 </span><span class="spaces">            </span><span class="istickedoff">Request  -&gt; User</span>
+<span class="lineno">  799 </span><span class="spaces">            </span><span class="istickedoff">Response -&gt; Assistant</span>
+<span class="lineno">  800 </span><span class="spaces">          </span><span class="istickedoff">txt = case _te_direction e of</span>
+<span class="lineno">  801 </span><span class="spaces">            </span><span class="istickedoff">Request  -&gt; extractNewMessageText  (_te_payload e)</span>
+<span class="lineno">  802 </span><span class="spaces">            </span><span class="istickedoff">Response -&gt; extractAssistantText   (_te_payload e)</span>
+<span class="lineno">  803 </span><span class="spaces">      </span><span class="istickedoff">in Message role [TextBlock txt]</span></span>
+<span class="lineno">  804 </span>
+<span class="lineno">  805 </span>-- | Read the session's frozen system prompt from the transcript.
+<span class="lineno">  806 </span>--
+<span class="lineno">  807 </span>-- The system prompt is computed once on the first turn and then \&quot;rides in
+<span class="lineno">  808 </span>-- the transcript\&quot;: every recorded provider 'Request' entry carries the
+<span class="lineno">  809 </span>-- prompt actually used at completion time under the top-level
+<span class="lineno">  810 </span>-- @system_prompt@ field of its 'CompletionRequest' payload
+<span class="lineno">  811 </span>-- (see 'PureClaw.Providers.Class' ToJSON). This helper recovers it so
+<span class="lineno">  812 </span>-- @doCompletion@ can reuse the frozen value on turns ≥ 2 instead of
+<span class="lineno">  813 </span>-- recomputing.
+<span class="lineno">  814 </span>--
+<span class="lineno">  815 </span>-- The result distinguishes three cases:
+<span class="lineno">  816 </span>--
+<span class="lineno">  817 </span>--   * @Nothing@        — there is NO prior 'Request' entry, i.e. this is the
+<span class="lineno">  818 </span>--                        first turn. The caller should compute and freeze a
+<span class="lineno">  819 </span>--                        prompt now.
+<span class="lineno">  820 </span>--   * @Just (Just p)@  — a prior request recorded a non-null
+<span class="lineno">  821 </span>--                        @system_prompt@; reuse @p@ verbatim.
+<span class="lineno">  822 </span>--   * @Just Nothing@   — a prior request recorded @system_prompt: null@ (or
+<span class="lineno">  823 </span>--                        omitted the field entirely); the frozen prompt is
+<span class="lineno">  824 </span>--                        null and MUST stay null (do not recompute).
+<span class="lineno">  825 </span>--
+<span class="lineno">  826 </span>-- Only 'Request'-direction entries are considered (never a 'Response'), and
+<span class="lineno">  827 </span>-- the LAST such entry wins. This is distinct from 'extractNewMessageText',
+<span class="lineno">  828 </span>-- which deliberately discards @system_prompt@.
+<span class="lineno">  829 </span>frozenSystemPrompt :: TranscriptHandle -&gt; IO (Maybe (Maybe Text))
+<span class="lineno">  830 </span><span class="decl"><span class="istickedoff">frozenSystemPrompt th = do</span>
+<span class="lineno">  831 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- _th_query th TranscriptFilter</span>
+<span class="lineno">  832 </span><span class="spaces">    </span><span class="istickedoff">{ _tf_harness   = Nothing</span>
+<span class="lineno">  833 </span><span class="spaces">    </span><span class="istickedoff">, _tf_model     = Nothing</span>
+<span class="lineno">  834 </span><span class="spaces">    </span><span class="istickedoff">, _tf_direction = Just Request</span>
+<span class="lineno">  835 </span><span class="spaces">    </span><span class="istickedoff">, _tf_timeRange = Nothing</span>
+<span class="lineno">  836 </span><span class="spaces">    </span><span class="istickedoff">, _tf_limit     = Nothing</span>
+<span class="lineno">  837 </span><span class="spaces">    </span><span class="istickedoff">}</span>
+<span class="lineno">  838 </span><span class="spaces">  </span><span class="istickedoff">pure $ case reverse entries of</span>
+<span class="lineno">  839 </span><span class="spaces">    </span><span class="istickedoff">[]      -&gt; Nothing</span>
+<span class="lineno">  840 </span><span class="spaces">    </span><span class="istickedoff">(e : _) -&gt; Just (extractSystemPrompt (_te_payload e))</span></span>
+<span class="lineno">  841 </span>
+<span class="lineno">  842 </span>-- | The model recorded by the most-recent provider 'Request' entry, read from
+<span class="lineno">  843 </span>-- the structured @_te_model@ column (set by 'mkTranscriptProvider' from
+<span class="lineno">  844 </span>-- @unModelId model@ at completion time). Like 'frozenSystemPrompt', the
+<span class="lineno">  845 </span>-- session's model \&quot;rides in the transcript\&quot;: this is the per-session
+<span class="lineno">  846 </span>-- fallback model used by @doCompletion@ when a @/send@ request omits an
+<span class="lineno">  847 </span>-- explicit model (§9.2).
+<span class="lineno">  848 </span>--
+<span class="lineno">  849 </span>--   * @Nothing@   — there is NO prior 'Request' entry, or the last one
+<span class="lineno">  850 </span>--                   recorded no model (@_te_model = Nothing@). The caller
+<span class="lineno">  851 </span>--                   should fall back to the global model.
+<span class="lineno">  852 </span>--   * @Just m@    — the last 'Request' entry recorded model @m@; reuse it.
+<span class="lineno">  853 </span>--
+<span class="lineno">  854 </span>-- Only 'Request'-direction entries are considered, and the LAST such entry
+<span class="lineno">  855 </span>-- wins. 'loadRecentMessages' deliberately discards @_te_model@, so this raw
+<span class="lineno">  856 </span>-- read is the only way to recover it.
+<span class="lineno">  857 </span>lastRequestModel :: TranscriptHandle -&gt; IO (Maybe Text)
+<span class="lineno">  858 </span><span class="decl"><span class="istickedoff">lastRequestModel th = do</span>
+<span class="lineno">  859 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- _th_query th TranscriptFilter</span>
+<span class="lineno">  860 </span><span class="spaces">    </span><span class="istickedoff">{ _tf_harness   = Nothing</span>
+<span class="lineno">  861 </span><span class="spaces">    </span><span class="istickedoff">, _tf_model     = Nothing</span>
+<span class="lineno">  862 </span><span class="spaces">    </span><span class="istickedoff">, _tf_direction = Just Request</span>
+<span class="lineno">  863 </span><span class="spaces">    </span><span class="istickedoff">, _tf_timeRange = Nothing</span>
+<span class="lineno">  864 </span><span class="spaces">    </span><span class="istickedoff">, _tf_limit     = Nothing</span>
+<span class="lineno">  865 </span><span class="spaces">    </span><span class="istickedoff">}</span>
+<span class="lineno">  866 </span><span class="spaces">  </span><span class="istickedoff">pure $ case reverse entries of</span>
+<span class="lineno">  867 </span><span class="spaces">    </span><span class="istickedoff">[]      -&gt; Nothing</span>
+<span class="lineno">  868 </span><span class="spaces">    </span><span class="istickedoff">(e : _) -&gt; _te_model e</span></span>
+<span class="lineno">  869 </span>
+<span class="lineno">  870 </span>-- | Parse the top-level @system_prompt@ field from a recorded provider
+<span class="lineno">  871 </span>-- 'Request' payload. A present JSON string yields @Just t@; an explicit
+<span class="lineno">  872 </span>-- @null@, a missing key, or a non-string\/non-decodable payload all yield
+<span class="lineno">  873 </span>-- @Nothing@ (frozen-null semantics — see 'frozenSystemPrompt').
+<span class="lineno">  874 </span>extractSystemPrompt :: Text -&gt; Maybe Text
+<span class="lineno">  875 </span><span class="decl"><span class="istickedoff">extractSystemPrompt raw = do</span>
+<span class="lineno">  876 </span><span class="spaces">  </span><span class="istickedoff">Aeson.Object o &lt;- decodeText raw</span>
+<span class="lineno">  877 </span><span class="spaces">  </span><span class="istickedoff">case KM.lookup &quot;system_prompt&quot; o of</span>
+<span class="lineno">  878 </span><span class="spaces">    </span><span class="istickedoff">Just (Aeson.String t) -&gt; Just t</span>
+<span class="lineno">  879 </span><span class="spaces">    </span><span class="istickedoff">_                     -&gt; Nothing</span></span>
+<span class="lineno">  880 </span>
+<span class="lineno">  881 </span>-- | Extract the most recent message's text from a recorded provider request
+<span class="lineno">  882 </span>-- JSON payload. Handles common provider shapes:
+<span class="lineno">  883 </span>--   Anthropic: @{&quot;messages&quot;:[..., {&quot;role&quot;:..., &quot;content&quot;:[{&quot;type&quot;:&quot;text&quot;,&quot;text&quot;:&lt;&gt;}, ...]}], ...}@
+<span class="lineno">  884 </span>--   OpenAI:    @{&quot;messages&quot;:[..., {&quot;role&quot;:..., &quot;content&quot;:&lt;string&gt;}], ...}@
+<span class="lineno">  885 </span>-- Earlier messages in the array are conversation history that's already
+<span class="lineno">  886 </span>-- represented by prior transcript entries, so we want only the LAST one.
+<span class="lineno">  887 </span>-- Returns the raw payload unchanged when the JSON shape doesn't match.
+<span class="lineno">  888 </span>extractNewMessageText :: Text -&gt; Text
+<span class="lineno">  889 </span><span class="decl"><span class="istickedoff">extractNewMessageText raw = fromMaybe raw $ do</span>
+<span class="lineno">  890 </span><span class="spaces">  </span><span class="istickedoff">Aeson.Object o    &lt;- decodeText raw</span>
+<span class="lineno">  891 </span><span class="spaces">  </span><span class="istickedoff">Aeson.Array msgs  &lt;- KM.lookup &quot;messages&quot; o</span>
+<span class="lineno">  892 </span><span class="spaces">  </span><span class="istickedoff">guard (not (V.null msgs))</span>
+<span class="lineno">  893 </span><span class="spaces">  </span><span class="istickedoff">Aeson.Object m    &lt;- pure (V.last msgs)</span>
+<span class="lineno">  894 </span><span class="spaces">  </span><span class="istickedoff">case KM.lookup &quot;content&quot; m of</span>
+<span class="lineno">  895 </span><span class="spaces">    </span><span class="istickedoff">Just (Aeson.String t)  -&gt; pure t</span>
+<span class="lineno">  896 </span><span class="spaces">    </span><span class="istickedoff">Just (Aeson.Array  cs) -&gt; pure (extractTextBlocks cs)</span>
+<span class="lineno">  897 </span><span class="spaces">    </span><span class="istickedoff">_                      -&gt; <span class="nottickedoff">Nothing</span></span></span>
+<span class="lineno">  898 </span>
+<span class="lineno">  899 </span>-- | Extract the assistant's reply text from a recorded provider response
+<span class="lineno">  900 </span>-- JSON payload. Handles:
+<span class="lineno">  901 </span>--   Anthropic: @{&quot;content&quot;:[{&quot;type&quot;:&quot;text&quot;,&quot;text&quot;:&lt;&gt;}, ...], ...}@
+<span class="lineno">  902 </span>--   OpenAI:    @{&quot;choices&quot;:[{&quot;message&quot;:{&quot;content&quot;:&lt;string&gt;}}], ...}@
+<span class="lineno">  903 </span>-- Tool-use / tool_call blocks are dropped from the context replay — they
+<span class="lineno">  904 </span>-- are conversation flow control, not message text the LLM needs verbatim.
+<span class="lineno">  905 </span>-- Returns the raw payload unchanged when the JSON shape doesn't match.
+<span class="lineno">  906 </span>extractAssistantText :: Text -&gt; Text
+<span class="lineno">  907 </span><span class="decl"><span class="istickedoff">extractAssistantText raw = fromMaybe raw $ do</span>
+<span class="lineno">  908 </span><span class="spaces">  </span><span class="istickedoff">Aeson.Object o &lt;- decodeText raw</span>
+<span class="lineno">  909 </span><span class="spaces">  </span><span class="istickedoff">case KM.lookup &quot;content&quot; o of</span>
+<span class="lineno">  910 </span><span class="spaces">    </span><span class="istickedoff">Just (Aeson.Array  cs) -&gt; pure (extractTextBlocks cs)</span>
+<span class="lineno">  911 </span><span class="spaces">    </span><span class="istickedoff">Just (Aeson.String t)  -&gt; <span class="nottickedoff">pure t</span></span>
+<span class="lineno">  912 </span><span class="spaces">    </span><span class="istickedoff">_                      -&gt; openaiChoiceText o</span></span>
+<span class="lineno">  913 </span>
+<span class="lineno">  914 </span>-- | OpenAI-style fallback: messages live under @choices[0].message.content@.
+<span class="lineno">  915 </span>openaiChoiceText :: Aeson.Object -&gt; Maybe Text
+<span class="lineno">  916 </span><span class="decl"><span class="istickedoff">openaiChoiceText o = do</span>
+<span class="lineno">  917 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">Aeson.Array choices</span> &lt;- KM.lookup &quot;choices&quot; o</span>
+<span class="lineno">  918 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">guard (not (V.null choices))</span></span>
+<span class="lineno">  919 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">Aeson.Object c</span> &lt;- <span class="nottickedoff">pure (V.head choices)</span></span>
+<span class="lineno">  920 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">Aeson.Object m</span> &lt;- <span class="nottickedoff">KM.lookup &quot;message&quot; c</span></span>
+<span class="lineno">  921 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">case KM.lookup &quot;content&quot; m of</span></span>
+<span class="lineno">  922 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Just (Aeson.String t) -&gt; pure t</span></span>
+<span class="lineno">  923 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">_                     -&gt; Nothing</span></span></span>
+<span class="lineno">  924 </span>
+<span class="lineno">  925 </span>-- | Concatenate the @text@ fields of an Anthropic-style typed-content array,
+<span class="lineno">  926 </span>-- joining with newlines. Non-text blocks (tool_use, etc.) are skipped.
+<span class="lineno">  927 </span>extractTextBlocks :: V.Vector Aeson.Value -&gt; Text
+<span class="lineno">  928 </span><span class="decl"><span class="istickedoff">extractTextBlocks = T.intercalate <span class="nottickedoff">&quot;\n&quot;</span> . mapMaybe asText . V.toList</span>
+<span class="lineno">  929 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  930 </span><span class="spaces">    </span><span class="istickedoff">asText (Aeson.Object o) = case KM.lookup &quot;text&quot; o of</span>
+<span class="lineno">  931 </span><span class="spaces">      </span><span class="istickedoff">Just (Aeson.String t) -&gt; Just t</span>
+<span class="lineno">  932 </span><span class="spaces">      </span><span class="istickedoff">_                     -&gt; <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  933 </span><span class="spaces">    </span><span class="istickedoff">asText _ = <span class="nottickedoff">Nothing</span></span></span>
+<span class="lineno">  934 </span>
+<span class="lineno">  935 </span>decodeText :: Text -&gt; Maybe Aeson.Value
+<span class="lineno">  936 </span><span class="decl"><span class="istickedoff">decodeText = Aeson.decode . LBS.fromStrict . TE.encodeUtf8</span></span>
+<span class="lineno">  937 </span>
+<span class="lineno">  938 </span>-- | If any entry carries the compaction metadata key, return entries
+<span class="lineno">  939 </span>-- from the last such entry onward (inclusive).  Otherwise return the
+<span class="lineno">  940 </span>-- full list unchanged.
+<span class="lineno">  941 </span>trimToLastCompaction :: [TranscriptEntry] -&gt; [TranscriptEntry]
+<span class="lineno">  942 </span><span class="decl"><span class="istickedoff">trimToLastCompaction entries =</span>
+<span class="lineno">  943 </span><span class="spaces">  </span><span class="istickedoff">case lastCompactionIdx of</span>
+<span class="lineno">  944 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; entries</span>
+<span class="lineno">  945 </span><span class="spaces">    </span><span class="istickedoff">Just i  -&gt; drop i entries</span>
+<span class="lineno">  946 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  947 </span><span class="spaces">    </span><span class="istickedoff">isCompaction e = Map.member compactionMetadataKey (_te_metadata e)</span>
+<span class="lineno">  948 </span><span class="spaces">    </span><span class="istickedoff">lastCompactionIdx = go Nothing 0 entries</span>
+<span class="lineno">  949 </span><span class="spaces">    </span><span class="istickedoff">go acc _ []     = acc</span>
+<span class="lineno">  950 </span><span class="spaces">    </span><span class="istickedoff">go acc n (e:es)</span>
+<span class="lineno">  951 </span><span class="spaces">      </span><span class="istickedoff">| isCompaction e = go (Just n) <span class="nottickedoff">(n + 1)</span> es</span>
+<span class="lineno">  952 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>      = go acc      (n + 1) es</span></span>
+<span class="lineno">  953 </span>
+
+</pre>
+</body>
+</html>

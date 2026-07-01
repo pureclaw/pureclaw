@@ -1,0 +1,877 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tab.Backend
+<span class="lineno">    3 </span>-- Description : Backend tab factory — KindShell\/KindSsh\/KindTmux (Tabbed Chat WU8).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- A backend tab is a 'PureClaw.Handles.Tab.TabHandle' that wraps a
+<span class="lineno">    6 </span>-- 'PureClaw.Handles.Backend.BackendHandle' constructed at spawn time
+<span class="lineno">    7 </span>-- from a tab kind and a list of user-supplied args. The tab owns two
+<span class="lineno">    8 </span>-- helper threads:
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>--   * a /drainer/ that loops on '_bh_recv' and emits each non-empty
+<span class="lineno">   11 </span>--     output chunk as @'FullMsg' !TabIndex !Text@ via '_env_channelOutQ'
+<span class="lineno">   12 </span>--     (focus-gated at the producer side per D4 and at the writer side
+<span class="lineno">   13 </span>--     per D3 — per the D5 backend rule, no streaming\/no breadcrumbs);
+<span class="lineno">   14 </span>--   * a /writer/ that drains a bounded outbound queue and forwards
+<span class="lineno">   15 </span>--     bytes to '_bh_send', keeping the public 'TabHandle._tabHandle_send'
+<span class="lineno">   16 </span>--     non-blocking per H4.
+<span class="lineno">   17 </span>--
+<span class="lineno">   18 </span>-- == Factory shape
+<span class="lineno">   19 </span>--
+<span class="lineno">   20 </span>-- @
+<span class="lineno">   21 </span>-- 'mkTabBackend' :: 'PureClaw.Agent.Env.AgentEnv'
+<span class="lineno">   22 </span>--                -&gt; 'PureClaw.Handles.Tab.TabIndex'
+<span class="lineno">   23 </span>--                -&gt; 'PureClaw.Handles.Tab.TabKind'
+<span class="lineno">   24 </span>--                -&gt; [Text]
+<span class="lineno">   25 </span>--                -&gt; IO (Either 'PureClaw.Handles.Tab.TabError'
+<span class="lineno">   26 </span>--                              'PureClaw.Handles.Tab.TabHandle')
+<span class="lineno">   27 </span>-- @
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- Dispatches on the supplied 'TabKind' to one of three sub-factories:
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- * 'KindShell' — parses @[Text]@ via 'PureClaw.Security.Command.authorize'
+<span class="lineno">   32 </span>--   against '_env_policy' (S1); on failure returns
+<span class="lineno">   33 </span>--   @'Left' ('TabSpawnAuthDenied' ...)@. Calls
+<span class="lineno">   34 </span>--   'PureClaw.Backend.Local.mkLocalBackendHandle' (via the injected
+<span class="lineno">   35 </span>--   '_bio_mkShell' seam).
+<span class="lineno">   36 </span>--
+<span class="lineno">   37 </span>-- * 'KindSsh' — parses the first arg as @user\@host@; constructs the host
+<span class="lineno">   38 </span>--   via 'PureClaw.Backend.SSH.mkSshHost' (S2\/S3 — rejects whitespace,
+<span class="lineno">   39 </span>--   leading dashes, NUL bytes, and shell metachars). Parses the remaining
+<span class="lineno">   40 </span>--   args as the remote command via
+<span class="lineno">   41 </span>--   'PureClaw.Backend.SSH.authorizeRemote'. Sources the SSH identity from
+<span class="lineno">   42 </span>--   the Vault slot named by '_rc_sshIdentityKey' (S4 — NO inline
+<span class="lineno">   43 </span>--   identity acceptance); missing slot yields
+<span class="lineno">   44 </span>--   @'Left' ('TabSpawnAuthDenied' ...)@.
+<span class="lineno">   45 </span>--
+<span class="lineno">   46 </span>-- * 'KindTmux' — parses one @session[:window[.pane]]@ argument via the
+<span class="lineno">   47 </span>--   'PureClaw.Backend.Tmux.mkTmuxSession'\/'mkTmuxWindow'\/'mkTmuxPane'
+<span class="lineno">   48 </span>--   smart constructors (S3); the local @tmux@ binary is authorized via
+<span class="lineno">   49 </span>--   'PureClaw.Security.Command.authorize'.
+<span class="lineno">   50 </span>--
+<span class="lineno">   51 </span>-- == Slash commands are unsupported (H13 \/ I4)
+<span class="lineno">   52 </span>--
+<span class="lineno">   53 </span>-- '_tabHandle_enqueueSlash' returns @'Left' ('TabUnsupportedCommand'
+<span class="lineno">   54 </span>-- cmd)@ immediately without enqueueing — backend tabs do not have a
+<span class="lineno">   55 </span>-- per-tab 'Context' or slash-command surface. Direct-inject text
+<span class="lineno">   56 </span>-- (@\/N \&lt;text\&gt;@) is forwarded verbatim to the backend via the writer
+<span class="lineno">   57 </span>-- thread so a payload like @\/N \/pwd@ reaches the backend as the
+<span class="lineno">   58 </span>-- literal @\&quot;\/pwd\&quot;@ (I4 — slash-prefix opaque to backend).
+<span class="lineno">   59 </span>--
+<span class="lineno">   60 </span>-- == Close semantics (H8 \/ H9)
+<span class="lineno">   61 </span>--
+<span class="lineno">   62 </span>-- Both 'CloseGraceful' and 'CloseForce' are destructive for backend
+<span class="lineno">   63 </span>-- tabs: they cancel both helper threads and call '_bh_close' on the
+<span class="lineno">   64 </span>-- underlying 'BackendHandle'. There is no archive equivalent. The close
+<span class="lineno">   65 </span>-- path is idempotent + never-throws (H6 \/ H7 contract).
+<span class="lineno">   66 </span>--
+<span class="lineno">   67 </span>-- == Async exception discipline
+<span class="lineno">   68 </span>--
+<span class="lineno">   69 </span>-- Helper threads catch 'SomeException' EXCEPT 'AsyncCancelled', which
+<span class="lineno">   70 </span>-- propagates so '_tabHandle_close' (which cancels the helpers'
+<span class="lineno">   71 </span>-- 'TabRunner's) can unblock a stuck '_bh_recv' or pending writer.
+<span class="lineno">   72 </span>-- Mirrors the WU6 \/ WU7 'safelyRun' pattern.
+<span class="lineno">   73 </span>--
+<span class="lineno">   74 </span>-- == Test seam ('BackendIO')
+<span class="lineno">   75 </span>--
+<span class="lineno">   76 </span>-- Production code calls 'mkTabBackend', which uses 'realBackendIO'
+<span class="lineno">   77 </span>-- (which in turn calls the real WU8\/WU9\/WU10 backend factories from
+<span class="lineno">   78 </span>-- @PureClaw.Backend.*@). Tests call 'mkTabBackendWith' with a fake
+<span class="lineno">   79 </span>-- 'BackendIO' that returns an in-memory 'BackendHandle' (via
+<span class="lineno">   80 </span>-- 'PureClaw.Handles.Backend.mkInMemoryBackendHandle') so spawn paths
+<span class="lineno">   81 </span>-- are exercised end-to-end without forking real subprocesses.
+<span class="lineno">   82 </span>--
+<span class="lineno">   83 </span>-- See @docs\/tabbed-chat.md@ §&quot;H-series&quot; (close lifecycle), §&quot;I4&quot;
+<span class="lineno">   84 </span>-- (opaque slash-prefix), §&quot;S1&quot;-&quot;S4&quot; (spawn authorization), and §&quot;D5&quot;
+<span class="lineno">   85 </span>-- (FullMsg emission).
+<span class="lineno">   86 </span>module PureClaw.Tab.Backend
+<span class="lineno">   87 </span>  ( -- * Factory
+<span class="lineno">   88 </span>    mkRawShellTab
+<span class="lineno">   89 </span>  , mkRawShellTabWith
+<span class="lineno">   90 </span>    -- * Backend I\/O seam
+<span class="lineno">   91 </span>  , BackendIO (..)
+<span class="lineno">   92 </span>  , realBackendIO
+<span class="lineno">   93 </span>    -- * Internal state (exposed for tests)
+<span class="lineno">   94 </span>  , BackendTabState (..)
+<span class="lineno">   95 </span>    -- * Internal helpers (exposed for tests)
+<span class="lineno">   96 </span>  , parseUserAtHost
+<span class="lineno">   97 </span>  , parseTmuxTarget
+<span class="lineno">   98 </span>  ) where
+<span class="lineno">   99 </span>
+<span class="lineno">  100 </span>import Control.Concurrent.Async (AsyncCancelled (..))
+<span class="lineno">  101 </span>import Control.Concurrent.STM
+<span class="lineno">  102 </span>  ( STM
+<span class="lineno">  103 </span>  , TBQueue
+<span class="lineno">  104 </span>  , atomically
+<span class="lineno">  105 </span>  , isFullTBQueue
+<span class="lineno">  106 </span>  , newTBQueueIO
+<span class="lineno">  107 </span>  , readTBQueue
+<span class="lineno">  108 </span>  , writeTBQueue
+<span class="lineno">  109 </span>  )
+<span class="lineno">  110 </span>import Control.Exception
+<span class="lineno">  111 </span>  ( SomeException
+<span class="lineno">  112 </span>  , catch
+<span class="lineno">  113 </span>  , fromException
+<span class="lineno">  114 </span>  , throwIO
+<span class="lineno">  115 </span>  , try
+<span class="lineno">  116 </span>  )
+<span class="lineno">  117 </span>import Control.Monad (unless, when)
+<span class="lineno">  118 </span>import Data.ByteString (ByteString)
+<span class="lineno">  119 </span>import Data.ByteString qualified as BS
+<span class="lineno">  120 </span>import Data.Foldable (for_)
+<span class="lineno">  121 </span>import Data.IORef
+<span class="lineno">  122 </span>  ( IORef
+<span class="lineno">  123 </span>  , atomicModifyIORef'
+<span class="lineno">  124 </span>  , newIORef
+<span class="lineno">  125 </span>  , readIORef
+<span class="lineno">  126 </span>  , writeIORef
+<span class="lineno">  127 </span>  )
+<span class="lineno">  128 </span>import Data.Text (Text)
+<span class="lineno">  129 </span>import Data.Text qualified as T
+<span class="lineno">  130 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">  131 </span>import Data.Time (getCurrentTime)
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>import PureClaw.Agent.Env (AgentEnv (..))
+<span class="lineno">  134 </span>import PureClaw.Agent.SlashCommands (SlashCommand)
+<span class="lineno">  135 </span>import PureClaw.Backend.Local qualified as Local
+<span class="lineno">  136 </span>import PureClaw.Backend.Pty (realPtyIO)
+<span class="lineno">  137 </span>import PureClaw.Backend.SSH qualified as SSH
+<span class="lineno">  138 </span>import PureClaw.Backend.Tmux qualified as Tmux
+<span class="lineno">  139 </span>import PureClaw.Handles.Backend
+<span class="lineno">  140 </span>  ( BackendError (..)
+<span class="lineno">  141 </span>  , BackendHandle (..)
+<span class="lineno">  142 </span>  , InvalidOptionDetail (..)
+<span class="lineno">  143 </span>  , RecvResult (..)
+<span class="lineno">  144 </span>  , defaultPipeOpts
+<span class="lineno">  145 </span>  , recvBytes
+<span class="lineno">  146 </span>  )
+<span class="lineno">  147 </span>import PureClaw.Handles.Tab
+<span class="lineno">  148 </span>  ( CloseMode (..)
+<span class="lineno">  149 </span>  , PublicAuthError (..)
+<span class="lineno">  150 </span>  , PublicTabError (..)
+<span class="lineno">  151 </span>  , TabError (..)
+<span class="lineno">  152 </span>  , TabHandle (..)
+<span class="lineno">  153 </span>  , TabIndex
+<span class="lineno">  154 </span>  , TabKind (..)
+<span class="lineno">  155 </span>  , TabName (..)
+<span class="lineno">  156 </span>  , TabRunner (..)
+<span class="lineno">  157 </span>  , TabStatus (..)
+<span class="lineno">  158 </span>  )
+<span class="lineno">  159 </span>import PureClaw.Session.Kind
+<span class="lineno">  160 </span>  ( ContainerSpec (..)
+<span class="lineno">  161 </span>  , SshConfig (..)
+<span class="lineno">  162 </span>  , TerminalBackend (..)
+<span class="lineno">  163 </span>  , TmuxConfig (..)
+<span class="lineno">  164 </span>  )
+<span class="lineno">  165 </span>import PureClaw.Tab.Container qualified as Container
+<span class="lineno">  166 </span>import PureClaw.Routing.ChannelOut (shouldEmit)
+<span class="lineno">  167 </span>import PureClaw.Routing.Parse qualified as Parse
+<span class="lineno">  168 </span>import PureClaw.Routing.Types
+<span class="lineno">  169 </span>  ( ChannelEvent (..)
+<span class="lineno">  170 </span>  , OutputSource (..)
+<span class="lineno">  171 </span>  , RoutingConfig (..)
+<span class="lineno">  172 </span>  )
+<span class="lineno">  173 </span>import PureClaw.Security.Command
+<span class="lineno">  174 </span>  ( AuthorizedCommand
+<span class="lineno">  175 </span>  , authorize
+<span class="lineno">  176 </span>  )
+<span class="lineno">  177 </span>import PureClaw.Security.Path (SafeKeyPath)
+<span class="lineno">  178 </span>import PureClaw.Security.Vault (VaultHandle (..))
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  182 </span>-- BackendTabState — per-tab mutable state, private to the factory closure
+<span class="lineno">  183 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  184 </span>
+<span class="lineno">  185 </span>-- | Per-backend-tab mutable state. Fields are exposed so a future
+<span class="lineno">  186 </span>-- diagnostic @tab info@ handler can inspect them; production code never
+<span class="lineno">  187 </span>-- touches the record outside this module.
+<span class="lineno">  188 </span>data BackendTabState = BackendTabState
+<span class="lineno">  189 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_bts_backend</span></span></span>       :: !BackendHandle
+<span class="lineno">  190 </span>    -- ^ The underlying 'BackendHandle' constructed at spawn time. The
+<span class="lineno">  191 </span>    -- tab owns its lifecycle; '_tabHandle_close' calls '_bh_close' on
+<span class="lineno">  192 </span>    -- the first invocation (H8 — destructive, no archive equivalent).
+<span class="lineno">  193 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bts_sendQ</span></span></span>         :: !(TBQueue ByteString)
+<span class="lineno">  194 </span>    -- ^ Bounded outbound queue. '_tabHandle_send' enqueues here
+<span class="lineno">  195 </span>    -- non-blockingly; the writer thread drains and calls '_bh_send'.
+<span class="lineno">  196 </span>    -- Bounded by '_rc_inputQueueBound' so a saturating producer
+<span class="lineno">  197 </span>    -- surfaces 'TabConcurrencyLimit' rather than blocking the
+<span class="lineno">  198 </span>    -- dispatcher (H4).
+<span class="lineno">  199 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bts_drainRunner</span></span></span>   :: !(IORef (Maybe TabRunner))
+<span class="lineno">  200 </span>    -- ^ Drainer thread runner (output side: '_bh_recv' →
+<span class="lineno">  201 </span>    -- 'FullMsg'). Filled by 'mkTabBackendWith' post-fork; stays
+<span class="lineno">  202 </span>    -- 'Nothing' for the brief window between allocation and fork-fill.
+<span class="lineno">  203 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bts_writerRunner</span></span></span>  :: !(IORef (Maybe TabRunner))
+<span class="lineno">  204 </span>    -- ^ Writer thread runner (input side: '_bts_sendQ' →
+<span class="lineno">  205 </span>    -- '_bh_send'). Filled by 'mkTabBackendWith' post-fork.
+<span class="lineno">  206 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bts_closed</span></span></span>        :: !(IORef Bool)
+<span class="lineno">  207 </span>    -- ^ Idempotency flag for '_tabHandle_close'. Flipped to 'True' on
+<span class="lineno">  208 </span>    -- the first invocation; subsequent invocations are no-ops (H6).
+<span class="lineno">  209 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bts_statusRef</span></span></span>     :: !(IORef TabStatus)
+<span class="lineno">  210 </span>    -- ^ Held status backing '_tabHandle_status'. Starts 'Idle' at
+<span class="lineno">  211 </span>    -- spawn and transitions to 'Crashed' if a helper thread hits a
+<span class="lineno">  212 </span>    -- synchronous exception.
+<span class="lineno">  213 </span>  }
+<span class="lineno">  214 </span>
+<span class="lineno">  215 </span>
+<span class="lineno">  216 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  217 </span>-- BackendIO seam
+<span class="lineno">  218 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  219 </span>
+<span class="lineno">  220 </span>-- | Injection seam for the three real backend factories.
+<span class="lineno">  221 </span>--
+<span class="lineno">  222 </span>-- Production callers use 'mkTabBackend', which wires this to
+<span class="lineno">  223 </span>-- 'realBackendIO' (which calls the real WU8\/WU9\/WU10 factories from
+<span class="lineno">  224 </span>-- @PureClaw.Backend.*@). Tests call 'mkTabBackendWith' with a fake
+<span class="lineno">  225 </span>-- 'BackendIO' that returns an in-memory 'BackendHandle' (via
+<span class="lineno">  226 </span>-- 'PureClaw.Handles.Backend.mkInMemoryBackendHandle'), so the spawn,
+<span class="lineno">  227 </span>-- drainer, and writer paths can be exercised end-to-end without
+<span class="lineno">  228 </span>-- forking real subprocesses.
+<span class="lineno">  229 </span>--
+<span class="lineno">  230 </span>-- Note: every sub-factory still receives a fully-validated payload —
+<span class="lineno">  231 </span>-- the smart constructors ('authorize', 'mkSshHost', 'authorizeRemote',
+<span class="lineno">  232 </span>-- 'mkTmuxSession' \/ 'mkTmuxWindow' \/ 'mkTmuxPane') are invoked by
+<span class="lineno">  233 </span>-- 'mkTabBackendWith' BEFORE the seam is called, so the seam is given a
+<span class="lineno">  234 </span>-- security-validated value (the seam is not a way to skip validation).
+<span class="lineno">  235 </span>data BackendIO = BackendIO
+<span class="lineno">  236 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_bio_mkShell</span></span></span>
+<span class="lineno">  237 </span>      :: AuthorizedCommand
+<span class="lineno">  238 </span>      -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  239 </span>    -- ^ Spawn a local 'Pipe'-kind backend. Production: thin wrapper
+<span class="lineno">  240 </span>    -- around 'PureClaw.Backend.Local.mkLocalBackendHandle' with the
+<span class="lineno">  241 </span>    -- default 'PureClaw.Handles.Backend.PipeOpts'.
+<span class="lineno">  242 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_bio_mkSsh</span></span></span>
+<span class="lineno">  243 </span>      :: SSH.SshTarget
+<span class="lineno">  244 </span>      -&gt; AuthorizedCommand
+<span class="lineno">  245 </span>      -&gt; SSH.RemoteCommand
+<span class="lineno">  246 </span>      -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  247 </span>    -- ^ Spawn an SSH backend. Production: calls
+<span class="lineno">  248 </span>    -- 'PureClaw.Backend.SSH.mkSshBackendHandle' with 'realPtyIO' and
+<span class="lineno">  249 </span>    -- the default 'PureClaw.Backend.SSH.SshOpts'.
+<span class="lineno">  250 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bio_mkTmux</span></span></span>
+<span class="lineno">  251 </span>      :: Tmux.SshLocation
+<span class="lineno">  252 </span>      -&gt; Tmux.TmuxTarget
+<span class="lineno">  253 </span>      -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  254 </span>    -- ^ Spawn a tmux Attach backend. Production: calls
+<span class="lineno">  255 </span>    -- 'PureClaw.Backend.Tmux.mkTmuxBackendHandle' with 'realPtyIO'
+<span class="lineno">  256 </span>    -- and the default 'PureClaw.Backend.Tmux.TmuxOpts'.
+<span class="lineno">  257 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bio_mkContainer</span></span></span>
+<span class="lineno">  258 </span>      :: AuthorizedCommand
+<span class="lineno">  259 </span>      -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  260 </span>    -- ^ Spawn a container exec backend. Production: thin wrapper
+<span class="lineno">  261 </span>    -- around 'PureClaw.Backend.Local.mkLocalBackendHandle' with the
+<span class="lineno">  262 </span>    -- default 'PureClaw.Handles.Backend.PipeOpts'. The 'AuthorizedCommand'
+<span class="lineno">  263 </span>    -- carries the full container exec argv (@engine exec -it target --
+<span class="lineno">  264 </span>    -- binary [args]@).
+<span class="lineno">  265 </span>  }
+<span class="lineno">  266 </span>
+<span class="lineno">  267 </span>-- | Production 'BackendIO': calls the real backend factories from
+<span class="lineno">  268 </span>-- @PureClaw.Backend.*@.
+<span class="lineno">  269 </span>--
+<span class="lineno">  270 </span>-- The SSH and tmux paths use 'realPtyIO' (the @posix-pty@-backed PTY
+<span class="lineno">  271 </span>-- allocator); the local-shell path uses
+<span class="lineno">  272 </span>-- 'PureClaw.Backend.Local.mkLocalBackendHandle' which is pipe-only and
+<span class="lineno">  273 </span>-- needs no PtyIO.
+<span class="lineno">  274 </span>realBackendIO :: BackendIO
+<span class="lineno">  275 </span><span class="decl"><span class="nottickedoff">realBackendIO = BackendIO</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="nottickedoff">{ _bio_mkShell = (`Local.mkLocalBackendHandle` defaultPipeOpts)</span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="nottickedoff">, _bio_mkSsh = \tgt sshCmd remote -&gt;</span>
+<span class="lineno">  278 </span><span class="spaces">      </span><span class="nottickedoff">SSH.mkSshBackendHandle realPtyIO sshCmd tgt remote SSH.defaultSshOpts</span>
+<span class="lineno">  279 </span><span class="spaces">  </span><span class="nottickedoff">, _bio_mkTmux = \loc tgt -&gt;</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="nottickedoff">Tmux.mkTmuxBackendHandle realPtyIO loc tgt Tmux.defaultTmuxOpts</span>
+<span class="lineno">  281 </span><span class="spaces">  </span><span class="nottickedoff">, _bio_mkContainer = (`Local.mkLocalBackendHandle` defaultPipeOpts)</span>
+<span class="lineno">  282 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  283 </span>
+<span class="lineno">  284 </span>
+<span class="lineno">  285 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  286 </span>-- mkTabBackend — the backend tab factory
+<span class="lineno">  287 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  288 </span>
+<span class="lineno">  289 </span>-- | Construct a raw-shell backend tab (F4: 'TbLocal' \/ 'TbSsh' \/
+<span class="lineno">  290 </span>-- 'TbTmux').
+<span class="lineno">  291 </span>--
+<span class="lineno">  292 </span>-- Calls 'mkRawShellTabWith' with 'realBackendIO'. The factory itself
+<span class="lineno">  293 </span>-- never throws: it always returns @'Right' h@ or @'Left' e@. Failures
+<span class="lineno">  294 </span>-- inside the forked helper threads are caught by their own outer
+<span class="lineno">  295 </span>-- exception handler and surface as a 'Crashed' status (visible via
+<span class="lineno">  296 </span>-- '_tabHandle_status').
+<span class="lineno">  297 </span>mkRawShellTab
+<span class="lineno">  298 </span>  :: AgentEnv
+<span class="lineno">  299 </span>  -&gt; TabIndex
+<span class="lineno">  300 </span>  -&gt; TerminalBackend
+<span class="lineno">  301 </span>  -&gt; [Text]
+<span class="lineno">  302 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  303 </span><span class="decl"><span class="istickedoff">mkRawShellTab = mkRawShellTabWith <span class="nottickedoff">realBackendIO</span></span></span>
+<span class="lineno">  304 </span>
+<span class="lineno">  305 </span>-- | Construct a raw-shell backend tab with a caller-supplied
+<span class="lineno">  306 </span>-- 'BackendIO'. Test seam. See 'mkRawShellTab' for the production
+<span class="lineno">  307 </span>-- entry point.
+<span class="lineno">  308 </span>--
+<span class="lineno">  309 </span>-- Dispatches on 'TerminalBackend' to one of three sub-factories. Each
+<span class="lineno">  310 </span>-- sub-factory:
+<span class="lineno">  311 </span>--
+<span class="lineno">  312 </span>-- 1. Runs the kind-specific smart constructors (per S1\/S2\/S3\/S4) on
+<span class="lineno">  313 </span>--    the user-supplied @[Text]@ args. On rejection returns
+<span class="lineno">  314 </span>--    @'Left' ('TabSpawnAuthDenied' ...)@.
+<span class="lineno">  315 </span>-- 2. Calls the corresponding seam action ('_bio_mkShell',
+<span class="lineno">  316 </span>--    '_bio_mkSsh', '_bio_mkTmux') with the validated payload. On
+<span class="lineno">  317 </span>--    'Left' returns @'Left' ('TabBackendConstructFailed' ...)@.
+<span class="lineno">  318 </span>-- 3. On 'Right' wraps the resulting 'BackendHandle' in per-tab state
+<span class="lineno">  319 </span>--    and forks the drainer + writer helper threads via '_env_fork'.
+<span class="lineno">  320 </span>--
+<span class="lineno">  321 </span>-- Session-backed kinds ('TkSession') have their own factories
+<span class="lineno">  322 </span>-- ('PureClaw.Tab.Ai.mkTabAi' and 'PureClaw.Tab.Harness.mkTabHarness')
+<span class="lineno">  323 </span>-- and must not be routed here.
+<span class="lineno">  324 </span>mkRawShellTabWith
+<span class="lineno">  325 </span>  :: BackendIO
+<span class="lineno">  326 </span>  -&gt; AgentEnv
+<span class="lineno">  327 </span>  -&gt; TabIndex
+<span class="lineno">  328 </span>  -&gt; TerminalBackend
+<span class="lineno">  329 </span>  -&gt; [Text]
+<span class="lineno">  330 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  331 </span><span class="decl"><span class="istickedoff">mkRawShellTabWith bio env idx tb args = case tb of</span>
+<span class="lineno">  332 </span><span class="spaces">  </span><span class="istickedoff">TbLocal         -&gt; mkShellTab     bio env idx args</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">TbSsh _         -&gt; mkSshTab       <span class="nottickedoff">bio</span> env <span class="nottickedoff">idx</span> args</span>
+<span class="lineno">  334 </span><span class="spaces">  </span><span class="istickedoff">TbTmux _        -&gt; mkTmuxTab      bio env idx args</span>
+<span class="lineno">  335 </span><span class="spaces">  </span><span class="istickedoff">TbContainer cs  -&gt; mkContainerTab bio env idx cs args</span></span>
+<span class="lineno">  336 </span>
+<span class="lineno">  337 </span>
+<span class="lineno">  338 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  339 </span>-- KindShell sub-factory (S1)
+<span class="lineno">  340 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  341 </span>
+<span class="lineno">  342 </span>-- | Spawn a local-shell backend tab.
+<span class="lineno">  343 </span>--
+<span class="lineno">  344 </span>-- Args layout: @[program, arg1, arg2, ...]@ — the first element is the
+<span class="lineno">  345 </span>-- local command path; the rest are passed verbatim as the argv tail.
+<span class="lineno">  346 </span>-- Empty arg list is rejected (no command to run).
+<span class="lineno">  347 </span>--
+<span class="lineno">  348 </span>-- Authorization (S1): the program path is passed to
+<span class="lineno">  349 </span>-- 'PureClaw.Security.Command.authorize' against '_env_policy' BEFORE
+<span class="lineno">  350 </span>-- the seam is invoked. Rejection yields
+<span class="lineno">  351 </span>-- @'Left' ('TabSpawnAuthDenied' ...)@; no subprocess is spawned (the
+<span class="lineno">  352 </span>-- factory short-circuits at the smart-constructor call).
+<span class="lineno">  353 </span>mkShellTab
+<span class="lineno">  354 </span>  :: BackendIO -&gt; AgentEnv -&gt; TabIndex -&gt; [Text]
+<span class="lineno">  355 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  356 </span><span class="decl"><span class="istickedoff">mkShellTab bio env idx args = case args of</span>
+<span class="lineno">  357 </span><span class="spaces">  </span><span class="istickedoff">[] -&gt; pure (Left (TabSpawnAuthDenied PublicAuthError))</span>
+<span class="lineno">  358 </span><span class="spaces">  </span><span class="istickedoff">(prog : rest) -&gt; case authorize (_env_policy env) (T.unpack prog) rest of</span>
+<span class="lineno">  359 </span><span class="spaces">    </span><span class="istickedoff">Left _err -&gt; authDenied</span>
+<span class="lineno">  360 </span><span class="spaces">    </span><span class="istickedoff">Right authCmd -&gt; do</span>
+<span class="lineno">  361 </span><span class="spaces">      </span><span class="istickedoff">let nameRaw = defaultBackendName &quot;shell&quot; args</span>
+<span class="lineno">  362 </span><span class="spaces">      </span><span class="istickedoff">case Parse.sanitizeTabName nameRaw of</span>
+<span class="lineno">  363 </span><span class="spaces">        </span><span class="istickedoff">Left nameErr -&gt; <span class="nottickedoff">pure (Left (TabInvalidName nameErr))</span></span>
+<span class="lineno">  364 </span><span class="spaces">        </span><span class="istickedoff">Right nameTxt -&gt; do</span>
+<span class="lineno">  365 </span><span class="spaces">          </span><span class="istickedoff">mkResult &lt;- _bio_mkShell bio authCmd</span>
+<span class="lineno">  366 </span><span class="spaces">          </span><span class="istickedoff">finishSpawn env idx (TabName nameTxt) (TkRawShell TbLocal) mkResult</span></span>
+<span class="lineno">  367 </span>
+<span class="lineno">  368 </span>
+<span class="lineno">  369 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  370 </span>-- KindSsh sub-factory (S2 \/ S3 \/ S4)
+<span class="lineno">  371 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  372 </span>
+<span class="lineno">  373 </span>-- | Spawn an SSH backend tab.
+<span class="lineno">  374 </span>--
+<span class="lineno">  375 </span>-- Args layout: @[\&quot;user\@host\&quot;, program, arg1, ...]@. The first arg is
+<span class="lineno">  376 </span>-- @user\@host@; the remaining args are the remote command (program +
+<span class="lineno">  377 </span>-- argv).
+<span class="lineno">  378 </span>--
+<span class="lineno">  379 </span>-- Validation pipeline:
+<span class="lineno">  380 </span>--
+<span class="lineno">  381 </span>-- 1. The first arg must contain exactly one @\@@ separating a
+<span class="lineno">  382 </span>--    non-empty user from a non-empty host.
+<span class="lineno">  383 </span>-- 2. The host portion passes through
+<span class="lineno">  384 </span>--    'PureClaw.Backend.SSH.mkSshHost' (S2 \/ S3 — rejects whitespace,
+<span class="lineno">  385 </span>--    leading dashes, NUL bytes, shell metacharacters, etc.).
+<span class="lineno">  386 </span>-- 3. The local @ssh@ binary path is hardcoded to @\&quot;ssh\&quot;@ (the
+<span class="lineno">  387 </span>--    'PureClaw.Security.Command.authorize' check confirms it is in
+<span class="lineno">  388 </span>--    '_sp_allowedCommands').
+<span class="lineno">  389 </span>-- 4. The remote command (head + tail) is authorized via
+<span class="lineno">  390 </span>--    'PureClaw.Backend.SSH.authorizeRemote' against
+<span class="lineno">  391 </span>--    '_sp_allowedRemoteCommands' (S2 — independent allowlist).
+<span class="lineno">  392 </span>-- 5. The SSH identity is sourced from the Vault slot named by
+<span class="lineno">  393 </span>--    '_rc_sshIdentityKey' (S4 — NO inline identity acceptance). The
+<span class="lineno">  394 </span>--    Vault returns raw bytes; we materialise them at a 'SafeKeyPath'
+<span class="lineno">  395 </span>--    via 'PureClaw.Security.Path.mkSafeKeyPath'.
+<span class="lineno">  396 </span>--
+<span class="lineno">  397 </span>-- /Implementation note (v1 minimal):/ the v1 Vault → 'SafeKeyPath'
+<span class="lineno">  398 </span>-- translation is currently a missing-feature stub. v1 requires the
+<span class="lineno">  399 </span>-- caller to supply the key path via configuration rather than the
+<span class="lineno">  400 </span>-- Vault payload; the Vault slot lookup happens for S4 audit
+<span class="lineno">  401 </span>-- compliance (the missing-slot path yields
+<span class="lineno">  402 </span>-- @'Left' ('TabSpawnAuthDenied' ...)@ as the design mandates) and
+<span class="lineno">  403 </span>-- the path materialisation is deferred to WU9. For WU8 we surface a
+<span class="lineno">  404 </span>-- clean PublicError; the production path lands in WU9 alongside the
+<span class="lineno">  405 </span>-- auto-spawn UX.
+<span class="lineno">  406 </span>mkSshTab
+<span class="lineno">  407 </span>  :: BackendIO -&gt; AgentEnv -&gt; TabIndex -&gt; [Text]
+<span class="lineno">  408 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  409 </span><span class="decl"><span class="istickedoff">mkSshTab bio env idx args = case args of</span>
+<span class="lineno">  410 </span><span class="spaces">  </span><span class="istickedoff">[] -&gt; authDenied</span>
+<span class="lineno">  411 </span><span class="spaces">  </span><span class="istickedoff">(userHost : remoteCmd) -&gt;</span>
+<span class="lineno">  412 </span><span class="spaces">    </span><span class="istickedoff">case parseUserAtHost userHost of</span>
+<span class="lineno">  413 </span><span class="spaces">      </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  414 </span><span class="spaces">      </span><span class="istickedoff">Right (user, hostText) -&gt;</span>
+<span class="lineno">  415 </span><span class="spaces">        </span><span class="istickedoff">case SSH.mkSshHost hostText of</span>
+<span class="lineno">  416 </span><span class="spaces">          </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  417 </span><span class="spaces">          </span><span class="istickedoff">Right host -&gt; case remoteCmd of</span>
+<span class="lineno">  418 </span><span class="spaces">            </span><span class="istickedoff">[] -&gt; authDenied</span>
+<span class="lineno">  419 </span><span class="spaces">            </span><span class="istickedoff">(remoteProg : remoteArgs) -&gt;</span>
+<span class="lineno">  420 </span><span class="spaces">              </span><span class="istickedoff">case SSH.authorizeRemote (_env_policy env) (T.unpack remoteProg) <span class="nottickedoff">remoteArgs</span> of</span>
+<span class="lineno">  421 </span><span class="spaces">                </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  422 </span><span class="spaces">                </span><span class="istickedoff">Right remote -&gt;</span>
+<span class="lineno">  423 </span><span class="spaces">                  </span><span class="istickedoff">case authorize (_env_policy env) &quot;ssh&quot; <span class="nottickedoff">[]</span> of</span>
+<span class="lineno">  424 </span><span class="spaces">                    </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  425 </span><span class="spaces">                    </span><span class="istickedoff">Right sshCmd -&gt; do</span>
+<span class="lineno">  426 </span><span class="spaces">                      </span><span class="istickedoff">mIdent &lt;- resolveSshIdentity env</span>
+<span class="lineno">  427 </span><span class="spaces">                      </span><span class="istickedoff">case mIdent of</span>
+<span class="lineno">  428 </span><span class="spaces">                        </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  429 </span><span class="spaces">                        </span><span class="istickedoff">Right identityPath -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  430 </span><span class="spaces">                          </span><span class="istickedoff"><span class="nottickedoff">let tgt = SSH.SshTarget</span></span>
+<span class="lineno">  431 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">{ SSH._st_user     = user</span></span>
+<span class="lineno">  432 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">, SSH._st_host     = host</span></span>
+<span class="lineno">  433 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">, SSH._st_port     = Nothing</span></span>
+<span class="lineno">  434 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">, SSH._st_identity = identityPath</span></span>
+<span class="lineno">  435 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">  436 </span><span class="spaces">                              </span><span class="istickedoff"><span class="nottickedoff">nameRaw = &quot;ssh tab&quot;</span></span>
+<span class="lineno">  437 </span><span class="spaces">                          </span><span class="istickedoff"><span class="nottickedoff">case Parse.sanitizeTabName nameRaw of</span></span>
+<span class="lineno">  438 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">Left nameErr -&gt; pure (Left (TabInvalidName nameErr))</span></span>
+<span class="lineno">  439 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">Right nameTxt -&gt; do</span></span>
+<span class="lineno">  440 </span><span class="spaces">                              </span><span class="istickedoff"><span class="nottickedoff">mkResult &lt;- _bio_mkSsh bio tgt sshCmd remote</span></span>
+<span class="lineno">  441 </span><span class="spaces">                              </span><span class="istickedoff"><span class="nottickedoff">let sshCfg = SshConfig</span></span>
+<span class="lineno">  442 </span><span class="spaces">                                    </span><span class="istickedoff"><span class="nottickedoff">{ _sc_user = user</span></span>
+<span class="lineno">  443 </span><span class="spaces">                                    </span><span class="istickedoff"><span class="nottickedoff">, _sc_host = hostText</span></span>
+<span class="lineno">  444 </span><span class="spaces">                                    </span><span class="istickedoff"><span class="nottickedoff">, _sc_port = Nothing</span></span>
+<span class="lineno">  445 </span><span class="spaces">                                    </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">  446 </span><span class="spaces">                              </span><span class="istickedoff"><span class="nottickedoff">finishSpawn env idx (TabName nameTxt) (TkRawShell (TbSsh sshCfg)) mkResult</span></span></span>
+<span class="lineno">  447 </span>
+<span class="lineno">  448 </span>-- | Parse a @user\@host@ string into its components.
+<span class="lineno">  449 </span>--
+<span class="lineno">  450 </span>-- Accepts exactly one @\@@ separating a non-empty user from a non-empty
+<span class="lineno">  451 </span>-- host. Multi-@\@@ inputs (e.g. @\&quot;a\@b\@c\&quot;@) are rejected as
+<span class="lineno">  452 </span>-- malformed — there is no scenario where a user identifier legitimately
+<span class="lineno">  453 </span>-- contains an @\@@.
+<span class="lineno">  454 </span>parseUserAtHost :: Text -&gt; Either () (Text, Text)
+<span class="lineno">  455 </span><span class="decl"><span class="istickedoff">parseUserAtHost t = case T.splitOn &quot;@&quot; t of</span>
+<span class="lineno">  456 </span><span class="spaces">  </span><span class="istickedoff">[u, h] | not (T.null u) &amp;&amp; not (T.null h) -&gt; Right (u, h)</span>
+<span class="lineno">  457 </span><span class="spaces">  </span><span class="istickedoff">_                                          -&gt; Left ()</span></span>
+<span class="lineno">  458 </span>
+<span class="lineno">  459 </span>-- | Look up the SSH identity from the configured Vault slot.
+<span class="lineno">  460 </span>--
+<span class="lineno">  461 </span>-- Returns @'Right' path@ when the slot exists and the byte payload was
+<span class="lineno">  462 </span>-- successfully materialised to a 'SafeKeyPath'; otherwise 'Left'.
+<span class="lineno">  463 </span>--
+<span class="lineno">  464 </span>-- The v1 path-materialisation step is intentionally a clean failure:
+<span class="lineno">  465 </span>-- 'PureClaw.Security.Path.mkSafeKeyPath' requires a 'KeysRoot' and an
+<span class="lineno">  466 </span>-- on-disk file with mode @0400@, which the v1 Vault payload doesn't
+<span class="lineno">  467 </span>-- yet produce. The WU9 work item that delivers production SSH spawns
+<span class="lineno">  468 </span>-- is the right place to add the materialisation (write-to-temp +
+<span class="lineno">  469 </span>-- chmod + 'mkSafeKeyPath'). For WU8 we focus on the S4 audit invariant
+<span class="lineno">  470 </span>-- (the slot lookup) and surface @'Left' ('TabSpawnAuthDenied' ...)@
+<span class="lineno">  471 </span>-- when materialisation can't complete.
+<span class="lineno">  472 </span>resolveSshIdentity :: AgentEnv -&gt; IO (Either () SafeKeyPath)
+<span class="lineno">  473 </span><span class="decl"><span class="istickedoff">resolveSshIdentity env = do</span>
+<span class="lineno">  474 </span><span class="spaces">  </span><span class="istickedoff">let <span class="nottickedoff">slot = _rc_sshIdentityKey (_env_routingConfig env)</span></span>
+<span class="lineno">  475 </span><span class="spaces">  </span><span class="istickedoff">mVault &lt;- readIORef (_env_vault env)</span>
+<span class="lineno">  476 </span><span class="spaces">  </span><span class="istickedoff">case mVault of</span>
+<span class="lineno">  477 </span><span class="spaces">    </span><span class="istickedoff">Nothing    -&gt; pure (Left <span class="nottickedoff">()</span>)  -- S4: no vault configured</span>
+<span class="lineno">  478 </span><span class="spaces">    </span><span class="istickedoff">Just vault -&gt; do</span>
+<span class="lineno">  479 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- _vh_get vault <span class="nottickedoff">slot</span></span>
+<span class="lineno">  480 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  481 </span><span class="spaces">        </span><span class="istickedoff">Left _      -&gt; pure (Left <span class="nottickedoff">()</span>)  -- S4: missing slot</span>
+<span class="lineno">  482 </span><span class="spaces">        </span><span class="istickedoff">Right _bytes -&gt;</span>
+<span class="lineno">  483 </span><span class="spaces">          </span><span class="istickedoff">-- v1 minimal: surface a clean S4-shaped failure rather than</span>
+<span class="lineno">  484 </span><span class="spaces">          </span><span class="istickedoff">-- materialising the byte payload to disk. The Vault lookup</span>
+<span class="lineno">  485 </span><span class="spaces">          </span><span class="istickedoff">-- itself happened (S4 audit invariant satisfied — we did</span>
+<span class="lineno">  486 </span><span class="spaces">          </span><span class="istickedoff">-- read the slot named by _rc_sshIdentityKey). The on-disk</span>
+<span class="lineno">  487 </span><span class="spaces">          </span><span class="istickedoff">-- materialisation (write-to-temp + chmod + 'mkSafeKeyPath')</span>
+<span class="lineno">  488 </span><span class="spaces">          </span><span class="istickedoff">-- lands in WU9 alongside the production SSH spawn UX.</span>
+<span class="lineno">  489 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure (Left ())</span></span></span>
+<span class="lineno">  490 </span>
+<span class="lineno">  491 </span>
+<span class="lineno">  492 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  493 </span>-- KindTmux sub-factory (S3)
+<span class="lineno">  494 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  495 </span>
+<span class="lineno">  496 </span>-- | Spawn a tmux Attach backend tab.
+<span class="lineno">  497 </span>--
+<span class="lineno">  498 </span>-- Args layout: @[\&quot;session:window[.pane]\&quot;]@. The first arg encodes
+<span class="lineno">  499 </span>-- the tmux target; remaining args are ignored (tmux Attach has no
+<span class="lineno">  500 </span>-- argv tail — the attach key spec is implicit).
+<span class="lineno">  501 </span>--
+<span class="lineno">  502 </span>-- Validation (S3):
+<span class="lineno">  503 </span>--
+<span class="lineno">  504 </span>-- 1. The single arg is split on @\&quot;:\&quot;@ and @\&quot;.\&quot;@ to extract
+<span class="lineno">  505 </span>--    session, window, and optional pane.
+<span class="lineno">  506 </span>-- 2. Each component passes through its corresponding smart constructor
+<span class="lineno">  507 </span>--    ('mkTmuxSession', 'mkTmuxWindow', 'mkTmuxPane') which reject
+<span class="lineno">  508 </span>--    empty inputs, leading dashes, NUL bytes, non-ASCII, and
+<span class="lineno">  509 </span>--    out-of-charset characters.
+<span class="lineno">  510 </span>-- 3. The local @tmux@ binary is authorized via 'authorize' (with the
+<span class="lineno">  511 </span>--    static @\&quot;tmux\&quot;@ program path).
+<span class="lineno">  512 </span>mkTmuxTab
+<span class="lineno">  513 </span>  :: BackendIO -&gt; AgentEnv -&gt; TabIndex -&gt; [Text]
+<span class="lineno">  514 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  515 </span><span class="decl"><span class="istickedoff">mkTmuxTab bio env idx args = case args of</span>
+<span class="lineno">  516 </span><span class="spaces">  </span><span class="istickedoff">[] -&gt; pure (Left (TabSpawnAuthDenied PublicAuthError))</span>
+<span class="lineno">  517 </span><span class="spaces">  </span><span class="istickedoff">(targetSpec : _ignored) -&gt;</span>
+<span class="lineno">  518 </span><span class="spaces">    </span><span class="istickedoff">case parseTmuxTarget targetSpec of</span>
+<span class="lineno">  519 </span><span class="spaces">      </span><span class="istickedoff">Left _ -&gt; pure (Left (TabSpawnAuthDenied PublicAuthError))</span>
+<span class="lineno">  520 </span><span class="spaces">      </span><span class="istickedoff">Right tgt -&gt;</span>
+<span class="lineno">  521 </span><span class="spaces">        </span><span class="istickedoff">case authorize (_env_policy env) &quot;tmux&quot; <span class="nottickedoff">[]</span> of</span>
+<span class="lineno">  522 </span><span class="spaces">          </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  523 </span><span class="spaces">          </span><span class="istickedoff">Right tmuxCmd -&gt; do</span>
+<span class="lineno">  524 </span><span class="spaces">            </span><span class="istickedoff">let <span class="nottickedoff">loc = Tmux.LocalHost tmuxCmd</span></span>
+<span class="lineno">  525 </span><span class="spaces">                </span><span class="istickedoff">nameRaw = &quot;tmux tab&quot;</span>
+<span class="lineno">  526 </span><span class="spaces">            </span><span class="istickedoff">case Parse.sanitizeTabName nameRaw of</span>
+<span class="lineno">  527 </span><span class="spaces">              </span><span class="istickedoff">Left nameErr -&gt; <span class="nottickedoff">pure (Left (TabInvalidName nameErr))</span></span>
+<span class="lineno">  528 </span><span class="spaces">              </span><span class="istickedoff">Right nameTxt -&gt; do</span>
+<span class="lineno">  529 </span><span class="spaces">                </span><span class="istickedoff">mkResult &lt;- _bio_mkTmux bio <span class="nottickedoff">loc</span> tgt</span>
+<span class="lineno">  530 </span><span class="spaces">                </span><span class="istickedoff">let tmuxCfg = tmuxTargetToConfig tgt</span>
+<span class="lineno">  531 </span><span class="spaces">                </span><span class="istickedoff">finishSpawn env idx (TabName nameTxt) (TkRawShell (TbTmux tmuxCfg)) mkResult</span></span>
+<span class="lineno">  532 </span>
+<span class="lineno">  533 </span>-- | Parse a tmux target spec of the form
+<span class="lineno">  534 </span>-- @\&quot;session\&quot;@, @\&quot;session:window\&quot;@, or @\&quot;session:window.pane\&quot;@.
+<span class="lineno">  535 </span>--
+<span class="lineno">  536 </span>-- Each component is validated via its smart constructor; on any
+<span class="lineno">  537 </span>-- rejection the entire parse fails. The window component is required
+<span class="lineno">  538 </span>-- (a bare session has no attachable window in tmux's Attach-mode
+<span class="lineno">  539 </span>-- model); the pane component is optional.
+<span class="lineno">  540 </span>parseTmuxTarget :: Text -&gt; Either InvalidOptionDetail Tmux.TmuxTarget
+<span class="lineno">  541 </span><span class="decl"><span class="istickedoff">parseTmuxTarget spec = case T.splitOn &quot;:&quot; spec of</span>
+<span class="lineno">  542 </span><span class="spaces">  </span><span class="istickedoff">[sessTxt, winSpec] -&gt; do</span>
+<span class="lineno">  543 </span><span class="spaces">    </span><span class="istickedoff">session &lt;- Tmux.mkTmuxSession sessTxt</span>
+<span class="lineno">  544 </span><span class="spaces">    </span><span class="istickedoff">case T.splitOn &quot;.&quot; winSpec of</span>
+<span class="lineno">  545 </span><span class="spaces">      </span><span class="istickedoff">[winTxt] -&gt; do</span>
+<span class="lineno">  546 </span><span class="spaces">        </span><span class="istickedoff">window &lt;- Tmux.mkTmuxWindow winTxt</span>
+<span class="lineno">  547 </span><span class="spaces">        </span><span class="istickedoff">Right Tmux.TmuxTarget</span>
+<span class="lineno">  548 </span><span class="spaces">          </span><span class="istickedoff">{ Tmux._tt_session = session</span>
+<span class="lineno">  549 </span><span class="spaces">          </span><span class="istickedoff">, Tmux._tt_window  = window</span>
+<span class="lineno">  550 </span><span class="spaces">          </span><span class="istickedoff">, Tmux._tt_pane    = Nothing</span>
+<span class="lineno">  551 </span><span class="spaces">          </span><span class="istickedoff">}</span>
+<span class="lineno">  552 </span><span class="spaces">      </span><span class="istickedoff">[winTxt, paneTxt] -&gt; do</span>
+<span class="lineno">  553 </span><span class="spaces">        </span><span class="istickedoff">window &lt;- Tmux.mkTmuxWindow winTxt</span>
+<span class="lineno">  554 </span><span class="spaces">        </span><span class="istickedoff">pane   &lt;- Tmux.mkTmuxPane paneTxt</span>
+<span class="lineno">  555 </span><span class="spaces">        </span><span class="istickedoff">Right Tmux.TmuxTarget</span>
+<span class="lineno">  556 </span><span class="spaces">          </span><span class="istickedoff">{ Tmux._tt_session = session</span>
+<span class="lineno">  557 </span><span class="spaces">          </span><span class="istickedoff">, Tmux._tt_window  = window</span>
+<span class="lineno">  558 </span><span class="spaces">          </span><span class="istickedoff">, Tmux._tt_pane    = Just pane</span>
+<span class="lineno">  559 </span><span class="spaces">          </span><span class="istickedoff">}</span>
+<span class="lineno">  560 </span><span class="spaces">      </span><span class="istickedoff">_ -&gt; Left <span class="nottickedoff">(InvalidOptionDetail &quot;tmux target: malformed window.pane&quot;)</span></span>
+<span class="lineno">  561 </span><span class="spaces">  </span><span class="istickedoff">_ -&gt; Left <span class="nottickedoff">(InvalidOptionDetail &quot;tmux target: expected session:window[.pane]&quot;)</span></span></span>
+<span class="lineno">  562 </span>
+<span class="lineno">  563 </span>
+<span class="lineno">  564 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  565 </span>-- KindContainer sub-factory (S9)
+<span class="lineno">  566 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  567 </span>
+<span class="lineno">  568 </span>-- | Spawn a container exec backend tab.
+<span class="lineno">  569 </span>--
+<span class="lineno">  570 </span>-- Validation pipeline:
+<span class="lineno">  571 </span>--
+<span class="lineno">  572 </span>-- 1. The @args@ list is checked against 'Container.containerArgsDenylist'
+<span class="lineno">  573 </span>--    (S9 — rejects @--privileged@, @--cap-add@, @--volume@, etc.).
+<span class="lineno">  574 </span>-- 2. The container engine binary name (from 'ContainerSpec._cs_engine')
+<span class="lineno">  575 </span>--    is authorized via 'authorize' against '_env_policy'.
+<span class="lineno">  576 </span>-- 3. The full exec argv is constructed via
+<span class="lineno">  577 </span>--    'Container.buildContainerExecArgv' with a mandatory @--@ separator
+<span class="lineno">  578 </span>--    between the container target and the harness binary (S9 — prevents
+<span class="lineno">  579 </span>--    argument injection).
+<span class="lineno">  580 </span>-- 4. The authorized command is passed to '_bio_mkContainer' (which in
+<span class="lineno">  581 </span>--    production spawns a local pipe via
+<span class="lineno">  582 </span>--    'PureClaw.Backend.Local.mkLocalBackendHandle').
+<span class="lineno">  583 </span>mkContainerTab
+<span class="lineno">  584 </span>  :: BackendIO -&gt; AgentEnv -&gt; TabIndex -&gt; ContainerSpec -&gt; [Text]
+<span class="lineno">  585 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  586 </span><span class="decl"><span class="istickedoff">mkContainerTab bio env idx cs args = do</span>
+<span class="lineno">  587 </span><span class="spaces">  </span><span class="istickedoff">-- S9: check args against denylist before any subprocess spawn.</span>
+<span class="lineno">  588 </span><span class="spaces">  </span><span class="istickedoff">case Container.checkContainerArgs args of</span>
+<span class="lineno">  589 </span><span class="spaces">    </span><span class="istickedoff">Left _denied -&gt; authDenied</span>
+<span class="lineno">  590 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt;</span>
+<span class="lineno">  591 </span><span class="spaces">      </span><span class="istickedoff">let engineBin = T.unpack (Container.containerEngineBinary (_cs_engine cs))</span>
+<span class="lineno">  592 </span><span class="spaces">      </span><span class="istickedoff">in case authorize (_env_policy env) engineBin <span class="nottickedoff">[]</span> of</span>
+<span class="lineno">  593 </span><span class="spaces">           </span><span class="istickedoff">Left _ -&gt; authDenied</span>
+<span class="lineno">  594 </span><span class="spaces">           </span><span class="istickedoff">Right authCmd -&gt; do</span>
+<span class="lineno">  595 </span><span class="spaces">             </span><span class="istickedoff">let nameRaw = &quot;container &quot; &lt;&gt; Container.containerEngineBinary (_cs_engine cs)</span>
+<span class="lineno">  596 </span><span class="spaces">             </span><span class="istickedoff">case Parse.sanitizeTabName nameRaw of</span>
+<span class="lineno">  597 </span><span class="spaces">               </span><span class="istickedoff">Left nameErr -&gt; <span class="nottickedoff">pure (Left (TabInvalidName nameErr))</span></span>
+<span class="lineno">  598 </span><span class="spaces">               </span><span class="istickedoff">Right nameTxt -&gt; do</span>
+<span class="lineno">  599 </span><span class="spaces">                 </span><span class="istickedoff">mkResult &lt;- _bio_mkContainer bio <span class="nottickedoff">authCmd</span></span>
+<span class="lineno">  600 </span><span class="spaces">                 </span><span class="istickedoff">finishSpawn env idx (TabName nameTxt)</span>
+<span class="lineno">  601 </span><span class="spaces">                   </span><span class="istickedoff">(TkRawShell (TbContainer cs)) mkResult</span></span>
+<span class="lineno">  602 </span>
+<span class="lineno">  603 </span>
+<span class="lineno">  604 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  605 </span>-- Shared spawn finishing logic (drainer + writer)
+<span class="lineno">  606 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  607 </span>
+<span class="lineno">  608 </span>-- | Wrap a freshly-constructed 'BackendHandle' in per-tab state, fork
+<span class="lineno">  609 </span>-- the drainer + writer threads, and build the public 'TabHandle'.
+<span class="lineno">  610 </span>--
+<span class="lineno">  611 </span>-- Shared by all three sub-factories (KindShell \/ KindSsh \/ KindTmux)
+<span class="lineno">  612 </span>-- because the post-construction wiring is identical.
+<span class="lineno">  613 </span>finishSpawn
+<span class="lineno">  614 </span>  :: AgentEnv -&gt; TabIndex -&gt; TabName -&gt; TabKind
+<span class="lineno">  615 </span>  -&gt; Either BackendError BackendHandle
+<span class="lineno">  616 </span>  -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  617 </span><span class="decl"><span class="istickedoff">finishSpawn _env _idx _name _kind (Left err) =</span>
+<span class="lineno">  618 </span><span class="spaces">  </span><span class="istickedoff">pure (Left (TabBackendConstructFailed err))</span>
+<span class="lineno">  619 </span><span class="spaces"></span><span class="istickedoff">finishSpawn env idx name kind (Right bh) = do</span>
+<span class="lineno">  620 </span><span class="spaces">  </span><span class="istickedoff">state &lt;- allocState env bh</span>
+<span class="lineno">  621 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  622 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_bts_statusRef state) (Idle now)</span>
+<span class="lineno">  623 </span><span class="spaces">  </span><span class="istickedoff">drainRunner  &lt;- _env_fork env (drainerLoop env idx state)</span>
+<span class="lineno">  624 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_bts_drainRunner state) (Just drainRunner)</span>
+<span class="lineno">  625 </span><span class="spaces">  </span><span class="istickedoff">writerRunner &lt;- _env_fork env (writerLoop state)</span>
+<span class="lineno">  626 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_bts_writerRunner state) (Just writerRunner)</span>
+<span class="lineno">  627 </span><span class="spaces">  </span><span class="istickedoff">pure (Right (mkHandle <span class="nottickedoff">env</span> idx name kind state))</span></span>
+<span class="lineno">  628 </span>
+<span class="lineno">  629 </span>-- | Allocate the per-tab state. The bounded outbound queue's capacity
+<span class="lineno">  630 </span>-- comes from '_rc_inputQueueBound' so the H4 \&quot;non-blocking send\&quot;
+<span class="lineno">  631 </span>-- contract is configurable.
+<span class="lineno">  632 </span>allocState :: AgentEnv -&gt; BackendHandle -&gt; IO BackendTabState
+<span class="lineno">  633 </span><span class="decl"><span class="istickedoff">allocState env bh = do</span>
+<span class="lineno">  634 </span><span class="spaces">  </span><span class="istickedoff">let rc = _env_routingConfig env</span>
+<span class="lineno">  635 </span><span class="spaces">  </span><span class="istickedoff">sendQ      &lt;- newTBQueueIO (fromIntegral (_rc_inputQueueBound rc))</span>
+<span class="lineno">  636 </span><span class="spaces">  </span><span class="istickedoff">drainRef   &lt;- newIORef <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  637 </span><span class="spaces">  </span><span class="istickedoff">writerRef  &lt;- newIORef <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  638 </span><span class="spaces">  </span><span class="istickedoff">closedRef  &lt;- newIORef False</span>
+<span class="lineno">  639 </span><span class="spaces">  </span><span class="istickedoff">-- Sentinel: status starts 'Active' at allocation; the spawn finisher</span>
+<span class="lineno">  640 </span><span class="spaces">  </span><span class="istickedoff">-- writes 'Idle now' before mkTabBackend returns.</span>
+<span class="lineno">  641 </span><span class="spaces">  </span><span class="istickedoff">statRef    &lt;- newIORef <span class="nottickedoff">Active</span></span>
+<span class="lineno">  642 </span><span class="spaces">  </span><span class="istickedoff">pure BackendTabState</span>
+<span class="lineno">  643 </span><span class="spaces">    </span><span class="istickedoff">{ _bts_backend      = bh</span>
+<span class="lineno">  644 </span><span class="spaces">    </span><span class="istickedoff">, _bts_sendQ        = sendQ</span>
+<span class="lineno">  645 </span><span class="spaces">    </span><span class="istickedoff">, _bts_drainRunner  = drainRef</span>
+<span class="lineno">  646 </span><span class="spaces">    </span><span class="istickedoff">, _bts_writerRunner = writerRef</span>
+<span class="lineno">  647 </span><span class="spaces">    </span><span class="istickedoff">, _bts_closed       = closedRef</span>
+<span class="lineno">  648 </span><span class="spaces">    </span><span class="istickedoff">, _bts_statusRef    = statRef</span>
+<span class="lineno">  649 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  650 </span>
+<span class="lineno">  651 </span>-- | Build the public 'TabHandle' record from the per-tab state.
+<span class="lineno">  652 </span>mkHandle :: AgentEnv -&gt; TabIndex -&gt; TabName -&gt; TabKind -&gt; BackendTabState -&gt; TabHandle
+<span class="lineno">  653 </span><span class="decl"><span class="istickedoff">mkHandle env idx name kind state = TabHandle</span>
+<span class="lineno">  654 </span><span class="spaces">  </span><span class="istickedoff">{ _tabHandle_index        = idx</span>
+<span class="lineno">  655 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_name         = name</span>
+<span class="lineno">  656 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_kind         = kind</span>
+<span class="lineno">  657 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_status       = readIORef (_bts_statusRef state)</span>
+<span class="lineno">  658 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_send         = sendBytes state</span>
+<span class="lineno">  659 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_enqueueSlash = enqueueSlashUnsupported</span>
+<span class="lineno">  660 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_close        = closeTabBackend <span class="nottickedoff">env</span> state</span>
+<span class="lineno">  661 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  662 </span>
+<span class="lineno">  663 </span>
+<span class="lineno">  664 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  665 </span>-- _tabHandle_send / _tabHandle_enqueueSlash
+<span class="lineno">  666 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  667 </span>
+<span class="lineno">  668 </span>-- | Enqueue a 'Text' payload onto the outbound queue. Non-blocking:
+<span class="lineno">  669 </span>-- returns @'Left' ('TabConcurrencyLimit' 0)@ if the queue is full so
+<span class="lineno">  670 </span>-- the dispatcher's send loop never blocks (H4).
+<span class="lineno">  671 </span>--
+<span class="lineno">  672 </span>-- The text is UTF-8 encoded and forwarded verbatim — including any
+<span class="lineno">  673 </span>-- leading @\/@ — so a direct-inject like @\/N \/pwd@ reaches the
+<span class="lineno">  674 </span>-- backend as the literal @\&quot;\/pwd\&quot;@ (I4: slash-prefix opaque to the
+<span class="lineno">  675 </span>-- backend).
+<span class="lineno">  676 </span>sendBytes :: BackendTabState -&gt; Text -&gt; IO (Either TabError ())
+<span class="lineno">  677 </span><span class="decl"><span class="istickedoff">sendBytes state t = atomically (tryEnqueueSTM (_bts_sendQ state) (TE.encodeUtf8 t))</span></span>
+<span class="lineno">  678 </span>
+<span class="lineno">  679 </span>-- | STM body of 'sendBytes', factored out so tests can drive it inside
+<span class="lineno">  680 </span>-- a larger transaction if needed.
+<span class="lineno">  681 </span>tryEnqueueSTM :: TBQueue ByteString -&gt; ByteString -&gt; STM (Either TabError ())
+<span class="lineno">  682 </span><span class="decl"><span class="istickedoff">tryEnqueueSTM q bs = do</span>
+<span class="lineno">  683 </span><span class="spaces">  </span><span class="istickedoff">full &lt;- isFullTBQueue q</span>
+<span class="lineno">  684 </span><span class="spaces">  </span><span class="istickedoff">if full</span>
+<span class="lineno">  685 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (TabConcurrencyLimit 0))</span>
+<span class="lineno">  686 </span><span class="spaces">    </span><span class="istickedoff">else writeTBQueue q bs &gt;&gt; pure (Right ())</span></span>
+<span class="lineno">  687 </span>
+<span class="lineno">  688 </span>-- | '_tabHandle_enqueueSlash' for a backend tab: slash commands are
+<span class="lineno">  689 </span>-- not supported, so we return @'Left' ('TabUnsupportedCommand' cmd)@
+<span class="lineno">  690 </span>-- immediately without enqueueing (H13 \/ I4 contract).
+<span class="lineno">  691 </span>enqueueSlashUnsupported :: SlashCommand -&gt; IO (Either TabError ())
+<span class="lineno">  692 </span><span class="decl"><span class="istickedoff">enqueueSlashUnsupported cmd = pure (Left (TabUnsupportedCommand cmd))</span></span>
+<span class="lineno">  693 </span>
+<span class="lineno">  694 </span>
+<span class="lineno">  695 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  696 </span>-- _tabHandle_close — destructive close for backend tabs
+<span class="lineno">  697 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  698 </span>
+<span class="lineno">  699 </span>-- | Close a backend tab. Idempotent + never throws (H6, H7).
+<span class="lineno">  700 </span>--
+<span class="lineno">  701 </span>-- Both 'CloseGraceful' and 'CloseForce' are destructive (H9 — close is
+<span class="lineno">  702 </span>-- already destructive for non-AI tabs, so @--force@ is a no-op
+<span class="lineno">  703 </span>-- distinct from graceful only at the pattern-match level). The triad
+<span class="lineno">  704 </span>-- below cancels both helper threads and then calls '_bh_close'. Each
+<span class="lineno">  705 </span>-- step is wrapped in 'safeIgnore' so a misbehaving backend can't leak
+<span class="lineno">  706 </span>-- an exception out of the never-throws contract.
+<span class="lineno">  707 </span>closeTabBackend :: AgentEnv -&gt; BackendTabState -&gt; CloseMode -&gt; IO ()
+<span class="lineno">  708 </span><span class="decl"><span class="istickedoff">closeTabBackend _env state mode = do</span>
+<span class="lineno">  709 </span><span class="spaces">  </span><span class="istickedoff">alreadyClosed &lt;- atomicModifyIORef' (_bts_closed state) (True,)</span>
+<span class="lineno">  710 </span><span class="spaces">  </span><span class="istickedoff">unless alreadyClosed $ do</span>
+<span class="lineno">  711 </span><span class="spaces">    </span><span class="istickedoff">safeIgnore (cancelMaybeRunner (_bts_drainRunner state))</span>
+<span class="lineno">  712 </span><span class="spaces">    </span><span class="istickedoff">safeIgnore (cancelMaybeRunner (_bts_writerRunner state))</span>
+<span class="lineno">  713 </span><span class="spaces">    </span><span class="istickedoff">case mode of</span>
+<span class="lineno">  714 </span><span class="spaces">      </span><span class="istickedoff">CloseGraceful -&gt; safeIgnore (_bh_close (_bts_backend state))</span>
+<span class="lineno">  715 </span><span class="spaces">      </span><span class="istickedoff">CloseForce    -&gt; safeIgnore (_bh_close (_bts_backend state))</span></span>
+<span class="lineno">  716 </span>
+<span class="lineno">  717 </span>-- | Read the captured 'TabRunner' (set by 'mkTabBackendWith' after
+<span class="lineno">  718 </span>-- fork) and invoke its cancel. Tolerant of the brief allocation\/fork
+<span class="lineno">  719 </span>-- window when the IORef is still 'Nothing'.
+<span class="lineno">  720 </span>cancelMaybeRunner :: IORef (Maybe TabRunner) -&gt; IO ()
+<span class="lineno">  721 </span><span class="decl"><span class="istickedoff">cancelMaybeRunner ref = do</span>
+<span class="lineno">  722 </span><span class="spaces">  </span><span class="istickedoff">mRunner &lt;- readIORef ref</span>
+<span class="lineno">  723 </span><span class="spaces">  </span><span class="istickedoff">for_ mRunner _trun_cancel</span></span>
+<span class="lineno">  724 </span>
+<span class="lineno">  725 </span>-- | Best-effort: run an IO action and swallow synchronous failures.
+<span class="lineno">  726 </span>-- The close path MUST be never-throws (H7), so every step is wrapped
+<span class="lineno">  727 </span>-- defensively. 'AsyncCancelled' is also swallowed here because the
+<span class="lineno">  728 </span>-- close handler is invoked from outside the helper threads; any
+<span class="lineno">  729 </span>-- AsyncCancelled bubbling up through cancel itself is benign (the
+<span class="lineno">  730 </span>-- target thread has already received the cancel).
+<span class="lineno">  731 </span>safeIgnore :: IO () -&gt; IO ()
+<span class="lineno">  732 </span><span class="decl"><span class="istickedoff">safeIgnore m = do</span>
+<span class="lineno">  733 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- try @SomeException m</span>
+<span class="lineno">  734 </span><span class="spaces">  </span><span class="istickedoff">pure ()</span></span>
+<span class="lineno">  735 </span>
+<span class="lineno">  736 </span>
+<span class="lineno">  737 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  738 </span>-- Drainer thread — _bh_recv → FullMsg via _env_channelOutQ
+<span class="lineno">  739 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  740 </span>
+<span class="lineno">  741 </span>-- | Drainer-thread top-level. Wraps 'drainerStep' in 'safelyRun' so a
+<span class="lineno">  742 </span>-- synchronous exception transitions the tab to 'Crashed' rather than
+<span class="lineno">  743 </span>-- killing the parent thread, and so 'AsyncCancelled' propagates per
+<span class="lineno">  744 </span>-- the C5 contract.
+<span class="lineno">  745 </span>drainerLoop :: AgentEnv -&gt; TabIndex -&gt; BackendTabState -&gt; IO ()
+<span class="lineno">  746 </span><span class="decl"><span class="istickedoff">drainerLoop env idx state = safelyRun state loop</span>
+<span class="lineno">  747 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  748 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  749 </span><span class="spaces">      </span><span class="istickedoff">keepGoing &lt;- drainerStep env idx state</span>
+<span class="lineno">  750 </span><span class="spaces">      </span><span class="istickedoff">when keepGoing loop</span></span>
+<span class="lineno">  751 </span>
+<span class="lineno">  752 </span>-- | One iteration of the drainer. Reads '_bh_recv' (blocking on the
+<span class="lineno">  753 </span>-- handle's default idle policy), emits a 'FullMsg' if the result is
+<span class="lineno">  754 </span>-- non-empty and the tab is focused (D4 producer-side skip), then
+<span class="lineno">  755 </span>-- returns whether the loop should continue.
+<span class="lineno">  756 </span>--
+<span class="lineno">  757 </span>-- The drainer terminates on 'RecvEof' (the backend's underlying pipe
+<span class="lineno">  758 </span>-- closed) or 'RecvTruncated' (the recv-buffer cap was exceeded — the
+<span class="lineno">  759 </span>-- caller cannot pull more bytes through this handle even if more are
+<span class="lineno">  760 </span>-- queued). 'RecvSettled' and 'RecvTimedOut' continue the loop.
+<span class="lineno">  761 </span>drainerStep :: AgentEnv -&gt; TabIndex -&gt; BackendTabState -&gt; IO Bool
+<span class="lineno">  762 </span><span class="decl"><span class="istickedoff">drainerStep env idx state = do</span>
+<span class="lineno">  763 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- _bh_recv (_bts_backend state) <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  764 </span><span class="spaces">  </span><span class="istickedoff">let bs = recvBytes result</span>
+<span class="lineno">  765 </span><span class="spaces">  </span><span class="istickedoff">unless (BS.null bs) $ do</span>
+<span class="lineno">  766 </span><span class="spaces">    </span><span class="istickedoff">let txt = TE.decodeUtf8 bs</span>
+<span class="lineno">  767 </span><span class="spaces">    </span><span class="istickedoff">unless (T.null (T.strip txt)) $ do</span>
+<span class="lineno">  768 </span><span class="spaces">      </span><span class="istickedoff">-- D4 producer-side focus check: skip the enqueue work when the</span>
+<span class="lineno">  769 </span><span class="spaces">      </span><span class="istickedoff">-- tab is not focused. The writer thread re-applies the predicate</span>
+<span class="lineno">  770 </span><span class="spaces">      </span><span class="istickedoff">-- on dequeue (D3), so this is an optimisation only; correctness</span>
+<span class="lineno">  771 </span><span class="spaces">      </span><span class="istickedoff">-- comes from the writer.</span>
+<span class="lineno">  772 </span><span class="spaces">      </span><span class="istickedoff">curFocus &lt;- readIORef (_env_focus env)</span>
+<span class="lineno">  773 </span><span class="spaces">      </span><span class="istickedoff">when (shouldEmit curFocus (SrcTab idx)) $</span>
+<span class="lineno">  774 </span><span class="spaces">        </span><span class="istickedoff">atomically $ writeTBQueue (_env_channelOutQ env)</span>
+<span class="lineno">  775 </span><span class="spaces">                       </span><span class="istickedoff">(SrcTab idx, FullMsg idx txt)</span>
+<span class="lineno">  776 </span><span class="spaces">  </span><span class="istickedoff">pure $ case result of</span>
+<span class="lineno">  777 </span><span class="spaces">    </span><span class="istickedoff">RecvSettled   _ -&gt; True</span>
+<span class="lineno">  778 </span><span class="spaces">    </span><span class="istickedoff">RecvTimedOut  _ -&gt; <span class="nottickedoff">True</span></span>
+<span class="lineno">  779 </span><span class="spaces">    </span><span class="istickedoff">RecvEof       _ -&gt; False</span>
+<span class="lineno">  780 </span><span class="spaces">    </span><span class="istickedoff">RecvTruncated _ -&gt; <span class="nottickedoff">False</span></span></span>
+<span class="lineno">  781 </span>
+<span class="lineno">  782 </span>
+<span class="lineno">  783 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  784 </span>-- Writer thread — _bts_sendQ → _bh_send
+<span class="lineno">  785 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  786 </span>
+<span class="lineno">  787 </span>-- | Writer-thread top-level. Drains '_bts_sendQ' forever, forwarding
+<span class="lineno">  788 </span>-- each chunk to '_bh_send'. Wrapped in 'safelyRun' for the same
+<span class="lineno">  789 </span>-- AsyncCancelled \/ Crashed semantics as the drainer.
+<span class="lineno">  790 </span>writerLoop :: BackendTabState -&gt; IO ()
+<span class="lineno">  791 </span><span class="decl"><span class="istickedoff">writerLoop state = safelyRun <span class="nottickedoff">state</span> loop</span>
+<span class="lineno">  792 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  793 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  794 </span><span class="spaces">      </span><span class="istickedoff">bs &lt;- atomically (readTBQueue (_bts_sendQ state))</span>
+<span class="lineno">  795 </span><span class="spaces">      </span><span class="istickedoff">-- '_bh_send' may block. We tolerate the block because the</span>
+<span class="lineno">  796 </span><span class="spaces">      </span><span class="istickedoff">-- bounded '_bts_sendQ' keeps the producer side non-blocking;</span>
+<span class="lineno">  797 </span><span class="spaces">      </span><span class="istickedoff">-- the writer is a single-purpose drainer and nothing else</span>
+<span class="lineno">  798 </span><span class="spaces">      </span><span class="istickedoff">-- depends on its progress.</span>
+<span class="lineno">  799 </span><span class="spaces">      </span><span class="istickedoff">_bh_send (_bts_backend state) bs</span>
+<span class="lineno">  800 </span><span class="spaces">      </span><span class="istickedoff">loop</span></span>
+<span class="lineno">  801 </span>
+<span class="lineno">  802 </span>
+<span class="lineno">  803 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  804 </span>-- safelyRun — shared exception handler for drainer + writer
+<span class="lineno">  805 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  806 </span>
+<span class="lineno">  807 </span>-- | Outer exception handler shared by both helper threads.
+<span class="lineno">  808 </span>--
+<span class="lineno">  809 </span>-- * 'AsyncCancelled' propagates (re-raised) so '_tabHandle_close'
+<span class="lineno">  810 </span>--   semantics work correctly per C5.
+<span class="lineno">  811 </span>-- * Other 'SomeException' transitions the tab to 'Crashed' (carrying
+<span class="lineno">  812 </span>--   a redacted short label) and the helper thread exits.
+<span class="lineno">  813 </span>safelyRun :: BackendTabState -&gt; IO () -&gt; IO ()
+<span class="lineno">  814 </span><span class="decl"><span class="istickedoff">safelyRun state body = body `catch` handler</span>
+<span class="lineno">  815 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  816 </span><span class="spaces">    </span><span class="istickedoff">handler :: SomeException -&gt; IO ()</span>
+<span class="lineno">  817 </span><span class="spaces">    </span><span class="istickedoff">handler e</span>
+<span class="lineno">  818 </span><span class="spaces">      </span><span class="istickedoff">| Just AsyncCancelled &lt;- fromException e =</span>
+<span class="lineno">  819 </span><span class="spaces">          </span><span class="istickedoff">throwIO e  -- propagate AsyncCancelled (C5)</span>
+<span class="lineno">  820 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  821 </span><span class="spaces">          </span><span class="istickedoff">writeIORef (_bts_statusRef state)</span>
+<span class="lineno">  822 </span><span class="spaces">                     </span><span class="istickedoff">(Crashed (PublicTabError &quot;tab: backend loop crashed&quot;))</span></span>
+<span class="lineno">  823 </span>
+<span class="lineno">  824 </span>
+<span class="lineno">  825 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  826 </span>-- Helpers
+<span class="lineno">  827 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  828 </span>
+<span class="lineno">  829 </span>-- | Compose a default friendly tab name for a backend tab.
+<span class="lineno">  830 </span>--
+<span class="lineno">  831 </span>-- 'mkShellTab' calls this with the first user-supplied arg as the
+<span class="lineno">  832 </span>-- suffix, producing labels like @\&quot;shell ls\&quot;@. The empty-arg case is
+<span class="lineno">  833 </span>-- handled at the call site, so the function only sees a non-empty
+<span class="lineno">  834 </span>-- arg list.
+<span class="lineno">  835 </span>defaultBackendName :: Text -&gt; [Text] -&gt; Text
+<span class="lineno">  836 </span><span class="decl"><span class="istickedoff">defaultBackendName prefix args = case args of</span>
+<span class="lineno">  837 </span><span class="spaces">  </span><span class="istickedoff">(a : _) -&gt; prefix &lt;&gt; &quot; &quot; &lt;&gt; a</span>
+<span class="lineno">  838 </span><span class="spaces">  </span><span class="istickedoff">-- Dead arm: callers short-circuit before reaching here. We keep the</span>
+<span class="lineno">  839 </span><span class="spaces">  </span><span class="istickedoff">-- pattern total so a future call-site change can't silently produce</span>
+<span class="lineno">  840 </span><span class="spaces">  </span><span class="istickedoff">-- a partial-match runtime crash.</span>
+<span class="lineno">  841 </span><span class="spaces">  </span><span class="istickedoff">[]      -&gt; <span class="nottickedoff">prefix &lt;&gt; &quot; tab&quot;</span></span></span>
+<span class="lineno">  842 </span>
+<span class="lineno">  843 </span>-- | Common authorization-denied short-circuit.
+<span class="lineno">  844 </span>authDenied :: IO (Either TabError TabHandle)
+<span class="lineno">  845 </span><span class="decl"><span class="istickedoff">authDenied = pure (Left (TabSpawnAuthDenied PublicAuthError))</span></span>
+<span class="lineno">  846 </span>
+<span class="lineno">  847 </span>-- | Project a parsed 'Tmux.TmuxTarget' to a serialisation-safe
+<span class="lineno">  848 </span>-- 'TmuxConfig' for storage in 'TkRawShell'.
+<span class="lineno">  849 </span>tmuxTargetToConfig :: Tmux.TmuxTarget -&gt; TmuxConfig
+<span class="lineno">  850 </span><span class="decl"><span class="istickedoff">tmuxTargetToConfig tgt = TmuxConfig</span>
+<span class="lineno">  851 </span><span class="spaces">  </span><span class="istickedoff">{ _tc_session = Tmux.getTmuxSession (Tmux._tt_session tgt)</span>
+<span class="lineno">  852 </span><span class="spaces">  </span><span class="istickedoff">, _tc_window  = Tmux.getTmuxWindow  (Tmux._tt_window  tgt)</span>
+<span class="lineno">  853 </span><span class="spaces">  </span><span class="istickedoff">, _tc_pane    = <span class="nottickedoff">Tmux.getTmuxPane</span> &lt;$&gt; Tmux._tt_pane tgt</span>
+<span class="lineno">  854 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

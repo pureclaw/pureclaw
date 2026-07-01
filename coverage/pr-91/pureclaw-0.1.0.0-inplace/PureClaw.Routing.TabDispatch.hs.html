@@ -1,0 +1,956 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.TabDispatch
+<span class="lineno">    3 </span>-- Description : Per-conversation inbound router + flat tab commands (8b.4).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- This is the per-conversation routing brain of the Tabs-as-View cutover
+<span class="lineno">    6 </span>-- (GitHub #79; spike §8). 'handleInbound' takes one inbound message tagged
+<span class="lineno">    7 </span>-- with its 'ConversationKey' and routes it against /this/ conversation's
+<span class="lineno">    8 </span>-- cursor and the global 'TabRegistry':
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>--   1. __Wizard interception__ — if the conversation is mid-@\/tab@, its next
+<span class="lineno">   11 </span>--      message is consumed by the wizard ('stepWizard') /before/ the grammar
+<span class="lineno">   12 </span>--      sees it (design §9.2 / §11). A completed pick binds a new tab; a
+<span class="lineno">   13 </span>--      slash-prefixed reply cancels the wizard and re-dispatches that command.
+<span class="lineno">   14 </span>--   2. __Flat tab verbs__ — @\/new@, @\/nt@, @\/close@, @\/tabs@, @\/rename@,
+<span class="lineno">   15 </span>--      @\/relay@, @\/tab@ — recognised directly on the trimmed text (design
+<span class="lineno">   16 </span>--      §7). These are __not__ routed through the legacy @\/tab \&lt;sub\&gt;@
+<span class="lineno">   17 </span>--      grammar.
+<span class="lineno">   18 </span>--   3. __Routing grammar__ — anything else goes through
+<span class="lineno">   19 </span>--      'PureClaw.Routing.Parse.parseInput': @\/N@ switch, @\/N \&lt;text\&gt;@
+<span class="lineno">   20 </span>--      inject, default text to the active tab, or a non-tab slash command
+<span class="lineno">   21 </span>--      handed to '_td_fallthrough'.
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- Every effect is injected through 'TabDispatchDeps' (no real provider /
+<span class="lineno">   24 </span>-- harness / Exec), so the whole router is unit-testable with recording fakes
+<span class="lineno">   25 </span>-- and the pinned design §14 copy is asserted byte-for-byte. This module is
+<span class="lineno">   26 </span>-- /additive/ — it is wired into the live loop at 8c, replacing the old
+<span class="lineno">   27 </span>-- @dispatchOne@.
+<span class="lineno">   28 </span>module PureClaw.Routing.TabDispatch
+<span class="lineno">   29 </span>  ( -- * Injected dependencies
+<span class="lineno">   30 </span>    TabDispatchDeps (..)
+<span class="lineno">   31 </span>    -- * The router
+<span class="lineno">   32 </span>  , handleInbound
+<span class="lineno">   33 </span>    -- * Parsed-command entry point
+<span class="lineno">   34 </span>  , runTabCommand
+<span class="lineno">   35 </span>    -- * Production wiring seam
+<span class="lineno">   36 </span>  , mkRunTabCommandSeam
+<span class="lineno">   37 </span>  ) where
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>import Data.Char qualified as Char
+<span class="lineno">   40 </span>import Data.IORef (IORef, atomicModifyIORef', readIORef, writeIORef)
+<span class="lineno">   41 </span>import Data.Map.Strict (Map)
+<span class="lineno">   42 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   43 </span>import Data.Maybe qualified as Maybe
+<span class="lineno">   44 </span>import Data.Text (Text)
+<span class="lineno">   45 </span>import Data.Text qualified as T
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>import PureClaw.Agent.SlashCommands qualified as Slash
+<span class="lineno">   48 </span>import PureClaw.Handles.Channel (ChannelHandle (..), OutgoingMessage (..))
+<span class="lineno">   49 </span>import PureClaw.Handles.Tab
+<span class="lineno">   50 </span>  ( NameError
+<span class="lineno">   51 </span>  , TabError
+<span class="lineno">   52 </span>  , TabIndex
+<span class="lineno">   53 </span>  , mkTabIndex
+<span class="lineno">   54 </span>  , toPublicTabError
+<span class="lineno">   55 </span>  , unPublicTabError
+<span class="lineno">   56 </span>  , unTabIndex
+<span class="lineno">   57 </span>  )
+<span class="lineno">   58 </span>import PureClaw.Harness.Registry (HarnessId)
+<span class="lineno">   59 </span>import PureClaw.Routing.Parse qualified as Parse
+<span class="lineno">   60 </span>import PureClaw.Routing.Types qualified as RT
+<span class="lineno">   61 </span>import PureClaw.Core.Types (SessionId)
+<span class="lineno">   62 </span>import PureClaw.Session.Kind
+<span class="lineno">   63 </span>  ( HarnessFlavour (..)
+<span class="lineno">   64 </span>  , HarnessSpec (..)
+<span class="lineno">   65 </span>  , TmuxConfig (..)
+<span class="lineno">   66 </span>  , fixedFlavourLookup
+<span class="lineno">   67 </span>  )
+<span class="lineno">   68 </span>import PureClaw.Tabs
+<span class="lineno">   69 </span>  ( TabRegistry (..)
+<span class="lineno">   70 </span>  , readTabs
+<span class="lineno">   71 </span>  , registryAppend
+<span class="lineno">   72 </span>  , registryLookupSlot
+<span class="lineno">   73 </span>  , registryRemove
+<span class="lineno">   74 </span>  )
+<span class="lineno">   75 </span>import PureClaw.Tabs.Types
+<span class="lineno">   76 </span>  ( ConversationKey
+<span class="lineno">   77 </span>  , CursorState (..)
+<span class="lineno">   78 </span>  , ForceMode (..)
+<span class="lineno">   79 </span>  , RelayMode (..)
+<span class="lineno">   80 </span>  , Tab (..)
+<span class="lineno">   81 </span>  , TabKindArg (..)
+<span class="lineno">   82 </span>  , TabList
+<span class="lineno">   83 </span>  , TabRef (..)
+<span class="lineno">   84 </span>  , TabSlashCommand (..)
+<span class="lineno">   85 </span>  , TabStatus (..)
+<span class="lineno">   86 </span>  , TabsError (..)
+<span class="lineno">   87 </span>  , clearCursor
+<span class="lineno">   88 </span>  , conversationsOn
+<span class="lineno">   89 </span>  , rebindSlot
+<span class="lineno">   90 </span>  , resolveCursorSlot
+<span class="lineno">   91 </span>  , setCursor
+<span class="lineno">   92 </span>  , toList
+<span class="lineno">   93 </span>  )
+<span class="lineno">   94 </span>import PureClaw.Tabs.Wizard
+<span class="lineno">   95 </span>  ( WizardEnv (..)
+<span class="lineno">   96 </span>  , WizardState
+<span class="lineno">   97 </span>  , WizardStep (..)
+<span class="lineno">   98 </span>  , WizardTarget (..)
+<span class="lineno">   99 </span>  , filterCandidates
+<span class="lineno">  100 </span>  , mkWizardSnapshot
+<span class="lineno">  101 </span>  , renderMenu
+<span class="lineno">  102 </span>  , stepWizard
+<span class="lineno">  103 </span>  )
+<span class="lineno">  104 </span>
+<span class="lineno">  105 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  106 </span>-- Injected dependencies
+<span class="lineno">  107 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  108 </span>
+<span class="lineno">  109 </span>-- | Everything 'handleInbound' needs, injected so the router is testable
+<span class="lineno">  110 </span>-- against fakes (no live provider / harness / 'PureClaw.Tabs.Exec'). The
+<span class="lineno">  111 </span>-- runtime-binding seams ('_td_ensure' \/ '_td_release' \/ '_td_sendTo') are the
+<span class="lineno">  112 </span>-- 'PureClaw.Tabs.Exec' operations partially applied to the live registry at
+<span class="lineno">  113 </span>-- 8c; here they are plain functions a test can record.
+<span class="lineno">  114 </span>data TabDispatchDeps = TabDispatchDeps
+<span class="lineno">  115 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_tabs</span></span></span>    :: !TabRegistry
+<span class="lineno">  116 </span>    -- ^ The global ordered tab registry (I1\/I2).
+<span class="lineno">  117 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_cursors</span></span></span> :: !(IORef CursorState)
+<span class="lineno">  118 </span>    -- ^ Per-conversation cursors + relay overrides (I3).
+<span class="lineno">  119 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_wizard</span></span></span>  :: !(IORef (Map ConversationKey WizardState))
+<span class="lineno">  120 </span>    -- ^ In-flight @\/tab@ wizard state, keyed by conversation (runtime-only).
+<span class="lineno">  121 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_ensure</span></span></span>  :: !(TabRef -&gt; IO ())
+<span class="lineno">  122 </span>    -- ^ Start (or ++refcount) the runtime backing a ref.
+<span class="lineno">  123 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_release</span></span></span> :: !(TabRef -&gt; IO ())
+<span class="lineno">  124 </span>    -- ^ --refcount; stop the runtime on last release.
+<span class="lineno">  125 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_sendTo</span></span></span>  :: !(TabRef -&gt; Text -&gt; IO (Either TabError ()))
+<span class="lineno">  126 </span>    -- ^ Route input text to a ref's runtime.
+<span class="lineno">  127 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_emit</span></span></span>    :: !(ConversationKey -&gt; Text -&gt; IO ())
+<span class="lineno">  128 </span>    -- ^ Reply / banner to a conversation's output sink.
+<span class="lineno">  129 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_newDefaultSession</span></span></span> :: !(IO (Either Text TabRef))
+<span class="lineno">  130 </span>    -- ^ Create a fresh default-provider session, returning its 'BoundSession'
+<span class="lineno">  131 </span>    --   ref. @'Left' msg@ when no default provider is configured.
+<span class="lineno">  132 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_recentHarnesses</span></span></span> :: !(IO [(HarnessId, Text)])
+<span class="lineno">  133 </span>    -- ^ Running harnesses (id + label) for the @\/tab@ wizard menu.
+<span class="lineno">  134 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_recentSessions</span></span></span>  :: !(IO [(SessionId, Text)])
+<span class="lineno">  135 </span>    -- ^ Recent sessions (id + label) for the @\/tab@ wizard menu.
+<span class="lineno">  136 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_liveHarness</span></span></span>     :: !(HarnessId -&gt; IO Bool)
+<span class="lineno">  137 </span>    -- ^ Liveness probe used by the wizard when a harness pick is resolved.
+<span class="lineno">  138 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_relayDefault</span></span></span>    :: !RelayMode
+<span class="lineno">  139 </span>    -- ^ Global default relay mode (shown by @\/tabs@ / @\/relay@).
+<span class="lineno">  140 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_routingConfig</span></span></span>   :: !RT.RoutingConfig
+<span class="lineno">  141 </span>    -- ^ Routing config for 'Parse.parseInput' (index bounds etc.).
+<span class="lineno">  142 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_fallthrough</span></span></span>     :: !(ConversationKey -&gt; Slash.SlashCommand -&gt; IO ())
+<span class="lineno">  143 </span>    -- ^ Handler for non-tab slash commands (e.g. @\/bg@).
+<span class="lineno">  144 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_onTabsChanged</span></span></span>   :: !(IO ())
+<span class="lineno">  145 </span>    -- ^ Callback fired once after each __mutating__ command (@\/nt@, @\/new@,
+<span class="lineno">  146 </span>    -- @\/close@, @\/rename@, wizard bind). NOT fired on read\/switch commands
+<span class="lineno">  147 </span>    -- (@\/tabs@, @\/relay@, @\/N@ switch, default text). Allows callers (e.g.
+<span class="lineno">  148 </span>    -- &quot;PureClaw.CLI.Commands&quot;) to rebroadcast\/persist the registry without
+<span class="lineno">  149 </span>    -- creating a dependency from @Routing\/Tabs@ onto @Frontend@.
+<span class="lineno">  150 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_spawnHarness</span></span></span>    :: !(HarnessSpec -&gt; IO (Either Text (TabRef, Text)))
+<span class="lineno">  151 </span>    -- ^ Spawn a fresh harness, persist + link its session, and return the new
+<span class="lineno">  152 </span>    -- tab's @('TabRef', label)@ (or a user-facing error). Used by the harness
+<span class="lineno">  153 </span>    -- arm of 'cmdTabNew' (@\/tab new harness@). Wired from
+<span class="lineno">  154 </span>    -- 'PureClaw.Agent.Env._env_startHarness' in &quot;PureClaw.Tabs.Wiring&quot;.
+<span class="lineno">  155 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_td_setSessionDescription</span></span></span> :: !(SessionId -&gt; Maybe Text -&gt; IO (Either Text ()))
+<span class="lineno">  156 </span>    -- ^ Set (or clear, with 'Nothing') a session's canonical description — the
+<span class="lineno">  157 </span>    -- cross-process name. Injected so @\/rename@ on a @BoundSession@ tab updates
+<span class="lineno">  158 </span>    -- the session entity (which syncs to every surface) rather than relabelling
+<span class="lineno">  159 </span>    -- a per-process tab field. Wired in &quot;PureClaw.CLI.Commands&quot; per 'ServerMode'
+<span class="lineno">  160 </span>    -- ('ServeFrontend' writes @session.json@ directly + rebroadcasts; the TUI
+<span class="lineno">  161 </span>    -- 'RequireGateway' path PUTs to the running gateway's description endpoint).
+<span class="lineno">  162 </span>  }
+<span class="lineno">  163 </span>
+<span class="lineno">  164 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  165 </span>-- Per-call context
+<span class="lineno">  166 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>-- | The deps + the conversation being served, bundled so every helper takes a
+<span class="lineno">  169 </span>-- single context argument. This keeps each effect call a saturated 2-arg
+<span class="lineno">  170 </span>-- application (e.g. @emit ctx msg@) — passing @deps@ and @convKey@ as two
+<span class="lineno">  171 </span>-- separate arguments at each site leaves an argument-position tick box that
+<span class="lineno">  172 </span>-- HPC reports as un-entered even when the call runs.
+<span class="lineno">  173 </span>data Ctx = Ctx
+<span class="lineno">  174 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ctx_deps</span></span></span> :: !TabDispatchDeps
+<span class="lineno">  175 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ctx_conv</span></span></span> :: !ConversationKey
+<span class="lineno">  176 </span>  }
+<span class="lineno">  177 </span>
+<span class="lineno">  178 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  179 </span>-- Entry point
+<span class="lineno">  180 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  181 </span>
+<span class="lineno">  182 </span>-- | Route one inbound message for a conversation. See the module haddock for
+<span class="lineno">  183 </span>-- the three-stage order (wizard → flat verbs → routing grammar).
+<span class="lineno">  184 </span>handleInbound :: TabDispatchDeps -&gt; ConversationKey -&gt; Text -&gt; IO ()
+<span class="lineno">  185 </span><span class="decl"><span class="istickedoff">handleInbound deps convKey raw = do</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">let ctx = Ctx deps convKey</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">wiz &lt;- readIORef (_td_wizard deps)</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">case Map.lookup convKey wiz of</span>
+<span class="lineno">  189 </span><span class="spaces">    </span><span class="istickedoff">Just st -&gt; handleWizardReply ctx st raw</span>
+<span class="lineno">  190 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; handleNonWizard ctx raw</span></span>
+<span class="lineno">  191 </span>
+<span class="lineno">  192 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  193 </span>-- Parsed-command entry point
+<span class="lineno">  194 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  195 </span>
+<span class="lineno">  196 </span>-- | Execute a parsed @\/tab@ command against the shared tab subsystem, with an
+<span class="lineno">  197 </span>-- explicit conversation key (the web path supplies a synthetic key; the
+<span class="lineno">  198 </span>-- TUI\/channel path supplies the real one). Reuses the same helpers the
+<span class="lineno">  199 </span>-- flat-verb handlers use, so every surface produces identical results.
+<span class="lineno">  200 </span>--
+<span class="lineno">  201 </span>-- This is /additive/: it does not change the flat-verb handlers
+<span class="lineno">  202 </span>-- ('cmdClose' \/ 'cmdRename' \/ …) and is not yet wired into the live loop —
+<span class="lineno">  203 </span>-- a later task connects it to @executeSlashCommand@.
+<span class="lineno">  204 </span>runTabCommand :: TabDispatchDeps -&gt; ConversationKey -&gt; TabSlashCommand -&gt; IO ()
+<span class="lineno">  205 </span><span class="decl"><span class="istickedoff">runTabCommand deps conv cmd =</span>
+<span class="lineno">  206 </span><span class="spaces">  </span><span class="istickedoff">let ctx = Ctx deps conv</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff">-- The parser guarantees a non-negative decimal index ('parseDecimalIndex'</span>
+<span class="lineno">  208 </span><span class="spaces">      </span><span class="istickedoff">-- rejects non-digits), and 'mkTabIndex' only checks the floor (n &gt;= 0), so</span>
+<span class="lineno">  209 </span><span class="spaces">      </span><span class="istickedoff">-- the 'Nothing' arm is genuinely unreachable here. (An over-cap index is</span>
+<span class="lineno">  210 </span><span class="spaces">      </span><span class="istickedoff">-- NOT rejected at parse time — it resolves to a graceful &quot;no tab&quot; message</span>
+<span class="lineno">  211 </span><span class="spaces">      </span><span class="istickedoff">-- at registry-lookup time inside the handlers.) The impossible 'Nothing'</span>
+<span class="lineno">  212 </span><span class="spaces">      </span><span class="istickedoff">-- is folded into 'error' per this module's convention.</span>
+<span class="lineno">  213 </span><span class="spaces">      </span><span class="istickedoff">idx n = Maybe.fromMaybe</span>
+<span class="lineno">  214 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">(impossible &quot;runTabCommand: non-negative parser index unexpectedly rejected&quot;)</span></span>
+<span class="lineno">  215 </span><span class="spaces">                </span><span class="istickedoff">(mkTabIndex n)</span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="istickedoff">in case cmd of</span>
+<span class="lineno">  217 </span><span class="spaces">       </span><span class="istickedoff">TabListCmd             -&gt; cmdTabs   ctx</span>
+<span class="lineno">  218 </span><span class="spaces">       </span><span class="istickedoff">TabRenameCmd n name    -&gt; doRename  ctx (idx n) name</span>
+<span class="lineno">  219 </span><span class="spaces">       </span><span class="istickedoff">TabCloseCmd _ ForceYes -&gt; emit ctx closeForceMsg   -- mirror /close's --force rejection</span>
+<span class="lineno">  220 </span><span class="spaces">       </span><span class="istickedoff">TabCloseCmd n ForceNo  -&gt; closeSlot ctx (idx n)</span>
+<span class="lineno">  221 </span><span class="spaces">       </span><span class="istickedoff">TabFocusCmd n          -&gt; doSwitch  ctx (idx n)</span>
+<span class="lineno">  222 </span><span class="spaces">       </span><span class="istickedoff">TabResumeCmd sid       -&gt; bindNewTab ctx (BoundSession sid) &quot;attached&quot;</span>
+<span class="lineno">  223 </span><span class="spaces">       </span><span class="istickedoff">TabNewCmd mKind mArg   -&gt; cmdTabNew ctx (kindWords mKind ++ argWords mArg)</span>
+<span class="lineno">  224 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="istickedoff">-- Reconstruct the @[Text]@ 'cmdTabNew' re-parses: the kind keyword (if any)</span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="istickedoff">-- followed by the remaining argument words.</span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff">kindWords = maybe [] (\k -&gt; [tabKindArgText k])</span>
+<span class="lineno">  228 </span><span class="spaces">    </span><span class="istickedoff">argWords  = maybe [] <span class="nottickedoff">T.words</span></span></span>
+<span class="lineno">  229 </span>
+<span class="lineno">  230 </span>-- | Build the '_env_runTabCommand' seam closure: route a parsed @\/tab@ command
+<span class="lineno">  231 </span>-- through 'runTabCommand' over the shared dispatch deps, sending the dispatcher
+<span class="lineno">  232 </span>-- reply to the caller-supplied channel (so the web capture channel receives it),
+<span class="lineno">  233 </span>-- and substituting the web placeholder conversation key when none is supplied.
+<span class="lineno">  234 </span>--
+<span class="lineno">  235 </span>-- This is the named, testable extraction of the inline lambda that
+<span class="lineno">  236 </span>-- &quot;PureClaw.CLI.Commands&quot; assigns to '_env_runTabCommand'. The behaviour is
+<span class="lineno">  237 </span>-- identical: the '_td_emit' field is overridden so the dispatcher's reply goes
+<span class="lineno">  238 </span>-- to @chan@ (the per-request capture channel) instead of the conversation's
+<span class="lineno">  239 </span>-- live sink, and a missing 'ConversationKey' falls back to @placeholderKey@.
+<span class="lineno">  240 </span>mkRunTabCommandSeam
+<span class="lineno">  241 </span>  :: TabDispatchDeps
+<span class="lineno">  242 </span>  -&gt; ConversationKey
+<span class="lineno">  243 </span>     -- ^ placeholder key used when the caller passes 'Nothing' (the web path)
+<span class="lineno">  244 </span>  -&gt; (ChannelHandle -&gt; Maybe ConversationKey -&gt; TabSlashCommand -&gt; IO ())
+<span class="lineno">  245 </span><span class="decl"><span class="istickedoff">mkRunTabCommandSeam deps placeholderKey chan mConv =</span>
+<span class="lineno">  246 </span><span class="spaces">  </span><span class="istickedoff">runTabCommand</span>
+<span class="lineno">  247 </span><span class="spaces">    </span><span class="istickedoff">(deps { _td_emit = \_ t -&gt; _ch_send chan (OutgoingMessage t) })</span>
+<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">(Maybe.fromMaybe placeholderKey mConv)</span></span>
+<span class="lineno">  249 </span>
+<span class="lineno">  250 </span>-- | Render a 'TabKindArg' back to the lowercase keyword 'cmdTabNew' recognises
+<span class="lineno">  251 </span>-- (the inverse of 'PureClaw.Agent.SlashCommands.parseTabKindArg').
+<span class="lineno">  252 </span>tabKindArgText :: TabKindArg -&gt; Text
+<span class="lineno">  253 </span><span class="decl"><span class="istickedoff">tabKindArgText TkaAi       = &quot;ai&quot;</span>
+<span class="lineno">  254 </span><span class="spaces"></span><span class="istickedoff">tabKindArgText TkaProvider = <span class="nottickedoff">&quot;provider&quot;</span></span>
+<span class="lineno">  255 </span><span class="spaces"></span><span class="istickedoff">tabKindArgText TkaHarness  = <span class="nottickedoff">&quot;harness&quot;</span></span>
+<span class="lineno">  256 </span><span class="spaces"></span><span class="istickedoff">tabKindArgText TkaShell    = <span class="nottickedoff">&quot;shell&quot;</span></span>
+<span class="lineno">  257 </span><span class="spaces"></span><span class="istickedoff">tabKindArgText TkaSsh      = <span class="nottickedoff">&quot;ssh&quot;</span></span>
+<span class="lineno">  258 </span><span class="spaces"></span><span class="istickedoff">tabKindArgText TkaTmux     = <span class="nottickedoff">&quot;tmux&quot;</span></span></span>
+<span class="lineno">  259 </span>
+<span class="lineno">  260 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  261 </span>-- Stage 1: wizard interception
+<span class="lineno">  262 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  263 </span>
+<span class="lineno">  264 </span>-- | Feed a reply to an in-flight wizard and act on the resulting 'WizardStep'.
+<span class="lineno">  265 </span>handleWizardReply :: Ctx -&gt; WizardState -&gt; Text -&gt; IO ()
+<span class="lineno">  266 </span><span class="decl"><span class="istickedoff">handleWizardReply ctx st raw = do</span>
+<span class="lineno">  267 </span><span class="spaces">  </span><span class="istickedoff">(mNext, step) &lt;- stepWizard (WizardEnv (_td_liveHarness (_ctx_deps ctx))) st raw</span>
+<span class="lineno">  268 </span><span class="spaces">  </span><span class="istickedoff">case step of</span>
+<span class="lineno">  269 </span><span class="spaces">    </span><span class="istickedoff">Done target -&gt; do</span>
+<span class="lineno">  270 </span><span class="spaces">      </span><span class="istickedoff">clearWizard ctx</span>
+<span class="lineno">  271 </span><span class="spaces">      </span><span class="istickedoff">bindWizardTarget ctx target</span>
+<span class="lineno">  272 </span><span class="spaces">    </span><span class="istickedoff">Cancelled -&gt; do</span>
+<span class="lineno">  273 </span><span class="spaces">      </span><span class="istickedoff">clearWizard ctx</span>
+<span class="lineno">  274 </span><span class="spaces">      </span><span class="istickedoff">emit ctx &quot;wizard cancelled&quot;</span>
+<span class="lineno">  275 </span><span class="spaces">    </span><span class="istickedoff">RunCommand cmd -&gt; do</span>
+<span class="lineno">  276 </span><span class="spaces">      </span><span class="istickedoff">clearWizard ctx</span>
+<span class="lineno">  277 </span><span class="spaces">      </span><span class="istickedoff">handleNonWizard ctx cmd</span>
+<span class="lineno">  278 </span><span class="spaces">    </span><span class="istickedoff">Reprompt msg -&gt; do</span>
+<span class="lineno">  279 </span><span class="spaces">      </span><span class="istickedoff">-- Invalid reply or vanished target: persist the (possibly refreshed)</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">-- state and re-show the notice. 'Prompt' is the open-time render and is</span>
+<span class="lineno">  281 </span><span class="spaces">      </span><span class="istickedoff">-- never produced by 'stepWizard'; it is folded in here so the match is</span>
+<span class="lineno">  282 </span><span class="spaces">      </span><span class="istickedoff">-- total — both carry a notice, both re-prompt.</span>
+<span class="lineno">  283 </span><span class="spaces">      </span><span class="istickedoff">setWizard ctx mNext</span>
+<span class="lineno">  284 </span><span class="spaces">      </span><span class="istickedoff">emit ctx msg</span>
+<span class="lineno">  285 </span><span class="spaces">    </span><span class="istickedoff">Prompt msg -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  286 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">setWizard ctx mNext</span></span>
+<span class="lineno">  287 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">emit ctx msg</span></span></span>
+<span class="lineno">  288 </span>
+<span class="lineno">  289 </span>-- | Bind a completed wizard pick to a new tab: append (or switch to an
+<span class="lineno">  290 </span>-- already-bound ref), ensure its runtime, focus the conversation, confirm.
+<span class="lineno">  291 </span>bindWizardTarget :: Ctx -&gt; WizardTarget -&gt; IO ()
+<span class="lineno">  292 </span><span class="decl"><span class="istickedoff">bindWizardTarget ctx target =</span>
+<span class="lineno">  293 </span><span class="spaces">  </span><span class="istickedoff">bindNewTab ctx ref &quot;attached&quot;</span>
+<span class="lineno">  294 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  295 </span><span class="spaces">    </span><span class="istickedoff">ref = case target of</span>
+<span class="lineno">  296 </span><span class="spaces">      </span><span class="istickedoff">AttachHarness h -&gt; BoundHarness h</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">ReopenSession s -&gt; BoundSession s</span></span>
+<span class="lineno">  298 </span>
+<span class="lineno">  299 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  300 </span>-- Stage 2 + 3: non-wizard dispatch
+<span class="lineno">  301 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  302 </span>
+<span class="lineno">  303 </span>-- | Recognise flat tab verbs on the trimmed text; otherwise fall to the
+<span class="lineno">  304 </span>-- routing grammar.
+<span class="lineno">  305 </span>handleNonWizard :: Ctx -&gt; Text -&gt; IO ()
+<span class="lineno">  306 </span><span class="decl"><span class="istickedoff">handleNonWizard ctx raw =</span>
+<span class="lineno">  307 </span><span class="spaces">  </span><span class="istickedoff">case T.words trimmed of</span>
+<span class="lineno">  308 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/new&quot;    : _)    -&gt; cmdNew    ctx</span>
+<span class="lineno">  309 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/nt&quot;     : _)    -&gt; cmdNt     ctx</span>
+<span class="lineno">  310 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/close&quot;  : args) -&gt; cmdClose  ctx args</span>
+<span class="lineno">  311 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/tabs&quot; : sub@(_:_)) -&gt; handleNonWizard ctx (T.unwords (&quot;/tab&quot; : sub))  -- /tabs &lt;sub&gt; == /tab &lt;sub&gt;</span>
+<span class="lineno">  312 </span><span class="spaces">    </span><span class="istickedoff">[&quot;/tabs&quot;]          -&gt; cmdTabs   ctx   -- bare /tabs lists</span>
+<span class="lineno">  313 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/rename&quot; : args) -&gt; cmdRename ctx args</span>
+<span class="lineno">  314 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/relay&quot;  : args) -&gt; cmdRelay  ctx args</span>
+<span class="lineno">  315 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/tab&quot; : &quot;new&quot; : rest)    -&gt; cmdTabNew ctx rest</span>
+<span class="lineno">  316 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/tab&quot; : &quot;close&quot; : rest)  -&gt; cmdClose  ctx rest</span>
+<span class="lineno">  317 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/tab&quot; : &quot;rename&quot; : rest) -&gt; cmdRename ctx rest</span>
+<span class="lineno">  318 </span><span class="spaces">    </span><span class="istickedoff">(&quot;/tab&quot;    : args) -&gt; cmdTab    ctx args</span>
+<span class="lineno">  319 </span><span class="spaces">    </span><span class="istickedoff">_                  -&gt; routeGrammar ctx raw</span>
+<span class="lineno">  320 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  321 </span><span class="spaces">    </span><span class="istickedoff">trimmed = T.strip raw</span></span>
+<span class="lineno">  322 </span>
+<span class="lineno">  323 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  324 </span>-- /new — reset the active tab
+<span class="lineno">  325 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  326 </span>
+<span class="lineno">  327 </span>-- | @\/new@: reset the conversation's __active__ tab to a fresh default
+<span class="lineno">  328 </span>-- session (same slot). With no active tab, behaves like @\/nt@.
+<span class="lineno">  329 </span>cmdNew :: Ctx -&gt; IO ()
+<span class="lineno">  330 </span><span class="decl"><span class="istickedoff">cmdNew ctx = do</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="istickedoff">cs &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  332 </span><span class="spaces">  </span><span class="istickedoff">tl &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">case resolveCursorSlot (_ctx_conv ctx) cs tl of</span>
+<span class="lineno">  334 </span><span class="spaces">    </span><span class="istickedoff">Nothing   -&gt; cmdNt ctx   -- no active tab → create one</span>
+<span class="lineno">  335 </span><span class="spaces">    </span><span class="istickedoff">Just slot -&gt; resetActiveTab ctx slot</span></span>
+<span class="lineno">  336 </span>
+<span class="lineno">  337 </span>-- | Reset the tab at @slot@: mint a fresh session, rebind the slot to it
+<span class="lineno">  338 </span>-- (releasing the old ref's runtime, ensuring the new), keep the slot, point
+<span class="lineno">  339 </span>-- the cursor at the new ref, confirm. The previous session persists on disk
+<span class="lineno">  340 </span>-- (I4) — only the tab's binding moves.
+<span class="lineno">  341 </span>resetActiveTab :: Ctx -&gt; TabIndex -&gt; IO ()
+<span class="lineno">  342 </span><span class="decl"><span class="istickedoff">resetActiveTab ctx slot = do</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="istickedoff">mNew &lt;- _td_newDefaultSession (_ctx_deps ctx)</span>
+<span class="lineno">  344 </span><span class="spaces">  </span><span class="istickedoff">case mNew of</span>
+<span class="lineno">  345 </span><span class="spaces">    </span><span class="istickedoff">Left msg     -&gt; emit ctx msg</span>
+<span class="lineno">  346 </span><span class="spaces">    </span><span class="istickedoff">Right newRef -&gt; do</span>
+<span class="lineno">  347 </span><span class="spaces">      </span><span class="istickedoff">-- The slot is present (the caller resolved it from a live cursor) and</span>
+<span class="lineno">  348 </span><span class="spaces">      </span><span class="istickedoff">-- @newRef@ is freshly minted, so it is never already bound: 'rebindSlot'</span>
+<span class="lineno">  349 </span><span class="spaces">      </span><span class="istickedoff">-- always succeeds and 'registryLookupSlot' is always 'Just' here. The</span>
+<span class="lineno">  350 </span><span class="spaces">      </span><span class="istickedoff">-- structurally-impossible branches are folded into 'error' (mirroring</span>
+<span class="lineno">  351 </span><span class="spaces">      </span><span class="istickedoff">-- &quot;PureClaw.Routing.Parse&quot;'s 'boundedTabIndex') so the HPC report has no</span>
+<span class="lineno">  352 </span><span class="spaces">      </span><span class="istickedoff">-- dead defensive arm to flag.</span>
+<span class="lineno">  353 </span><span class="spaces">      </span><span class="istickedoff">mOld &lt;- registryLookupSlot (_td_tabs (_ctx_deps ctx)) slot</span>
+<span class="lineno">  354 </span><span class="spaces">      </span><span class="istickedoff">tl   &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  355 </span><span class="spaces">      </span><span class="istickedoff">let oldRef = _tab_ref (Maybe.fromMaybe <span class="nottickedoff">(impossible &quot;resetActiveTab: slot vanished&quot;)</span> mOld)</span>
+<span class="lineno">  356 </span><span class="spaces">          </span><span class="istickedoff">tl'    = either <span class="nottickedoff">(impossible &quot;resetActiveTab: fresh ref already bound&quot;)</span></span>
+<span class="lineno">  357 </span><span class="spaces">                          </span><span class="istickedoff">id</span>
+<span class="lineno">  358 </span><span class="spaces">                          </span><span class="istickedoff">(rebindSlot slot newRef tl)</span>
+<span class="lineno">  359 </span><span class="spaces">      </span><span class="istickedoff">writeTabs ctx tl'</span>
+<span class="lineno">  360 </span><span class="spaces">      </span><span class="istickedoff">release ctx oldRef</span>
+<span class="lineno">  361 </span><span class="spaces">      </span><span class="istickedoff">ensure ctx newRef</span>
+<span class="lineno">  362 </span><span class="spaces">      </span><span class="istickedoff">setCursorTo ctx newRef</span>
+<span class="lineno">  363 </span><span class="spaces">      </span><span class="istickedoff">notifyChanged ctx</span>
+<span class="lineno">  364 </span><span class="spaces">      </span><span class="istickedoff">emit ctx (&quot;reset tab /&quot; &lt;&gt; slotChar slot)</span></span>
+<span class="lineno">  365 </span>
+<span class="lineno">  366 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  367 </span>-- /nt — new tab with a fresh default session
+<span class="lineno">  368 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  369 </span>
+<span class="lineno">  370 </span>-- | @\/nt@: create a fresh default session, append a tab at the next slot,
+<span class="lineno">  371 </span>-- ensure its runtime, switch the conversation's cursor to it.
+<span class="lineno">  372 </span>cmdNt :: Ctx -&gt; IO ()
+<span class="lineno">  373 </span><span class="decl"><span class="istickedoff">cmdNt ctx = do</span>
+<span class="lineno">  374 </span><span class="spaces">  </span><span class="istickedoff">mNew &lt;- _td_newDefaultSession (_ctx_deps ctx)</span>
+<span class="lineno">  375 </span><span class="spaces">  </span><span class="istickedoff">case mNew of</span>
+<span class="lineno">  376 </span><span class="spaces">    </span><span class="istickedoff">Left msg     -&gt; emit ctx msg</span>
+<span class="lineno">  377 </span><span class="spaces">    </span><span class="istickedoff">Right newRef -&gt; bindNewTab ctx newRef &quot;new tab&quot;</span></span>
+<span class="lineno">  378 </span>
+<span class="lineno">  379 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  380 </span>-- Shared: append-or-switch a new tab + confirm
+<span class="lineno">  381 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  382 </span>
+<span class="lineno">  383 </span>-- | Append a tab binding @ref@, ensure its runtime, focus the conversation on
+<span class="lineno">  384 </span>-- it, and emit @\&lt;verb\&gt; \/\&lt;slot\&gt;@. If @ref@ is already bound (I2), switch to
+<span class="lineno">  385 </span>-- the existing tab instead of duplicating. Slot exhaustion emits the §14 copy
+<span class="lineno">  386 </span>-- with no state change. Tabs carry no label of their own — the display title
+<span class="lineno">  387 </span>-- derives from the bound session (or a harness label) at render time.
+<span class="lineno">  388 </span>bindNewTab :: Ctx -&gt; TabRef -&gt; Text -&gt; IO ()
+<span class="lineno">  389 </span><span class="decl"><span class="istickedoff">bindNewTab ctx ref verb = do</span>
+<span class="lineno">  390 </span><span class="spaces">  </span><span class="istickedoff">res &lt;- registryAppend (_td_tabs (_ctx_deps ctx)) ref</span>
+<span class="lineno">  391 </span><span class="spaces">  </span><span class="istickedoff">case res of</span>
+<span class="lineno">  392 </span><span class="spaces">    </span><span class="istickedoff">Left SlotsFull          -&gt; emit ctx slotsFullMsg</span>
+<span class="lineno">  393 </span><span class="spaces">    </span><span class="istickedoff">Left (AlreadyBound cur) -&gt; do</span>
+<span class="lineno">  394 </span><span class="spaces">      </span><span class="istickedoff">-- Ref already bound (I2): switch to the existing tab, do not duplicate.</span>
+<span class="lineno">  395 </span><span class="spaces">      </span><span class="istickedoff">-- The error payload IS the current slot, so no re-lookup is needed.</span>
+<span class="lineno">  396 </span><span class="spaces">      </span><span class="istickedoff">setCursorTo ctx ref</span>
+<span class="lineno">  397 </span><span class="spaces">      </span><span class="istickedoff">emit ctx (&quot;switched to /&quot; &lt;&gt; slotChar cur)</span>
+<span class="lineno">  398 </span><span class="spaces">    </span><span class="istickedoff">Right slot              -&gt; do</span>
+<span class="lineno">  399 </span><span class="spaces">      </span><span class="istickedoff">ensure ctx ref</span>
+<span class="lineno">  400 </span><span class="spaces">      </span><span class="istickedoff">setCursorTo ctx ref</span>
+<span class="lineno">  401 </span><span class="spaces">      </span><span class="istickedoff">notifyChanged ctx</span>
+<span class="lineno">  402 </span><span class="spaces">      </span><span class="istickedoff">emit ctx (verb &lt;&gt; &quot; /&quot; &lt;&gt; slotChar slot)</span></span>
+<span class="lineno">  403 </span>
+<span class="lineno">  404 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  405 </span>-- /close [N]
+<span class="lineno">  406 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  407 </span>
+<span class="lineno">  408 </span>-- | @\/close [N]@: drop a tab view (never harms ground truth). @--force@ is
+<span class="lineno">  409 </span>-- rejected with the §14 copy; @N@ (or the active tab) is removed + compacted
+<span class="lineno">  410 </span>-- and its runtime released.
+<span class="lineno">  411 </span>cmdClose :: Ctx -&gt; [Text] -&gt; IO ()
+<span class="lineno">  412 </span><span class="decl"><span class="istickedoff">cmdClose ctx args = case args of</span>
+<span class="lineno">  413 </span><span class="spaces">  </span><span class="istickedoff">(&quot;--force&quot; : _) -&gt; emit ctx closeForceMsg</span>
+<span class="lineno">  414 </span><span class="spaces">  </span><span class="istickedoff">(a : _)         -&gt; case slotArg a of</span>
+<span class="lineno">  415 </span><span class="spaces">    </span><span class="istickedoff">Just slot -&gt; closeSlot ctx slot</span>
+<span class="lineno">  416 </span><span class="spaces">    </span><span class="istickedoff">Nothing   -&gt; emit ctx closeBadArgMsg</span>
+<span class="lineno">  417 </span><span class="spaces">  </span><span class="istickedoff">[]              -&gt; do</span>
+<span class="lineno">  418 </span><span class="spaces">    </span><span class="istickedoff">cs &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  419 </span><span class="spaces">    </span><span class="istickedoff">tl &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  420 </span><span class="spaces">    </span><span class="istickedoff">case resolveCursorSlot (_ctx_conv ctx) cs tl of</span>
+<span class="lineno">  421 </span><span class="spaces">      </span><span class="istickedoff">Just slot -&gt; closeSlot ctx slot</span>
+<span class="lineno">  422 </span><span class="spaces">      </span><span class="istickedoff">Nothing   -&gt; emit ctx closeNoTargetMsg</span></span>
+<span class="lineno">  423 </span>
+<span class="lineno">  424 </span>-- | Remove the tab at @slot@ (compacting), release its runtime, and clear the
+<span class="lineno">  425 </span>-- cursors that pointed at it (compaction renumbers others automatically).
+<span class="lineno">  426 </span>closeSlot :: Ctx -&gt; TabIndex -&gt; IO ()
+<span class="lineno">  427 </span><span class="decl"><span class="istickedoff">closeSlot ctx slot = do</span>
+<span class="lineno">  428 </span><span class="spaces">  </span><span class="istickedoff">mTab &lt;- registryLookupSlot (_td_tabs (_ctx_deps ctx)) slot</span>
+<span class="lineno">  429 </span><span class="spaces">  </span><span class="istickedoff">case mTab of</span>
+<span class="lineno">  430 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt; emit ctx closeNoTargetMsg</span>
+<span class="lineno">  431 </span><span class="spaces">    </span><span class="istickedoff">Just tab -&gt; do</span>
+<span class="lineno">  432 </span><span class="spaces">      </span><span class="istickedoff">let ref = _tab_ref tab</span>
+<span class="lineno">  433 </span><span class="spaces">      </span><span class="istickedoff">cs &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  434 </span><span class="spaces">      </span><span class="istickedoff">registryRemove (_td_tabs (_ctx_deps ctx)) slot</span>
+<span class="lineno">  435 </span><span class="spaces">      </span><span class="istickedoff">release ctx ref</span>
+<span class="lineno">  436 </span><span class="spaces">      </span><span class="istickedoff">-- Drop every cursor focused on the removed ref (this conversation + any</span>
+<span class="lineno">  437 </span><span class="spaces">      </span><span class="istickedoff">-- others sharing the tab); valid cursors survive via TabRef identity.</span>
+<span class="lineno">  438 </span><span class="spaces">      </span><span class="istickedoff">mapM_ (modifyCursor ctx . clearCursor) (conversationsOn ref cs)</span>
+<span class="lineno">  439 </span><span class="spaces">      </span><span class="istickedoff">notifyChanged ctx</span>
+<span class="lineno">  440 </span><span class="spaces">      </span><span class="istickedoff">emit ctx (&quot;closed /&quot; &lt;&gt; slotChar slot)</span></span>
+<span class="lineno">  441 </span>
+<span class="lineno">  442 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  443 </span>-- /tabs
+<span class="lineno">  444 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  445 </span>
+<span class="lineno">  446 </span>-- | @\/tabs@: list every tab (@\/\&lt;slot\&gt;  \&lt;name\&gt;  \&lt;kind\&gt;  \&lt;status\&gt;@,
+<span class="lineno">  447 </span>-- dead tombstones included) plus a final line naming this conversation's
+<span class="lineno">  448 </span>-- relay mode.
+<span class="lineno">  449 </span>cmdTabs :: Ctx -&gt; IO ()
+<span class="lineno">  450 </span><span class="decl"><span class="istickedoff">cmdTabs ctx = do</span>
+<span class="lineno">  451 </span><span class="spaces">  </span><span class="istickedoff">tl     &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  452 </span><span class="spaces">  </span><span class="istickedoff">cs     &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  453 </span><span class="spaces">  </span><span class="istickedoff">titles &lt;- _td_recentSessions (_ctx_deps ctx)</span>
+<span class="lineno">  454 </span><span class="spaces">  </span><span class="istickedoff">let focused    = resolveCursorSlot (_ctx_conv ctx) cs tl</span>
+<span class="lineno">  455 </span><span class="spaces">      </span><span class="istickedoff">titleOf sid = lookup sid titles</span>
+<span class="lineno">  456 </span><span class="spaces">      </span><span class="istickedoff">rows       = map (tabRow focused titleOf) (toList tl)</span>
+<span class="lineno">  457 </span><span class="spaces">      </span><span class="istickedoff">relay      = relayLine (relayModeFor ctx cs)</span>
+<span class="lineno">  458 </span><span class="spaces">  </span><span class="istickedoff">emit ctx (T.intercalate &quot;\n&quot; (rows ++ [relay]))</span></span>
+<span class="lineno">  459 </span>
+<span class="lineno">  460 </span>-- | Render one @\/tabs@ row. The row for @focused@ (this conversation's cursor
+<span class="lineno">  461 </span>-- slot, if any) carries a trailing @(focused)@ marker so the user can see at a
+<span class="lineno">  462 </span>-- glance where plain text will go.
+<span class="lineno">  463 </span>--
+<span class="lineno">  464 </span>-- Tabs no longer carry a label of their own — a row's display title derives
+<span class="lineno">  465 </span>-- from the bound session (resolved via @titleOf@) for a 'BoundSession', or
+<span class="lineno">  466 </span>-- falls back to the slot for a 'BoundHarness' (or a session with no recorded
+<span class="lineno">  467 </span>-- title). The fallback keeps every row non-blank.
+<span class="lineno">  468 </span>tabRow :: Maybe TabIndex -&gt; (SessionId -&gt; Maybe Text) -&gt; Tab -&gt; Text
+<span class="lineno">  469 </span><span class="decl"><span class="istickedoff">tabRow focused titleOf t =</span>
+<span class="lineno">  470 </span><span class="spaces">  </span><span class="istickedoff">&quot;/&quot; &lt;&gt; slotChar (_tab_slot t)</span>
+<span class="lineno">  471 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; &quot;  &quot; &lt;&gt; title</span>
+<span class="lineno">  472 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; &quot;  &quot; &lt;&gt; kindLabel (_tab_ref t)</span>
+<span class="lineno">  473 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; &quot;  &quot; &lt;&gt; statusLabel (_tab_status t)</span>
+<span class="lineno">  474 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; (if focused == Just (_tab_slot t) then &quot;  (focused)&quot; else &quot;&quot;)</span>
+<span class="lineno">  475 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  476 </span><span class="spaces">    </span><span class="istickedoff">slot  = &quot;/&quot; &lt;&gt; slotChar (_tab_slot t)</span>
+<span class="lineno">  477 </span><span class="spaces">    </span><span class="istickedoff">title = case _tab_ref t of</span>
+<span class="lineno">  478 </span><span class="spaces">      </span><span class="istickedoff">BoundSession sid -&gt; Maybe.fromMaybe slot (titleOf sid)</span>
+<span class="lineno">  479 </span><span class="spaces">      </span><span class="istickedoff">BoundHarness _   -&gt; slot</span></span>
+<span class="lineno">  480 </span>
+<span class="lineno">  481 </span>-- | The trailing relay-mode line shown by @\/tabs@. Phrased as a full sentence
+<span class="lineno">  482 </span>-- so a first-time user understands which tabs' output reaches them without
+<span class="lineno">  483 </span>-- having to learn the @relay@ jargon.
+<span class="lineno">  484 </span>relayLine :: RelayMode -&gt; Text
+<span class="lineno">  485 </span><span class="decl"><span class="istickedoff">relayLine FocusedOnly    = &quot;Relay mode: focused — you only see output from this tab.&quot;</span>
+<span class="lineno">  486 </span><span class="spaces"></span><span class="istickedoff">relayLine ActivityDigest = <span class="nottickedoff">&quot;Relay mode: activity — this tab in full, plus activity pings from others.&quot;</span></span>
+<span class="lineno">  487 </span><span class="spaces"></span><span class="istickedoff">relayLine Firehose       = &quot;Relay mode: all — full output from every tab.&quot;</span></span>
+<span class="lineno">  488 </span>
+<span class="lineno">  489 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  490 </span>-- /rename [N] &lt;name&gt;
+<span class="lineno">  491 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  492 </span>
+<span class="lineno">  493 </span>-- | @\/rename [N] \&lt;name\&gt;@: relabel the tab at @N@ (or the active tab) using
+<span class="lineno">  494 </span>-- 'Parse.sanitizeTabName'.
+<span class="lineno">  495 </span>cmdRename :: Ctx -&gt; [Text] -&gt; IO ()
+<span class="lineno">  496 </span><span class="decl"><span class="istickedoff">cmdRename ctx args = case args of</span>
+<span class="lineno">  497 </span><span class="spaces">  </span><span class="istickedoff">(a : rest@(_ : _))</span>
+<span class="lineno">  498 </span><span class="spaces">    </span><span class="istickedoff">| Just slot &lt;- slotArg a -&gt; doRename ctx slot (T.unwords rest)</span>
+<span class="lineno">  499 </span><span class="spaces">  </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  500 </span><span class="spaces">    </span><span class="istickedoff">-- No leading slot arg: rename the active tab to the whole argument blob.</span>
+<span class="lineno">  501 </span><span class="spaces">    </span><span class="istickedoff">cs &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  502 </span><span class="spaces">    </span><span class="istickedoff">tl &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  503 </span><span class="spaces">    </span><span class="istickedoff">case resolveCursorSlot (_ctx_conv ctx) cs tl of</span>
+<span class="lineno">  504 </span><span class="spaces">      </span><span class="istickedoff">Just slot -&gt; doRename ctx slot (T.unwords args)</span>
+<span class="lineno">  505 </span><span class="spaces">      </span><span class="istickedoff">Nothing   -&gt; emit ctx renameNoTargetMsg</span></span>
+<span class="lineno">  506 </span>
+<span class="lineno">  507 </span>-- | Sanitize @name@ and set the bound entity's canonical name.
+<span class="lineno">  508 </span>--
+<span class="lineno">  509 </span>-- For a @BoundSession@ slot this sets the /session's/ description through the
+<span class="lineno">  510 </span>-- injected '_td_setSessionDescription' seam (the canonical, cross-process name)
+<span class="lineno">  511 </span>-- rather than relabelling the per-process tab field — so a rename syncs to every
+<span class="lineno">  512 </span>-- surface. For a @BoundHarness@ slot, rename is out of scope (the harness has no
+<span class="lineno">  513 </span>-- equivalent canonical name here): emit a clear note and do nothing.
+<span class="lineno">  514 </span>doRename :: Ctx -&gt; TabIndex -&gt; Text -&gt; IO ()
+<span class="lineno">  515 </span><span class="decl"><span class="istickedoff">doRename ctx slot name = do</span>
+<span class="lineno">  516 </span><span class="spaces">  </span><span class="istickedoff">mTab &lt;- registryLookupSlot (_td_tabs (_ctx_deps ctx)) slot</span>
+<span class="lineno">  517 </span><span class="spaces">  </span><span class="istickedoff">case mTab of</span>
+<span class="lineno">  518 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt; emit ctx renameNoTargetMsg</span>
+<span class="lineno">  519 </span><span class="spaces">    </span><span class="istickedoff">Just tab -&gt; case _tab_ref tab of</span>
+<span class="lineno">  520 </span><span class="spaces">      </span><span class="istickedoff">BoundHarness _   -&gt; emit ctx renameHarnessMsg</span>
+<span class="lineno">  521 </span><span class="spaces">      </span><span class="istickedoff">BoundSession sid -&gt; case Parse.sanitizeTabName name of</span>
+<span class="lineno">  522 </span><span class="spaces">        </span><span class="istickedoff">Left e      -&gt; emit ctx (renameBadNameMsg e)</span>
+<span class="lineno">  523 </span><span class="spaces">        </span><span class="istickedoff">Right clean -&gt; do</span>
+<span class="lineno">  524 </span><span class="spaces">          </span><span class="istickedoff">res &lt;- _td_setSessionDescription (_ctx_deps ctx) sid (Just clean)</span>
+<span class="lineno">  525 </span><span class="spaces">          </span><span class="istickedoff">case res of</span>
+<span class="lineno">  526 </span><span class="spaces">            </span><span class="istickedoff">Right () -&gt; emit ctx (&quot;renamed /&quot; &lt;&gt; slotChar slot &lt;&gt; &quot; &quot; &lt;&gt; clean)</span>
+<span class="lineno">  527 </span><span class="spaces">            </span><span class="istickedoff">Left err -&gt; emit ctx err</span></span>
+<span class="lineno">  528 </span>
+<span class="lineno">  529 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  530 </span>-- /relay &lt;mode&gt;
+<span class="lineno">  531 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  532 </span>
+<span class="lineno">  533 </span>-- | @\/relay \&lt;mode\&gt;@: set this conversation's relay mode
+<span class="lineno">  534 </span>-- (@focused@\/@activity@\/@all@). No arg shows the current mode (§14 copy).
+<span class="lineno">  535 </span>cmdRelay :: Ctx -&gt; [Text] -&gt; IO ()
+<span class="lineno">  536 </span><span class="decl"><span class="istickedoff">cmdRelay ctx args = case args of</span>
+<span class="lineno">  537 </span><span class="spaces">  </span><span class="istickedoff">[]      -&gt; do</span>
+<span class="lineno">  538 </span><span class="spaces">    </span><span class="istickedoff">cs &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  539 </span><span class="spaces">    </span><span class="istickedoff">emit ctx (relayCurrentMsg (relayModeFor ctx cs))</span>
+<span class="lineno">  540 </span><span class="spaces">  </span><span class="istickedoff">(a : _) -&gt; case parseRelayMode a of</span>
+<span class="lineno">  541 </span><span class="spaces">    </span><span class="istickedoff">Just m  -&gt; do</span>
+<span class="lineno">  542 </span><span class="spaces">      </span><span class="istickedoff">modifyCursor ctx (setRelay (_ctx_conv ctx) m)</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">emit ctx (&quot;relay mode: &quot; &lt;&gt; relayWord m)</span>
+<span class="lineno">  544 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; emit ctx relayBadModeMsg</span></span>
+<span class="lineno">  545 </span>
+<span class="lineno">  546 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  547 </span>-- /tab — open the attach wizard
+<span class="lineno">  548 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  549 </span>
+<span class="lineno">  550 </span>-- | @\/tab [query]@: snapshot the running harnesses + recent sessions
+<span class="lineno">  551 </span>-- (filtered by @query@), store a 'WizardState' for the conversation, and emit
+<span class="lineno">  552 </span>-- the rendered menu.
+<span class="lineno">  553 </span>cmdTab :: Ctx -&gt; [Text] -&gt; IO ()
+<span class="lineno">  554 </span><span class="decl"><span class="istickedoff">cmdTab ctx args = do</span>
+<span class="lineno">  555 </span><span class="spaces">  </span><span class="istickedoff">harnesses &lt;- _td_recentHarnesses (_ctx_deps ctx)</span>
+<span class="lineno">  556 </span><span class="spaces">  </span><span class="istickedoff">sessions  &lt;- _td_recentSessions (_ctx_deps ctx)</span>
+<span class="lineno">  557 </span><span class="spaces">  </span><span class="istickedoff">let query = T.unwords args</span>
+<span class="lineno">  558 </span><span class="spaces">      </span><span class="istickedoff">hs    = filterCandidates query harnesses</span>
+<span class="lineno">  559 </span><span class="spaces">      </span><span class="istickedoff">ss    = filterCandidates query sessions</span>
+<span class="lineno">  560 </span><span class="spaces">      </span><span class="istickedoff">st    = mkWizardSnapshot hs ss</span>
+<span class="lineno">  561 </span><span class="spaces">  </span><span class="istickedoff">setWizard ctx (Just st)</span>
+<span class="lineno">  562 </span><span class="spaces">  </span><span class="istickedoff">emit ctx (renderMenu st)</span></span>
+<span class="lineno">  563 </span>
+<span class="lineno">  564 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  565 </span>-- /tab new &lt;kind&gt; — create a tab of the named kind
+<span class="lineno">  566 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  567 </span>
+<span class="lineno">  568 </span>-- | @\/tab new [\&lt;kind\&gt;]@: create a new tab of the requested kind. This is
+<span class="lineno">  569 </span>-- distinct from bare @\/tab@ (the attach wizard) and is dispatched /before/ it,
+<span class="lineno">  570 </span>-- so @\/tab new@ never opens the wizard.
+<span class="lineno">  571 </span>--
+<span class="lineno">  572 </span>-- The default-provider session kinds (@ai@\/@provider@\/bare) mint a fresh
+<span class="lineno">  573 </span>-- session; @harness@ (optionally with an explicit flavour, e.g.
+<span class="lineno">  574 </span>-- @\/tab new harness claude-code@) spawns a real harness via '_td_spawnHarness'
+<span class="lineno">  575 </span>-- (WU-B). The remaining shell-family kinds emit a &quot;not yet supported&quot;
+<span class="lineno">  576 </span>-- placeholder; an unrecognised keyword emits a short usage hint.
+<span class="lineno">  577 </span>cmdTabNew :: Ctx -&gt; [Text] -&gt; IO ()
+<span class="lineno">  578 </span><span class="decl"><span class="istickedoff">cmdTabNew ctx rest = case kindKeyword of</span>
+<span class="lineno">  579 </span><span class="spaces">  </span><span class="istickedoff">-- bare / &quot;ai&quot; / &quot;provider&quot;: mint a default-provider session (mirrors 'cmdNt').</span>
+<span class="lineno">  580 </span><span class="spaces">  </span><span class="istickedoff">Nothing         -&gt; mintDefault</span>
+<span class="lineno">  581 </span><span class="spaces">  </span><span class="istickedoff">Just &quot;ai&quot;       -&gt; mintDefault</span>
+<span class="lineno">  582 </span><span class="spaces">  </span><span class="istickedoff">Just &quot;provider&quot; -&gt; mintDefault</span>
+<span class="lineno">  583 </span><span class="spaces">  </span><span class="istickedoff">Just &quot;harness&quot;  -&gt; spawnHarness ctx flavourArgs</span>
+<span class="lineno">  584 </span><span class="spaces">  </span><span class="istickedoff">Just &quot;shell&quot;    -&gt; emit ctx (tabNewUnsupportedMsg &quot;shell&quot;)</span>
+<span class="lineno">  585 </span><span class="spaces">  </span><span class="istickedoff">Just &quot;ssh&quot;      -&gt; emit ctx (tabNewUnsupportedMsg &quot;ssh&quot;)</span>
+<span class="lineno">  586 </span><span class="spaces">  </span><span class="istickedoff">Just &quot;tmux&quot;     -&gt; emit ctx (tabNewUnsupportedMsg &quot;tmux&quot;)</span>
+<span class="lineno">  587 </span><span class="spaces">  </span><span class="istickedoff">Just _          -&gt; emit ctx tabNewUsageMsg</span>
+<span class="lineno">  588 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  589 </span><span class="spaces">    </span><span class="istickedoff">kindKeyword = case rest of</span>
+<span class="lineno">  590 </span><span class="spaces">      </span><span class="istickedoff">(k : _) -&gt; Just (T.toLower k)</span>
+<span class="lineno">  591 </span><span class="spaces">      </span><span class="istickedoff">[]      -&gt; Nothing</span>
+<span class="lineno">  592 </span><span class="spaces">    </span><span class="istickedoff">-- Args following the @harness@ keyword (the optional flavour word).</span>
+<span class="lineno">  593 </span><span class="spaces">    </span><span class="istickedoff">flavourArgs = drop 1 rest</span>
+<span class="lineno">  594 </span><span class="spaces">    </span><span class="istickedoff">mintDefault = do</span>
+<span class="lineno">  595 </span><span class="spaces">      </span><span class="istickedoff">mNew &lt;- _td_newDefaultSession (_ctx_deps ctx)</span>
+<span class="lineno">  596 </span><span class="spaces">      </span><span class="istickedoff">case mNew of</span>
+<span class="lineno">  597 </span><span class="spaces">        </span><span class="istickedoff">Left msg     -&gt; emit ctx msg</span>
+<span class="lineno">  598 </span><span class="spaces">        </span><span class="istickedoff">Right newRef -&gt; bindNewTab ctx newRef &quot;new tab&quot;</span></span>
+<span class="lineno">  599 </span>
+<span class="lineno">  600 </span>-- | @\/tab new harness [\&lt;flavour\&gt;]@: build a default 'HarnessSpec' (flavour
+<span class="lineno">  601 </span>-- from the optional argument, defaulting to @claude-code@; empty tmux coords —
+<span class="lineno">  602 </span>-- the spawn layer assigns the real session\/window; no cwd\/args\/ids) and spawn
+<span class="lineno">  603 </span>-- it through '_td_spawnHarness'. On success bind the returned 'TabRef' into a
+<span class="lineno">  604 </span>-- new tab; on failure emit the error.
+<span class="lineno">  605 </span>spawnHarness :: Ctx -&gt; [Text] -&gt; IO ()
+<span class="lineno">  606 </span><span class="decl"><span class="istickedoff">spawnHarness ctx flavourArgs = do</span>
+<span class="lineno">  607 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- _td_spawnHarness (_ctx_deps ctx) spec</span>
+<span class="lineno">  608 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  609 </span><span class="spaces">    </span><span class="istickedoff">Left msg        -&gt; emit ctx msg</span>
+<span class="lineno">  610 </span><span class="spaces">    </span><span class="istickedoff">Right (ref, _label) -&gt; bindNewTab ctx ref &quot;new harness&quot;</span>
+<span class="lineno">  611 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  612 </span><span class="spaces">    </span><span class="istickedoff">flavour = case flavourArgs of</span>
+<span class="lineno">  613 </span><span class="spaces">      </span><span class="istickedoff">(f : _) -&gt; fixedFlavourLookup (T.toLower f)</span>
+<span class="lineno">  614 </span><span class="spaces">      </span><span class="istickedoff">[]      -&gt; HClaudeCode</span>
+<span class="lineno">  615 </span><span class="spaces">    </span><span class="istickedoff">spec = HarnessSpec</span>
+<span class="lineno">  616 </span><span class="spaces">      </span><span class="istickedoff">{ _h_flavour           = flavour</span>
+<span class="lineno">  617 </span><span class="spaces">      </span><span class="istickedoff">, _h_tmux              = TmuxConfig &quot;&quot; &quot;&quot; Nothing</span>
+<span class="lineno">  618 </span><span class="spaces">      </span><span class="istickedoff">, _h_cwd               = Nothing</span>
+<span class="lineno">  619 </span><span class="spaces">      </span><span class="istickedoff">, _h_args              = []</span>
+<span class="lineno">  620 </span><span class="spaces">      </span><span class="istickedoff">, _h_harnessId         = Nothing</span>
+<span class="lineno">  621 </span><span class="spaces">      </span><span class="istickedoff">, _h_claudeSessionUuid = Nothing</span>
+<span class="lineno">  622 </span><span class="spaces">      </span><span class="istickedoff">, _h_canonicalCwd      = Nothing</span>
+<span class="lineno">  623 </span><span class="spaces">      </span><span class="istickedoff">}</span></span>
+<span class="lineno">  624 </span>
+<span class="lineno">  625 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  626 </span>-- Stage 3: routing grammar
+<span class="lineno">  627 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  628 </span>
+<span class="lineno">  629 </span>-- | Route via 'Parse.parseInput': switch, inject, default text, or non-tab
+<span class="lineno">  630 </span>-- slash command.
+<span class="lineno">  631 </span>routeGrammar :: Ctx -&gt; Text -&gt; IO ()
+<span class="lineno">  632 </span><span class="decl"><span class="istickedoff">routeGrammar ctx raw =</span>
+<span class="lineno">  633 </span><span class="spaces">  </span><span class="istickedoff">case Parse.parseInput (_td_routingConfig (_ctx_deps ctx)) raw of</span>
+<span class="lineno">  634 </span><span class="spaces">    </span><span class="istickedoff">Left _    -&gt; emit ctx parseErrorMsg</span>
+<span class="lineno">  635 </span><span class="spaces">    </span><span class="istickedoff">Right pin -&gt; case pin of</span>
+<span class="lineno">  636 </span><span class="spaces">      </span><span class="istickedoff">RT.Switch idx         -&gt; doSwitch ctx idx</span>
+<span class="lineno">  637 </span><span class="spaces">      </span><span class="istickedoff">RT.Inject idx text    -&gt; doInject ctx idx text</span>
+<span class="lineno">  638 </span><span class="spaces">      </span><span class="istickedoff">RT.Default text       -&gt; doDefault ctx text</span>
+<span class="lineno">  639 </span><span class="spaces">      </span><span class="istickedoff">RT.ParsedSlashCmd cmd -&gt; _td_fallthrough (_ctx_deps ctx) (_ctx_conv ctx) cmd</span></span>
+<span class="lineno">  640 </span>
+<span class="lineno">  641 </span>-- | @\/N@: focus the tab at slot @N@ (out-of-range → §14 copy).
+<span class="lineno">  642 </span>doSwitch :: Ctx -&gt; TabIndex -&gt; IO ()
+<span class="lineno">  643 </span><span class="decl"><span class="istickedoff">doSwitch ctx idx = withSlot ctx idx $ \tab -&gt; do</span>
+<span class="lineno">  644 </span><span class="spaces">  </span><span class="istickedoff">setCursorTo ctx (_tab_ref tab)</span>
+<span class="lineno">  645 </span><span class="spaces">  </span><span class="istickedoff">emit ctx (&quot;switched to /&quot; &lt;&gt; slotChar idx)</span></span>
+<span class="lineno">  646 </span>
+<span class="lineno">  647 </span>-- | @\/N \&lt;text\&gt;@: focus slot @N@ and route text to it (out-of-range → copy).
+<span class="lineno">  648 </span>doInject :: Ctx -&gt; TabIndex -&gt; Text -&gt; IO ()
+<span class="lineno">  649 </span><span class="decl"><span class="istickedoff">doInject ctx idx text = withSlot ctx idx $ \tab -&gt; do</span>
+<span class="lineno">  650 </span><span class="spaces">  </span><span class="istickedoff">let ref = _tab_ref tab</span>
+<span class="lineno">  651 </span><span class="spaces">  </span><span class="istickedoff">setCursorTo ctx ref</span>
+<span class="lineno">  652 </span><span class="spaces">  </span><span class="istickedoff">deliver ctx ref text</span></span>
+<span class="lineno">  653 </span>
+<span class="lineno">  654 </span>-- | Route @text@ to @ref@'s runtime, surfacing a delivery failure as the §14
+<span class="lineno">  655 </span>-- copy. Shared by 'doInject', 'doDefault', and the auto-start path so the
+<span class="lineno">  656 </span>-- send-then-handle-error shape lives in exactly one place.
+<span class="lineno">  657 </span>deliver :: Ctx -&gt; TabRef -&gt; Text -&gt; IO ()
+<span class="lineno">  658 </span><span class="decl"><span class="istickedoff">deliver ctx ref text = do</span>
+<span class="lineno">  659 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- sendTo ctx ref text</span>
+<span class="lineno">  660 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  661 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  662 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; emit ctx (&quot;couldn't deliver your message — &quot; &lt;&gt; unPublicTabError (toPublicTabError err))</span></span>
+<span class="lineno">  663 </span>
+<span class="lineno">  664 </span>-- | Resolve @idx@ to a present tab or emit the out-of-range §14 copy.
+<span class="lineno">  665 </span>withSlot :: Ctx -&gt; TabIndex -&gt; (Tab -&gt; IO ()) -&gt; IO ()
+<span class="lineno">  666 </span><span class="decl"><span class="istickedoff">withSlot ctx idx k = do</span>
+<span class="lineno">  667 </span><span class="spaces">  </span><span class="istickedoff">tl   &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  668 </span><span class="spaces">  </span><span class="istickedoff">mTab &lt;- registryLookupSlot (_td_tabs (_ctx_deps ctx)) idx</span>
+<span class="lineno">  669 </span><span class="spaces">  </span><span class="istickedoff">case mTab of</span>
+<span class="lineno">  670 </span><span class="spaces">    </span><span class="istickedoff">Just tab -&gt; k tab</span>
+<span class="lineno">  671 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt; emit ctx (outOfRangeMsg idx (length (toList tl)))</span></span>
+<span class="lineno">  672 </span>
+<span class="lineno">  673 </span>-- | Plain text: route to the conversation's active tab. No active tab →
+<span class="lineno">  674 </span>-- auto-start a fresh default session and route the text to it (the implicit
+<span class="lineno">  675 </span>-- &quot;just works&quot; session — matches a fresh conversation's pre-Tabs behaviour); a
+<span class="lineno">  676 </span>-- 'Dead' tombstone → deferred death warning + clear + drop (§8).
+<span class="lineno">  677 </span>doDefault :: Ctx -&gt; Text -&gt; IO ()
+<span class="lineno">  678 </span><span class="decl"><span class="istickedoff">doDefault ctx text = do</span>
+<span class="lineno">  679 </span><span class="spaces">  </span><span class="istickedoff">cs &lt;- readIORef (_td_cursors (_ctx_deps ctx))</span>
+<span class="lineno">  680 </span><span class="spaces">  </span><span class="istickedoff">tl &lt;- readTabs (_td_tabs (_ctx_deps ctx))</span>
+<span class="lineno">  681 </span><span class="spaces">  </span><span class="istickedoff">case resolveCursorSlot (_ctx_conv ctx) cs tl of</span>
+<span class="lineno">  682 </span><span class="spaces">    </span><span class="istickedoff">Nothing   -&gt; autoStartDefault ctx text</span>
+<span class="lineno">  683 </span><span class="spaces">    </span><span class="istickedoff">Just slot -&gt; do</span>
+<span class="lineno">  684 </span><span class="spaces">      </span><span class="istickedoff">-- 'resolveCursorSlot' returns the slot by resolving the cursor's ref</span>
+<span class="lineno">  685 </span><span class="spaces">      </span><span class="istickedoff">-- against the list, so the tab is guaranteed present here; the impossible</span>
+<span class="lineno">  686 </span><span class="spaces">      </span><span class="istickedoff">-- absence is folded into 'error' (no dead defensive arm for HPC).</span>
+<span class="lineno">  687 </span><span class="spaces">      </span><span class="istickedoff">tab &lt;- Maybe.fromMaybe <span class="nottickedoff">(impossible &quot;doDefault: resolved slot vanished&quot;)</span></span>
+<span class="lineno">  688 </span><span class="spaces">               </span><span class="istickedoff">&lt;$&gt; registryLookupSlot (_td_tabs (_ctx_deps ctx)) slot</span>
+<span class="lineno">  689 </span><span class="spaces">      </span><span class="istickedoff">if _tab_status tab == Dead</span>
+<span class="lineno">  690 </span><span class="spaces">        </span><span class="istickedoff">then do</span>
+<span class="lineno">  691 </span><span class="spaces">          </span><span class="istickedoff">-- §8 deferred death warning: warn, clear the cursor, DROP the text</span>
+<span class="lineno">  692 </span><span class="spaces">          </span><span class="istickedoff">-- (never route it into the dead harness). Tabs carry no label of</span>
+<span class="lineno">  693 </span><span class="spaces">          </span><span class="istickedoff">-- their own anymore, so the warning names the tab by its slot.</span>
+<span class="lineno">  694 </span><span class="spaces">          </span><span class="istickedoff">emit ctx (deferredDeathMsg (&quot;/&quot; &lt;&gt; slotChar (_tab_slot tab)))</span>
+<span class="lineno">  695 </span><span class="spaces">          </span><span class="istickedoff">modifyCursor ctx (clearCursor (_ctx_conv ctx))</span>
+<span class="lineno">  696 </span><span class="spaces">        </span><span class="istickedoff">else deliver ctx (_tab_ref tab) text</span></span>
+<span class="lineno">  697 </span>
+<span class="lineno">  698 </span>-- | No active tab + plain text: mint a fresh default session, append a tab for
+<span class="lineno">  699 </span>-- it, focus the conversation on it, and route the text — restoring the implicit
+<span class="lineno">  700 </span>-- &quot;just works&quot; default session. No @new tab \/N@ confirmation is emitted (the
+<span class="lineno">  701 </span>-- user sent a chat message, not @\/nt@); the new tab still becomes visible via
+<span class="lineno">  702 </span>-- 'notifyChanged'. @'Left' msg@ (no provider\/model configured) surfaces the
+<span class="lineno">  703 </span>-- existing setup guidance, exactly like 'cmdNt'.
+<span class="lineno">  704 </span>autoStartDefault :: Ctx -&gt; Text -&gt; IO ()
+<span class="lineno">  705 </span><span class="decl"><span class="istickedoff">autoStartDefault ctx text = do</span>
+<span class="lineno">  706 </span><span class="spaces">  </span><span class="istickedoff">mNew &lt;- _td_newDefaultSession (_ctx_deps ctx)</span>
+<span class="lineno">  707 </span><span class="spaces">  </span><span class="istickedoff">case mNew of</span>
+<span class="lineno">  708 </span><span class="spaces">    </span><span class="istickedoff">Left msg     -&gt; emit ctx msg</span>
+<span class="lineno">  709 </span><span class="spaces">    </span><span class="istickedoff">Right ref    -&gt; do</span>
+<span class="lineno">  710 </span><span class="spaces">      </span><span class="istickedoff">res &lt;- registryAppend (_td_tabs (_ctx_deps ctx)) ref</span>
+<span class="lineno">  711 </span><span class="spaces">      </span><span class="istickedoff">case res of</span>
+<span class="lineno">  712 </span><span class="spaces">        </span><span class="istickedoff">-- Slot exhaustion: surface the §14 copy with no state change.</span>
+<span class="lineno">  713 </span><span class="spaces">        </span><span class="istickedoff">Left SlotsFull -&gt; emit ctx slotsFullMsg</span>
+<span class="lineno">  714 </span><span class="spaces">        </span><span class="istickedoff">-- 'Right' (the freshly-bound slot) and 'Left (AlreadyBound _)' (which is</span>
+<span class="lineno">  715 </span><span class="spaces">        </span><span class="istickedoff">-- structurally impossible for a freshly-minted ref) both route the text</span>
+<span class="lineno">  716 </span><span class="spaces">        </span><span class="istickedoff">-- to the ref — focus + deliver — rather than crash on the latter.</span>
+<span class="lineno">  717 </span><span class="spaces">        </span><span class="istickedoff">_              -&gt; routeToNew ctx ref text</span></span>
+<span class="lineno">  718 </span>
+<span class="lineno">  719 </span>-- | Focus the conversation on a freshly-bound @ref@, ensure its runtime, notify
+<span class="lineno">  720 </span>-- listeners, and route @text@ to it. Shared by the two reachable arms of
+<span class="lineno">  721 </span>-- 'autoStartDefault'.
+<span class="lineno">  722 </span>routeToNew :: Ctx -&gt; TabRef -&gt; Text -&gt; IO ()
+<span class="lineno">  723 </span><span class="decl"><span class="istickedoff">routeToNew ctx ref text = do</span>
+<span class="lineno">  724 </span><span class="spaces">  </span><span class="istickedoff">ensure ctx ref</span>
+<span class="lineno">  725 </span><span class="spaces">  </span><span class="istickedoff">setCursorTo ctx ref</span>
+<span class="lineno">  726 </span><span class="spaces">  </span><span class="istickedoff">notifyChanged ctx</span>
+<span class="lineno">  727 </span><span class="spaces">  </span><span class="istickedoff">deliver ctx ref text</span></span>
+<span class="lineno">  728 </span>
+<span class="lineno">  729 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  730 </span>-- Cursor / wizard / registry mutation helpers (all 'Ctx'-saturated)
+<span class="lineno">  731 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  732 </span>
+<span class="lineno">  733 </span>-- | Reply / banner to the served conversation.
+<span class="lineno">  734 </span>emit :: Ctx -&gt; Text -&gt; IO ()
+<span class="lineno">  735 </span><span class="decl"><span class="istickedoff">emit ctx = _td_emit (_ctx_deps ctx) (_ctx_conv ctx)</span></span>
+<span class="lineno">  736 </span>
+<span class="lineno">  737 </span>-- | Start (or ++refcount) the runtime backing a ref.
+<span class="lineno">  738 </span>ensure :: Ctx -&gt; TabRef -&gt; IO ()
+<span class="lineno">  739 </span><span class="decl"><span class="istickedoff">ensure ctx = _td_ensure (_ctx_deps ctx)</span></span>
+<span class="lineno">  740 </span>
+<span class="lineno">  741 </span>-- | --refcount; stop the runtime on last release.
+<span class="lineno">  742 </span>release :: Ctx -&gt; TabRef -&gt; IO ()
+<span class="lineno">  743 </span><span class="decl"><span class="istickedoff">release ctx = _td_release (_ctx_deps ctx)</span></span>
+<span class="lineno">  744 </span>
+<span class="lineno">  745 </span>-- | Route input to a ref's runtime.
+<span class="lineno">  746 </span>sendTo :: Ctx -&gt; TabRef -&gt; Text -&gt; IO (Either TabError ())
+<span class="lineno">  747 </span><span class="decl"><span class="istickedoff">sendTo ctx = _td_sendTo (_ctx_deps ctx)</span></span>
+<span class="lineno">  748 </span>
+<span class="lineno">  749 </span>-- | Apply a pure 'CursorState' update to the shared cursor ref.
+<span class="lineno">  750 </span>modifyCursor :: Ctx -&gt; (CursorState -&gt; CursorState) -&gt; IO ()
+<span class="lineno">  751 </span><span class="decl"><span class="istickedoff">modifyCursor ctx f =</span>
+<span class="lineno">  752 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' (_td_cursors (_ctx_deps ctx)) (\cs -&gt; (f cs, ()))</span></span>
+<span class="lineno">  753 </span>
+<span class="lineno">  754 </span>-- | Focus the served conversation on a ref.
+<span class="lineno">  755 </span>setCursorTo :: Ctx -&gt; TabRef -&gt; IO ()
+<span class="lineno">  756 </span><span class="decl"><span class="istickedoff">setCursorTo ctx ref = modifyCursor ctx (setCursor (_ctx_conv ctx) ref)</span></span>
+<span class="lineno">  757 </span>
+<span class="lineno">  758 </span>-- | Set a conversation's relay-mode override.
+<span class="lineno">  759 </span>setRelay :: ConversationKey -&gt; RelayMode -&gt; CursorState -&gt; CursorState
+<span class="lineno">  760 </span><span class="decl"><span class="istickedoff">setRelay k m cs = cs { _cs_relay = Map.insert k m (_cs_relay cs) }</span></span>
+<span class="lineno">  761 </span>
+<span class="lineno">  762 </span>-- | The relay mode for the served conversation, against the global default.
+<span class="lineno">  763 </span>relayModeFor :: Ctx -&gt; CursorState -&gt; RelayMode
+<span class="lineno">  764 </span><span class="decl"><span class="istickedoff">relayModeFor ctx cs =</span>
+<span class="lineno">  765 </span><span class="spaces">  </span><span class="istickedoff">Map.findWithDefault (_td_relayDefault (_ctx_deps ctx)) (_ctx_conv ctx) (_cs_relay cs)</span></span>
+<span class="lineno">  766 </span>
+<span class="lineno">  767 </span>-- | Store (or clear, with 'Nothing') the served conversation's wizard state.
+<span class="lineno">  768 </span>setWizard :: Ctx -&gt; Maybe WizardState -&gt; IO ()
+<span class="lineno">  769 </span><span class="decl"><span class="istickedoff">setWizard ctx mSt =</span>
+<span class="lineno">  770 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' (_td_wizard (_ctx_deps ctx)) $ \m -&gt;</span>
+<span class="lineno">  771 </span><span class="spaces">    </span><span class="istickedoff">(maybe (Map.delete k m) (\st -&gt; Map.insert k st m) mSt, ())</span>
+<span class="lineno">  772 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  773 </span><span class="spaces">    </span><span class="istickedoff">k = _ctx_conv ctx</span></span>
+<span class="lineno">  774 </span>
+<span class="lineno">  775 </span>-- | Drop the served conversation's wizard state.
+<span class="lineno">  776 </span>clearWizard :: Ctx -&gt; IO ()
+<span class="lineno">  777 </span><span class="decl"><span class="istickedoff">clearWizard ctx = setWizard ctx Nothing</span></span>
+<span class="lineno">  778 </span>
+<span class="lineno">  779 </span>-- | Fire the injected tabs-changed callback once (called after each mutating
+<span class="lineno">  780 </span>-- registry operation — tab create, close, rename, wizard bind). NOT called on
+<span class="lineno">  781 </span>-- read or cursor-switch operations.
+<span class="lineno">  782 </span>notifyChanged :: Ctx -&gt; IO ()
+<span class="lineno">  783 </span><span class="decl"><span class="istickedoff">notifyChanged ctx = _td_onTabsChanged (_ctx_deps ctx)</span></span>
+<span class="lineno">  784 </span>
+<span class="lineno">  785 </span>-- | Overwrite the registry's 'TabList' (used by in-place rebind/rename, which
+<span class="lineno">  786 </span>-- the registry handle has no dedicated op for). The rebinds here run on the
+<span class="lineno">  787 </span>-- dispatcher thread only (single writer), so a snapshot-then-set is race-free
+<span class="lineno">  788 </span>-- in practice.
+<span class="lineno">  789 </span>writeTabs :: Ctx -&gt; TabList -&gt; IO ()
+<span class="lineno">  790 </span><span class="decl"><span class="istickedoff">writeTabs ctx tl' =</span>
+<span class="lineno">  791 </span><span class="spaces">  </span><span class="istickedoff">case _td_tabs (_ctx_deps ctx) of</span>
+<span class="lineno">  792 </span><span class="spaces">    </span><span class="istickedoff">TabRegistry ioref -&gt; writeIORef ioref tl'</span></span>
+<span class="lineno">  793 </span>
+<span class="lineno">  794 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  795 </span>-- Small argument parsers
+<span class="lineno">  796 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  797 </span>
+<span class="lineno">  798 </span>-- | Parse a single @[0-9a-z]@ slot argument into a 'TabIndex'.
+<span class="lineno">  799 </span>slotArg :: Text -&gt; Maybe TabIndex
+<span class="lineno">  800 </span><span class="decl"><span class="istickedoff">slotArg t = case T.unpack t of</span>
+<span class="lineno">  801 </span><span class="spaces">  </span><span class="istickedoff">[c] -&gt; tabIndexChar c &gt;&gt;= mkTabIndex</span>
+<span class="lineno">  802 </span><span class="spaces">  </span><span class="istickedoff">_   -&gt; Nothing</span></span>
+<span class="lineno">  803 </span>
+<span class="lineno">  804 </span>-- | The @[0-9a-z]@ → index mapping (digits @0..9@, letters @10..35@).
+<span class="lineno">  805 </span>tabIndexChar :: Char -&gt; Maybe Int
+<span class="lineno">  806 </span><span class="decl"><span class="istickedoff">tabIndexChar c</span>
+<span class="lineno">  807 </span><span class="spaces">  </span><span class="istickedoff">| Char.isDigit c      = Just (fromEnum c - fromEnum '0')</span>
+<span class="lineno">  808 </span><span class="spaces">  </span><span class="istickedoff">| Char.isAsciiLower c = Just (10 + fromEnum c - fromEnum 'a')</span>
+<span class="lineno">  809 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>           = Nothing</span></span>
+<span class="lineno">  810 </span>
+<span class="lineno">  811 </span>-- | Render a 'TabIndex' back to its single @[0-9a-z]@ display char.
+<span class="lineno">  812 </span>slotChar :: TabIndex -&gt; Text
+<span class="lineno">  813 </span><span class="decl"><span class="istickedoff">slotChar ti =</span>
+<span class="lineno">  814 </span><span class="spaces">  </span><span class="istickedoff">let n = unTabIndex ti</span>
+<span class="lineno">  815 </span><span class="spaces">  </span><span class="istickedoff">in if n &lt; 10</span>
+<span class="lineno">  816 </span><span class="spaces">       </span><span class="istickedoff">then T.singleton (toEnum (fromEnum '0' + n))</span>
+<span class="lineno">  817 </span><span class="spaces">       </span><span class="istickedoff">else T.singleton (toEnum (fromEnum 'a' + n - 10))</span></span>
+<span class="lineno">  818 </span>
+<span class="lineno">  819 </span>-- | Parse a relay-mode word.
+<span class="lineno">  820 </span>parseRelayMode :: Text -&gt; Maybe RelayMode
+<span class="lineno">  821 </span><span class="decl"><span class="istickedoff">parseRelayMode t = case T.toLower t of</span>
+<span class="lineno">  822 </span><span class="spaces">  </span><span class="istickedoff">&quot;focused&quot;  -&gt; Just FocusedOnly</span>
+<span class="lineno">  823 </span><span class="spaces">  </span><span class="istickedoff">&quot;activity&quot; -&gt; Just ActivityDigest</span>
+<span class="lineno">  824 </span><span class="spaces">  </span><span class="istickedoff">&quot;all&quot;      -&gt; Just Firehose</span>
+<span class="lineno">  825 </span><span class="spaces">  </span><span class="istickedoff">_          -&gt; Nothing</span></span>
+<span class="lineno">  826 </span>
+<span class="lineno">  827 </span>-- | The user-facing word for a relay mode.
+<span class="lineno">  828 </span>relayWord :: RelayMode -&gt; Text
+<span class="lineno">  829 </span><span class="decl"><span class="istickedoff">relayWord FocusedOnly    = &quot;focused&quot;</span>
+<span class="lineno">  830 </span><span class="spaces"></span><span class="istickedoff">relayWord ActivityDigest = &quot;activity&quot;</span>
+<span class="lineno">  831 </span><span class="spaces"></span><span class="istickedoff">relayWord Firehose       = &quot;all&quot;</span></span>
+<span class="lineno">  832 </span>
+<span class="lineno">  833 </span>-- | The kind label shown in @\/tabs@.
+<span class="lineno">  834 </span>kindLabel :: TabRef -&gt; Text
+<span class="lineno">  835 </span><span class="decl"><span class="istickedoff">kindLabel (BoundSession _) = &quot;session&quot;</span>
+<span class="lineno">  836 </span><span class="spaces"></span><span class="istickedoff">kindLabel (BoundHarness _) = &quot;harness&quot;</span></span>
+<span class="lineno">  837 </span>
+<span class="lineno">  838 </span>-- | The status label shown in @\/tabs@.
+<span class="lineno">  839 </span>statusLabel :: TabStatus -&gt; Text
+<span class="lineno">  840 </span><span class="decl"><span class="istickedoff">statusLabel Live = &quot;live&quot;</span>
+<span class="lineno">  841 </span><span class="spaces"></span><span class="istickedoff">statusLabel Dead = &quot;dead&quot;</span></span>
+<span class="lineno">  842 </span>
+<span class="lineno">  843 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  844 </span>-- Pinned copy (design §14)
+<span class="lineno">  845 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  846 </span>
+<span class="lineno">  847 </span>-- | @\/N@ out of range (§14). @n@ = current tab count.
+<span class="lineno">  848 </span>outOfRangeMsg :: TabIndex -&gt; Int -&gt; Text
+<span class="lineno">  849 </span><span class="decl"><span class="istickedoff">outOfRangeMsg idx n =</span>
+<span class="lineno">  850 </span><span class="spaces">  </span><span class="istickedoff">&quot;/&quot; &lt;&gt; slotChar idx &lt;&gt; &quot;: out of range — you have &quot; &lt;&gt; tshow n</span>
+<span class="lineno">  851 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; &quot; tabs (/0–/&quot; &lt;&gt; lastSlotChar n &lt;&gt; &quot;); /tabs to list&quot;</span></span>
+<span class="lineno">  852 </span>
+<span class="lineno">  853 </span>-- | The high slot char of an @n@-tab list (@n-1@). For @n &lt;= 0@ (an
+<span class="lineno">  854 </span>-- out-of-range switch against an empty list) the high coordinate is @0@. For
+<span class="lineno">  855 </span>-- @n &gt;= 1@, @n-1 &gt;= 0@ so 'mkTabIndex' always succeeds; the impossible
+<span class="lineno">  856 </span>-- 'Nothing' is folded into 'error'.
+<span class="lineno">  857 </span>lastSlotChar :: Int -&gt; Text
+<span class="lineno">  858 </span><span class="decl"><span class="istickedoff">lastSlotChar n</span>
+<span class="lineno">  859 </span><span class="spaces">  </span><span class="istickedoff">| n &lt;= 0    = &quot;0&quot;</span>
+<span class="lineno">  860 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  861 </span><span class="spaces">      </span><span class="istickedoff">slotChar (Maybe.fromMaybe <span class="nottickedoff">(impossible &quot;lastSlotChar: negative index&quot;)</span></span>
+<span class="lineno">  862 </span><span class="spaces">                                </span><span class="istickedoff">(mkTabIndex (n - 1)))</span></span>
+<span class="lineno">  863 </span>
+<span class="lineno">  864 </span>-- | Slot exhaustion at 36 (§14).
+<span class="lineno">  865 </span>slotsFullMsg :: Text
+<span class="lineno">  866 </span><span class="decl"><span class="istickedoff">slotsFullMsg = &quot;all 36 tab slots in use — /close one first&quot;</span></span>
+<span class="lineno">  867 </span>
+<span class="lineno">  868 </span>-- | Deferred death warning on next send to a 'Dead' tab (§14).
+<span class="lineno">  869 </span>deferredDeathMsg :: Text -&gt; Text
+<span class="lineno">  870 </span><span class="decl"><span class="istickedoff">deferredDeathMsg name =</span>
+<span class="lineno">  871 </span><span class="spaces">  </span><span class="istickedoff">&quot;⚠ \&quot;&quot; &lt;&gt; name &lt;&gt; &quot;\&quot; exited while you were away — message not sent; resend when ready&quot;</span></span>
+<span class="lineno">  872 </span>
+<span class="lineno">  873 </span>-- | @--force@ on @\/close@ (§14).
+<span class="lineno">  874 </span>closeForceMsg :: Text
+<span class="lineno">  875 </span><span class="decl"><span class="istickedoff">closeForceMsg = &quot;/close has no --force (tabs never destroy sessions or harnesses)&quot;</span></span>
+<span class="lineno">  876 </span>
+<span class="lineno">  877 </span>-- | @\/relay@ with no arg, showing the current mode (§14).
+<span class="lineno">  878 </span>relayCurrentMsg :: RelayMode -&gt; Text
+<span class="lineno">  879 </span><span class="decl"><span class="istickedoff">relayCurrentMsg m = &quot;relay mode: &quot; &lt;&gt; relayWord m &lt;&gt; &quot; (focused | activity | all)&quot;</span></span>
+<span class="lineno">  880 </span>
+<span class="lineno">  881 </span>-- | A parse-error note for an unrecognised @\/@ shape.
+<span class="lineno">  882 </span>parseErrorMsg :: Text
+<span class="lineno">  883 </span><span class="decl"><span class="istickedoff">parseErrorMsg = &quot;could not parse that — /tabs to list, /help for commands&quot;</span></span>
+<span class="lineno">  884 </span>
+<span class="lineno">  885 </span>-- | @\/close@ with no resolvable target.
+<span class="lineno">  886 </span>closeNoTargetMsg :: Text
+<span class="lineno">  887 </span><span class="decl"><span class="istickedoff">closeNoTargetMsg = &quot;no tab to close — /tabs to list&quot;</span></span>
+<span class="lineno">  888 </span>
+<span class="lineno">  889 </span>-- | @\/close@ with an unparseable slot argument.
+<span class="lineno">  890 </span>closeBadArgMsg :: Text
+<span class="lineno">  891 </span><span class="decl"><span class="istickedoff">closeBadArgMsg = &quot;close which tab? give a slot like /close 0 (/tabs to list)&quot;</span></span>
+<span class="lineno">  892 </span>
+<span class="lineno">  893 </span>-- | @\/rename@ with no resolvable target.
+<span class="lineno">  894 </span>renameNoTargetMsg :: Text
+<span class="lineno">  895 </span><span class="decl"><span class="istickedoff">renameNoTargetMsg = &quot;no tab to rename — /tabs to list&quot;</span></span>
+<span class="lineno">  896 </span>
+<span class="lineno">  897 </span>-- | @\/rename@ whose name failed sanitization.
+<span class="lineno">  898 </span>renameBadNameMsg :: NameError -&gt; Text
+<span class="lineno">  899 </span><span class="decl"><span class="istickedoff">renameBadNameMsg e = &quot;invalid tab name (&quot; &lt;&gt; tshow e &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  900 </span>
+<span class="lineno">  901 </span>-- | @\/rename@ targeting a harness tab — out of scope (rename sets a session's
+<span class="lineno">  902 </span>-- canonical description; a harness has no equivalent canonical name here).
+<span class="lineno">  903 </span>renameHarnessMsg :: Text
+<span class="lineno">  904 </span><span class="decl"><span class="istickedoff">renameHarnessMsg = &quot;rename applies to session tabs only&quot;</span></span>
+<span class="lineno">  905 </span>
+<span class="lineno">  906 </span>-- | @\/relay@ with an unrecognised mode word.
+<span class="lineno">  907 </span>relayBadModeMsg :: Text
+<span class="lineno">  908 </span><span class="decl"><span class="istickedoff">relayBadModeMsg = &quot;unknown relay mode — use focused, activity, or all&quot;</span></span>
+<span class="lineno">  909 </span>
+<span class="lineno">  910 </span>-- | @\/tab new \&lt;kind\&gt;@ for a kind that is recognised but not yet wired
+<span class="lineno">  911 </span>-- (shell\/ssh\/tmux; harness landed in WU-B).
+<span class="lineno">  912 </span>tabNewUnsupportedMsg :: Text -&gt; Text
+<span class="lineno">  913 </span><span class="decl"><span class="istickedoff">tabNewUnsupportedMsg kind = &quot;/tab new &quot; &lt;&gt; kind &lt;&gt; &quot; is not yet supported&quot;</span></span>
+<span class="lineno">  914 </span>
+<span class="lineno">  915 </span>-- | @\/tab new \&lt;kind\&gt;@ for an unrecognised kind keyword — a short usage hint.
+<span class="lineno">  916 </span>tabNewUsageMsg :: Text
+<span class="lineno">  917 </span><span class="decl"><span class="istickedoff">tabNewUsageMsg = &quot;unknown tab kind — use ai, harness, shell, ssh, or tmux&quot;</span></span>
+<span class="lineno">  918 </span>
+<span class="lineno">  919 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  920 </span>-- Misc
+<span class="lineno">  921 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  922 </span>
+<span class="lineno">  923 </span>-- | 'Show' a value as 'Text'.
+<span class="lineno">  924 </span>tshow :: Show a =&gt; a -&gt; Text
+<span class="lineno">  925 </span><span class="decl"><span class="istickedoff">tshow = T.pack . show</span></span>
+<span class="lineno">  926 </span>
+<span class="lineno">  927 </span>-- | Marker for a structurally-impossible branch (an invariant the surrounding
+<span class="lineno">  928 </span>-- logic has already established). Folded into 'error' via 'Maybe.fromMaybe' /
+<span class="lineno">  929 </span>-- 'either' so the case is dispatched in uninstrumented library code, leaving
+<span class="lineno">  930 </span>-- no dead defensive alternative for the HPC report to flag — the same
+<span class="lineno">  931 </span>-- convention &quot;PureClaw.Routing.Parse&quot; uses for 'boundedTabIndex'.
+<span class="lineno">  932 </span>impossible :: String -&gt; a
+<span class="lineno">  933 </span><span class="decl"><span class="nottickedoff">impossible msg = error (&quot;PureClaw.Routing.TabDispatch: &quot; &lt;&gt; msg)</span></span>
+
+</pre>
+</body>
+</html>

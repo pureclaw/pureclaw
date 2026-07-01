@@ -1,0 +1,333 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Channels.Telegram
+<span class="lineno">    2 </span>  ( -- * Telegram channel
+<span class="lineno">    3 </span>    TelegramChannel (..)
+<span class="lineno">    4 </span>  , TelegramConfig (..)
+<span class="lineno">    5 </span>  , mkTelegramChannel
+<span class="lineno">    6 </span>  , withTelegramChannel
+<span class="lineno">    7 </span>  , receiveUpdate
+<span class="lineno">    8 </span>    -- * Message parsing
+<span class="lineno">    9 </span>  , parseTelegramUpdate
+<span class="lineno">   10 </span>  , TelegramUpdate (..)
+<span class="lineno">   11 </span>  , TelegramMessage (..)
+<span class="lineno">   12 </span>  , TelegramChat (..)
+<span class="lineno">   13 </span>  , TelegramUser (..)
+<span class="lineno">   14 </span>    -- * BotFather command registration (Tabbed Chat O3)
+<span class="lineno">   15 </span>  , botFatherCommands
+<span class="lineno">   16 </span>  , registerBotFatherCommands
+<span class="lineno">   17 </span>  , encodeBotFatherCommands
+<span class="lineno">   18 </span>  ) where
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>import Control.Concurrent.STM
+<span class="lineno">   21 </span>import Control.Exception
+<span class="lineno">   22 </span>import Data.Aeson
+<span class="lineno">   23 </span>import Data.ByteString (ByteString)
+<span class="lineno">   24 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   25 </span>import Data.IORef
+<span class="lineno">   26 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   27 </span>import Data.Text (Text)
+<span class="lineno">   28 </span>import Data.Text qualified as T
+<span class="lineno">   29 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   30 </span>import Network.HTTP.Types.URI qualified as URI
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>import PureClaw.Channels.AllowList
+<span class="lineno">   33 </span>import PureClaw.Channels.Class
+<span class="lineno">   34 </span>import PureClaw.Core.Errors
+<span class="lineno">   35 </span>import PureClaw.Core.Types
+<span class="lineno">   36 </span>import PureClaw.Handles.Channel
+<span class="lineno">   37 </span>import PureClaw.Handles.Log
+<span class="lineno">   38 </span>import PureClaw.Handles.Network
+<span class="lineno">   39 </span>import PureClaw.Routing.Onboarding (botFatherCommandList)
+<span class="lineno">   40 </span>
+<span class="lineno">   41 </span>-- | Configuration for Telegram channel.
+<span class="lineno">   42 </span>data TelegramConfig = TelegramConfig
+<span class="lineno">   43 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tc_botToken</span></span></span>  :: Text
+<span class="lineno">   44 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tc_apiBase</span></span></span>   :: Text
+<span class="lineno">   45 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tc_allowFrom</span></span></span> :: AllowList UserId
+<span class="lineno">   46 </span>  }
+<span class="lineno">   47 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>-- | A Telegram channel backed by a message queue. Updates are pushed
+<span class="lineno">   50 </span>-- into the queue (e.g. from a webhook endpoint) and the agent loop
+<span class="lineno">   51 </span>-- pulls them out via 'receive'. Responses are sent via the Telegram
+<span class="lineno">   52 </span>-- Bot API using the provided 'NetworkHandle'.
+<span class="lineno">   53 </span>data TelegramChannel = TelegramChannel
+<span class="lineno">   54 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_config</span></span></span>   :: TelegramConfig
+<span class="lineno">   55 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_inbox</span></span></span>    :: TQueue TelegramUpdate
+<span class="lineno">   56 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_network</span></span></span>  :: NetworkHandle
+<span class="lineno">   57 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_log</span></span></span>      :: LogHandle
+<span class="lineno">   58 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_lastChat</span></span></span> :: IORef (Maybe Int)
+<span class="lineno">   59 </span>  }
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>-- | Create a Telegram channel with an empty inbox.
+<span class="lineno">   62 </span>mkTelegramChannel :: TelegramConfig -&gt; NetworkHandle -&gt; LogHandle -&gt; IO TelegramChannel
+<span class="lineno">   63 </span><span class="decl"><span class="istickedoff">mkTelegramChannel config nh lh = do</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">inbox &lt;- newTQueueIO</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">chatRef &lt;- newIORef Nothing</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">pure TelegramChannel</span>
+<span class="lineno">   67 </span><span class="spaces">    </span><span class="istickedoff">{ _tch_config   = config</span>
+<span class="lineno">   68 </span><span class="spaces">    </span><span class="istickedoff">, _tch_inbox    = inbox</span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">, _tch_network  = nh</span>
+<span class="lineno">   70 </span><span class="spaces">    </span><span class="istickedoff">, _tch_log      = lh</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">, _tch_lastChat = chatRef</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>-- | The 'AllowListContext' used for the Telegram open-allow-list warning.
+<span class="lineno">   75 </span>-- The example id is a sample numeric Telegram user/chat id.
+<span class="lineno">   76 </span>telegramAllowListContext :: AllowListContext
+<span class="lineno">   77 </span><span class="decl"><span class="istickedoff">telegramAllowListContext = AllowListContext &quot;Telegram&quot; &quot;telegram&quot; &quot;123456789&quot;</span></span>
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | Activate a Telegram channel with allow-list-warning handling.
+<span class="lineno">   80 </span>--
+<span class="lineno">   81 </span>-- Unlike Signal there is no reader thread and no transport to close: Telegram
+<span class="lineno">   82 </span>-- updates are pushed into the inbox by an external webhook. This wrapper is
+<span class="lineno">   83 </span>-- the SINGLE home for the Telegram open-allow-list warning — it fires whenever
+<span class="lineno">   84 </span>-- Telegram is activated; a future gateway boot path routes through it.
+<span class="lineno">   85 </span>-- 'mkTelegramChannel' itself stays warning-free (no test-construction noise).
+<span class="lineno">   86 </span>withTelegramChannel :: TelegramConfig -&gt; NetworkHandle -&gt; LogHandle -&gt; (ChannelHandle -&gt; IO a) -&gt; IO a
+<span class="lineno">   87 </span><span class="decl"><span class="istickedoff">withTelegramChannel config nh lh action = do</span>
+<span class="lineno">   88 </span><span class="spaces">  </span><span class="istickedoff">warnIfOpenAllowList lh telegramAllowListContext (_tc_allowFrom config)</span>
+<span class="lineno">   89 </span><span class="spaces">  </span><span class="istickedoff">tc &lt;- mkTelegramChannel <span class="nottickedoff">config</span> <span class="nottickedoff">nh</span> <span class="nottickedoff">lh</span></span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="istickedoff">action <span class="nottickedoff">(toHandle tc)</span></span></span>
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>instance Channel TelegramChannel where
+<span class="lineno">   93 </span>  <span class="decl"><span class="istickedoff">toHandle tc = ChannelHandle</span>
+<span class="lineno">   94 </span><span class="spaces">    </span><span class="istickedoff">{ _ch_receive      = receiveUpdate tc</span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">, _ch_send         = sendMessage tc</span>
+<span class="lineno">   96 </span><span class="spaces">    </span><span class="istickedoff">, _ch_sendError    = sendTelegramError tc</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">, _ch_sendChunk    = <span class="nottickedoff">\_ -&gt; pure ()</span>  -- Telegram doesn't support streaming</span>
+<span class="lineno">   98 </span><span class="spaces">    </span><span class="istickedoff">, _ch_streaming    = <span class="nottickedoff">False</span></span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">, _ch_readSecret   = ioError <span class="nottickedoff">(userError &quot;Vault management requires the CLI interface&quot;)</span></span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">, _ch_prompt       = <span class="nottickedoff">\promptText -&gt; do</span></span>
+<span class="lineno">  101 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">sendMessage tc (OutgoingMessage promptText)</span></span>
+<span class="lineno">  102 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">_im_content &lt;$&gt; receiveUpdate tc</span></span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">, _ch_promptSecret = <span class="nottickedoff">\_ -&gt;</span></span>
+<span class="lineno">  104 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ioError (userError &quot;Vault management requires the CLI interface&quot;)</span></span>
+<span class="lineno">  105 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  106 </span>
+<span class="lineno">  107 </span>-- | Block until an *authorized* Telegram update arrives in the queue.
+<span class="lineno">  108 </span>--
+<span class="lineno">  109 </span>-- Reads one update at a time (consuming it from the inbox). An update passes
+<span class="lineno">  110 </span>-- when its allow-list policy permits either the sender's user id or the
+<span class="lineno">  111 </span>-- conversation's chat id.
+<span class="lineno">  112 </span>--
+<span class="lineno">  113 </span>-- Note: the chat id is matched by wrapping it in the 'UserId' newtype, the same
+<span class="lineno">  114 </span>-- way Signal wraps both phone numbers and UUIDs. This is an intentional
+<span class="lineno">  115 </span>-- conflation for access-control matching — the allow-list gates &quot;may this
+<span class="lineno">  116 </span>-- message in?&quot; against any sender-or-conversation identifier; it is not
+<span class="lineno">  117 </span>-- identity disambiguation. Numeric IDs only (usernames are not parsed or
+<span class="lineno">  118 </span>-- supported). Unauthorized updates are consumed, logged at WARN, and discarded
+<span class="lineno">  119 </span>-- (mirroring Signal's drop-and-log), then we recurse to read the next update.
+<span class="lineno">  120 </span>receiveUpdate :: TelegramChannel -&gt; IO IncomingMessage
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">receiveUpdate tc = do</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">update &lt;- atomically $ readTQueue (_tch_inbox tc)</span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">let msg = _tu_message update</span>
+<span class="lineno">  124 </span><span class="spaces">      </span><span class="istickedoff">userId = T.pack (show (_tu_id (_tm_from msg)))</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">chatId = _tcht_id (_tm_chat msg)</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">content = _tm_text msg</span>
+<span class="lineno">  127 </span><span class="spaces">      </span><span class="istickedoff">flds = Map.singleton &quot;chat_id&quot; (toJSON chatId)</span>
+<span class="lineno">  128 </span><span class="spaces">      </span><span class="istickedoff">policy = _tc_allowFrom (_tch_config tc)</span>
+<span class="lineno">  129 </span><span class="spaces">      </span><span class="istickedoff">allowed = isAllowed policy (UserId userId)</span>
+<span class="lineno">  130 </span><span class="spaces">             </span><span class="istickedoff">|| isAllowed policy (UserId (T.pack (show chatId)))</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">if allowed</span>
+<span class="lineno">  132 </span><span class="spaces">    </span><span class="istickedoff">then do</span>
+<span class="lineno">  133 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_tch_lastChat tc) (Just chatId)</span>
+<span class="lineno">  134 </span><span class="spaces">      </span><span class="istickedoff">pure IncomingMessage</span>
+<span class="lineno">  135 </span><span class="spaces">        </span><span class="istickedoff">{ _im_source  = mkMessageSource CkTelegram (Just (UserId userId)) flds</span>
+<span class="lineno">  136 </span><span class="spaces">        </span><span class="istickedoff">, _im_content = content</span>
+<span class="lineno">  137 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  139 </span><span class="spaces">      </span><span class="istickedoff">_lh_logWarn (_tch_log tc) $</span>
+<span class="lineno">  140 </span><span class="spaces">        </span><span class="istickedoff">&quot;Blocked Telegram message from unauthorized sender (user &quot;</span>
+<span class="lineno">  141 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; userId &lt;&gt; &quot;, chat &quot; &lt;&gt; T.pack (show chatId) &lt;&gt; &quot;)&quot;</span>
+<span class="lineno">  142 </span><span class="spaces">      </span><span class="istickedoff">receiveUpdate tc</span></span>
+<span class="lineno">  143 </span>
+<span class="lineno">  144 </span>-- | Send a message to the last active chat via the Telegram Bot API.
+<span class="lineno">  145 </span>sendMessage :: TelegramChannel -&gt; OutgoingMessage -&gt; IO ()
+<span class="lineno">  146 </span><span class="decl"><span class="istickedoff">sendMessage tc msg = do</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">chatId &lt;- readIORef (_tch_lastChat tc)</span>
+<span class="lineno">  148 </span><span class="spaces">  </span><span class="istickedoff">case chatId of</span>
+<span class="lineno">  149 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; _lh_logWarn (_tch_log tc) <span class="nottickedoff">&quot;No chat_id available for send&quot;</span></span>
+<span class="lineno">  150 </span><span class="spaces">    </span><span class="istickedoff">Just cid -&gt; do</span>
+<span class="lineno">  151 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- try @SomeException (postTelegram tc &quot;sendMessage&quot; cid (_om_content msg))</span>
+<span class="lineno">  152 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  153 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">_lh_logError (_tch_log tc) $ &quot;Telegram send failed: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  154 </span><span class="spaces">        </span><span class="istickedoff">Right resp</span>
+<span class="lineno">  155 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">_hr_statusCode resp == 200</span> -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  156 </span><span class="spaces">          </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> -&gt;</span>
+<span class="lineno">  157 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">_lh_logError (_tch_log tc) $</span></span>
+<span class="lineno">  158 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;Telegram API error &quot; &lt;&gt; T.pack (show (_hr_statusCode resp))</span></span></span>
+<span class="lineno">  159 </span>
+<span class="lineno">  160 </span>-- | Send an error message to the Telegram chat.
+<span class="lineno">  161 </span>sendTelegramError :: TelegramChannel -&gt; PublicError -&gt; IO ()
+<span class="lineno">  162 </span><span class="decl"><span class="istickedoff">sendTelegramError tc err = do</span>
+<span class="lineno">  163 </span><span class="spaces">  </span><span class="istickedoff">chatId &lt;- readIORef (_tch_lastChat tc)</span>
+<span class="lineno">  164 </span><span class="spaces">  </span><span class="istickedoff">case chatId of</span>
+<span class="lineno">  165 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; _lh_logWarn (_tch_log tc) <span class="nottickedoff">&quot;No chat_id available for error send&quot;</span></span>
+<span class="lineno">  166 </span><span class="spaces">    </span><span class="istickedoff">Just cid -&gt; do</span>
+<span class="lineno">  167 </span><span class="spaces">      </span><span class="istickedoff">let errText = case err of</span>
+<span class="lineno">  168 </span><span class="spaces">            </span><span class="istickedoff">RateLimitError -&gt; &quot;Rate limited. Please try again in a moment.&quot;</span>
+<span class="lineno">  169 </span><span class="spaces">            </span><span class="istickedoff">NotAllowedError -&gt; <span class="nottickedoff">&quot;Not allowed.&quot;</span></span>
+<span class="lineno">  170 </span><span class="spaces">            </span><span class="istickedoff">TemporaryError t -&gt; <span class="nottickedoff">t</span></span>
+<span class="lineno">  171 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- try @SomeException (postTelegram tc &quot;sendMessage&quot; cid errText)</span>
+<span class="lineno">  172 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  173 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">_lh_logError (_tch_log tc) $ &quot;Telegram error send failed: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  174 </span><span class="spaces">        </span><span class="istickedoff">Right _ -&gt; pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  175 </span>
+<span class="lineno">  176 </span>-- | POST to a Telegram Bot API method with chat_id and text parameters.
+<span class="lineno">  177 </span>postTelegram :: TelegramChannel -&gt; Text -&gt; Int -&gt; Text -&gt; IO HttpResponse
+<span class="lineno">  178 </span><span class="decl"><span class="istickedoff">postTelegram tc method chatId text = do</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">let config = _tch_config tc</span>
+<span class="lineno">  180 </span><span class="spaces">      </span><span class="istickedoff">url = _tc_apiBase config &lt;&gt; &quot;/bot&quot; &lt;&gt; _tc_botToken config &lt;&gt; &quot;/&quot; &lt;&gt; method</span>
+<span class="lineno">  181 </span><span class="spaces">      </span><span class="istickedoff">body = &quot;chat_id=&quot; &lt;&gt; URI.urlEncode False (TE.encodeUtf8 (T.pack (show chatId)))</span>
+<span class="lineno">  182 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; &quot;&amp;text=&quot; &lt;&gt; URI.urlEncode False (TE.encodeUtf8 text)</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">case mkAllowedUrl AllowAll url of</span>
+<span class="lineno">  184 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">throwIO (userError (&quot;Bad Telegram URL: &quot; &lt;&gt; show e))</span></span>
+<span class="lineno">  185 </span><span class="spaces">    </span><span class="istickedoff">Right allowed -&gt; _nh_httpPost (_tch_network tc) allowed body</span></span>
+<span class="lineno">  186 </span>
+<span class="lineno">  187 </span>-- | A Telegram Update object (simplified).
+<span class="lineno">  188 </span>data TelegramUpdate = TelegramUpdate
+<span class="lineno">  189 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tu_updateId</span></span></span> :: Int
+<span class="lineno">  190 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tu_message</span></span></span>  :: TelegramMessage
+<span class="lineno">  191 </span>  }
+<span class="lineno">  192 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  193 </span>
+<span class="lineno">  194 </span>-- | A Telegram Message object (simplified).
+<span class="lineno">  195 </span>data TelegramMessage = TelegramMessage
+<span class="lineno">  196 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tm_messageId</span></span></span> :: Int
+<span class="lineno">  197 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tm_from</span></span></span>      :: TelegramUser
+<span class="lineno">  198 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tm_chat</span></span></span>      :: TelegramChat
+<span class="lineno">  199 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tm_text</span></span></span>      :: Text
+<span class="lineno">  200 </span>  }
+<span class="lineno">  201 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  202 </span>
+<span class="lineno">  203 </span>-- | A Telegram Chat object (simplified).
+<span class="lineno">  204 </span>data TelegramChat = TelegramChat
+<span class="lineno">  205 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tcht_id</span></span></span>   :: Int
+<span class="lineno">  206 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tcht_type</span></span></span> :: Text
+<span class="lineno">  207 </span>  }
+<span class="lineno">  208 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  209 </span>
+<span class="lineno">  210 </span>-- | A Telegram User object (simplified).
+<span class="lineno">  211 </span>data TelegramUser = TelegramUser
+<span class="lineno">  212 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tu_id</span></span></span>        :: Int
+<span class="lineno">  213 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tu_firstName</span></span></span> :: Text
+<span class="lineno">  214 </span>  }
+<span class="lineno">  215 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  216 </span>
+<span class="lineno">  217 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramUpdate</span></span></span></span> where
+<span class="lineno">  218 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramUpdate&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="istickedoff">TelegramUpdate &lt;$&gt; o .: &quot;update_id&quot; &lt;*&gt; o .: &quot;message&quot;</span></span>
+<span class="lineno">  220 </span>
+<span class="lineno">  221 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramMessage</span></span></span></span> where
+<span class="lineno">  222 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramMessage&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">TelegramMessage &lt;$&gt; o .: &quot;message_id&quot; &lt;*&gt; o .: &quot;from&quot; &lt;*&gt; o .: &quot;chat&quot; &lt;*&gt; o .: &quot;text&quot;</span></span>
+<span class="lineno">  224 </span>
+<span class="lineno">  225 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramChat</span></span></span></span> where
+<span class="lineno">  226 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramChat&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">TelegramChat</span> &lt;$&gt; o .: &quot;id&quot; &lt;*&gt; o .: &quot;type&quot;</span></span>
+<span class="lineno">  228 </span>
+<span class="lineno">  229 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramUser</span></span></span></span> where
+<span class="lineno">  230 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramUser&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  231 </span><span class="spaces">    </span><span class="istickedoff">TelegramUser &lt;$&gt; o .: &quot;id&quot; &lt;*&gt; o .: &quot;first_name&quot;</span></span>
+<span class="lineno">  232 </span>
+<span class="lineno">  233 </span>-- | Parse a JSON value as a Telegram update.
+<span class="lineno">  234 </span>parseTelegramUpdate :: Value -&gt; Either String TelegramUpdate
+<span class="lineno">  235 </span><span class="decl"><span class="istickedoff">parseTelegramUpdate v = case fromJSON v of</span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="istickedoff">Error err   -&gt; Left <span class="nottickedoff">err</span></span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">Success upd -&gt; Right upd</span></span>
+<span class="lineno">  238 </span>
+<span class="lineno">  239 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  240 </span>-- BotFather command registration (Tabbed Chat O3)
+<span class="lineno">  241 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  242 </span>
+<span class="lineno">  243 </span>-- | The list of @(command, description)@ tuples PureClaw registers
+<span class="lineno">  244 </span>-- with Telegram's @setMyCommands@ API at channel-startup time.
+<span class="lineno">  245 </span>--
+<span class="lineno">  246 </span>-- Re-exported from &quot;PureClaw.Routing.Onboarding&quot; so the golden file
+<span class="lineno">  247 </span>-- and the @\/help@ subsection live next to each other; the Telegram
+<span class="lineno">  248 </span>-- channel only needs to publish the list, not own it.
+<span class="lineno">  249 </span>--
+<span class="lineno">  250 </span>-- See @docs\/tabbed-chat.md@ §\&quot;Channel autocomplete\&quot; (registration
+<span class="lineno">  251 </span>-- list) and §\&quot;Onboarding (O-series)\&quot; O3 (the golden enumeration).
+<span class="lineno">  252 </span>botFatherCommands :: [(Text, Text)]
+<span class="lineno">  253 </span><span class="decl"><span class="istickedoff">botFatherCommands = botFatherCommandList</span></span>
+<span class="lineno">  254 </span>
+<span class="lineno">  255 </span>-- | Encode 'botFatherCommands' as the JSON payload Telegram's
+<span class="lineno">  256 </span>-- @setMyCommands@ endpoint accepts.
+<span class="lineno">  257 </span>--
+<span class="lineno">  258 </span>-- The endpoint expects @{ \&quot;commands\&quot;: [ { \&quot;command\&quot;: \&quot;...\&quot;,
+<span class="lineno">  259 </span>-- \&quot;description\&quot;: \&quot;...\&quot; }, ... ] }@. The leading slash on each
+<span class="lineno">  260 </span>-- command is stripped (Telegram expects bare command words). The
+<span class="lineno">  261 </span>-- resulting payload is a strict 'ByteString' suitable for an
+<span class="lineno">  262 </span>-- @application\/json@ POST body.
+<span class="lineno">  263 </span>encodeBotFatherCommands :: [(Text, Text)] -&gt; ByteString
+<span class="lineno">  264 </span><span class="decl"><span class="istickedoff">encodeBotFatherCommands cmds =</span>
+<span class="lineno">  265 </span><span class="spaces">  </span><span class="istickedoff">BL.toStrict (encode (object [&quot;commands&quot; .= map toEntry cmds]))</span>
+<span class="lineno">  266 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  267 </span><span class="spaces">    </span><span class="istickedoff">toEntry (c, d) = object</span>
+<span class="lineno">  268 </span><span class="spaces">      </span><span class="istickedoff">[ &quot;command&quot;     .= T.dropWhile (== '/') c</span>
+<span class="lineno">  269 </span><span class="spaces">      </span><span class="istickedoff">, &quot;description&quot; .= d</span>
+<span class="lineno">  270 </span><span class="spaces">      </span><span class="istickedoff">]</span></span>
+<span class="lineno">  271 </span>
+<span class="lineno">  272 </span>-- | Register 'botFatherCommands' with Telegram via the
+<span class="lineno">  273 </span>-- @setMyCommands@ Bot API method.
+<span class="lineno">  274 </span>--
+<span class="lineno">  275 </span>-- POSTs an @application\/json@ payload to
+<span class="lineno">  276 </span>-- @\&lt;api-base\&gt;\/bot\&lt;token\&gt;\/setMyCommands@. Logs (but does not
+<span class="lineno">  277 </span>-- throw) on failure: BotFather autocomplete is a UX enhancement, not
+<span class="lineno">  278 </span>-- a correctness requirement, so a transient failure at startup must
+<span class="lineno">  279 </span>-- not prevent the bot from booting.
+<span class="lineno">  280 </span>--
+<span class="lineno">  281 </span>-- Mirrors the existing 'postTelegram' helper for URL construction
+<span class="lineno">  282 </span>-- (same shape, different endpoint name and Content-Type).
+<span class="lineno">  283 </span>--
+<span class="lineno">  284 </span>-- Per Tabbed Chat O3 this is invoked once at channel startup by the
+<span class="lineno">  285 </span>-- gateway boot path (callers wire it in alongside 'mkTelegramChannel').
+<span class="lineno">  286 </span>registerBotFatherCommands :: TelegramChannel -&gt; IO ()
+<span class="lineno">  287 </span><span class="decl"><span class="istickedoff">registerBotFatherCommands tc = do</span>
+<span class="lineno">  288 </span><span class="spaces">  </span><span class="istickedoff">let config = _tch_config tc</span>
+<span class="lineno">  289 </span><span class="spaces">      </span><span class="istickedoff">url    = _tc_apiBase config &lt;&gt; &quot;/bot&quot; &lt;&gt; _tc_botToken config</span>
+<span class="lineno">  290 </span><span class="spaces">            </span><span class="istickedoff">&lt;&gt; &quot;/setMyCommands&quot;</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">body   = encodeBotFatherCommands botFatherCommands</span>
+<span class="lineno">  292 </span><span class="spaces">  </span><span class="istickedoff">case mkAllowedUrl AllowAll url of</span>
+<span class="lineno">  293 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt;</span>
+<span class="lineno">  294 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_lh_logError (_tch_log tc) $</span></span>
+<span class="lineno">  295 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">&quot;BotFather setMyCommands URL rejected: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  296 </span><span class="spaces">    </span><span class="istickedoff">Right allowed -&gt; do</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- try @SomeException</span>
+<span class="lineno">  298 </span><span class="spaces">                  </span><span class="istickedoff">(_nh_httpPost (_tch_network tc) allowed body)</span>
+<span class="lineno">  299 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  300 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt;</span>
+<span class="lineno">  301 </span><span class="spaces">          </span><span class="istickedoff">_lh_logError (_tch_log tc) $</span>
+<span class="lineno">  302 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;BotFather setMyCommands failed: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  303 </span><span class="spaces">        </span><span class="istickedoff">Right resp</span>
+<span class="lineno">  304 </span><span class="spaces">          </span><span class="istickedoff">| _hr_statusCode resp == 200 -&gt;</span>
+<span class="lineno">  305 </span><span class="spaces">              </span><span class="istickedoff">_lh_logInfo (_tch_log tc)</span>
+<span class="lineno">  306 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;BotFather setMyCommands registered tab commands&quot;</span></span>
+<span class="lineno">  307 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt;</span>
+<span class="lineno">  308 </span><span class="spaces">              </span><span class="istickedoff">_lh_logError (_tch_log tc) $</span>
+<span class="lineno">  309 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;BotFather setMyCommands HTTP &quot;</span></span>
+<span class="lineno">  310 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; T.pack (show (_hr_statusCode resp))</span></span></span>
+
+</pre>
+</body>
+</html>

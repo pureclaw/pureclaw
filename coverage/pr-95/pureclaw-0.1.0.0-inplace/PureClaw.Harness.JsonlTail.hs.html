@@ -1,0 +1,167 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | Pure, dependency-free core of the JSONL session-log tail.
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- A claude-code session log is an append-only file of LF-terminated JSON
+<span class="lineno">    4 </span>-- records. A tailer reads it in arbitrary byte chunks as it grows; chunk
+<span class="lineno">    5 </span>-- boundaries fall wherever the OS happens to return, so a single logical line
+<span class="lineno">    6 </span>-- may be split across two (or more) reads. This module provides the pure
+<span class="lineno">    7 </span>-- splitting logic that turns a stream of byte chunks into a stream of complete
+<span class="lineno">    8 </span>-- lines, buffering any trailing partial line until its terminating LF arrives.
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- This is the pure foundation only: there is no IO, no dependency record, and
+<span class="lineno">   11 </span>-- no tailer loop here. WU5 extends this same module with @JsonlTailDeps@ and
+<span class="lineno">   12 </span>-- the loop that drives 'splitLines' over a growing file.
+<span class="lineno">   13 </span>module PureClaw.Harness.JsonlTail
+<span class="lineno">   14 </span>  ( -- * Offsets
+<span class="lineno">   15 </span>    Offset (..)
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>    -- * Complete lines
+<span class="lineno">   18 </span>  , CompleteLine
+<span class="lineno">   19 </span>  , unCompleteLine
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>    -- * Incremental line buffer
+<span class="lineno">   22 </span>  , Buffer
+<span class="lineno">   23 </span>  , emptyBuffer
+<span class="lineno">   24 </span>  , unBuffer
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>    -- * Splitting
+<span class="lineno">   27 </span>  , splitLines
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>    -- * Bounded splitting
+<span class="lineno">   30 </span>  , SplitCap (..)
+<span class="lineno">   31 </span>  , splitLinesBounded
+<span class="lineno">   32 </span>  ) where
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>import Data.ByteString (ByteString)
+<span class="lineno">   35 </span>import Data.ByteString qualified as BS
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | A byte offset into a growing log file.
+<span class="lineno">   38 </span>--
+<span class="lineno">   39 </span>-- 'Integer' (not 'Int') because log files may in principle exceed a 64-bit
+<span class="lineno">   40 </span>-- offset, and because the tailer arithmetic should never silently overflow.
+<span class="lineno">   41 </span>-- The value constructor is exported so the (future) IO tailer can construct
+<span class="lineno">   42 </span>-- and pattern-match offsets directly; an offset carries no invariant beyond
+<span class="lineno">   43 </span>-- &quot;a number of bytes&quot;.
+<span class="lineno">   44 </span>newtype Offset = Offset Integer
+<span class="lineno">   45 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>-- | One complete, LF-delimited line — the bytes /without/ the terminating
+<span class="lineno">   48 </span>-- @\\n@. A line may be empty (two consecutive newlines, or a leading newline).
+<span class="lineno">   49 </span>--
+<span class="lineno">   50 </span>-- A carriage return (@\\r@) is ordinary content: claude-code logs are
+<span class="lineno">   51 </span>-- LF-terminated, so a @\\r@ immediately before the @\\n@ stays inside these
+<span class="lineno">   52 </span>-- bytes (CRLF is /not/ treated specially). The value constructor is
+<span class="lineno">   53 </span>-- intentionally hidden — 'CompleteLine' values are only ever produced by
+<span class="lineno">   54 </span>-- 'splitLines', and consumers read the bytes back with 'unCompleteLine'.
+<span class="lineno">   55 </span>newtype CompleteLine = CompleteLine ByteString
+<span class="lineno">   56 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   57 </span>
+<span class="lineno">   58 </span>-- | The raw bytes of a complete line, without its terminating LF.
+<span class="lineno">   59 </span>unCompleteLine :: CompleteLine -&gt; ByteString
+<span class="lineno">   60 </span><span class="decl"><span class="istickedoff">unCompleteLine (CompleteLine bs) = bs</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Carries the trailing partial (un-terminated) bytes between successive
+<span class="lineno">   63 </span>-- reads. After a chunk is processed, everything after the last @\\n@ is held
+<span class="lineno">   64 </span>-- here and prepended to the next incoming chunk.
+<span class="lineno">   65 </span>--
+<span class="lineno">   66 </span>-- The value constructor is hidden: a 'Buffer' is only ever produced by
+<span class="lineno">   67 </span>-- 'emptyBuffer' or threaded out of 'splitLines'. Use 'unBuffer' to inspect the
+<span class="lineno">   68 </span>-- pending bytes (primarily for tests and diagnostics).
+<span class="lineno">   69 </span>newtype Buffer = Buffer ByteString
+<span class="lineno">   70 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | The initial, empty buffer — no pending partial line.
+<span class="lineno">   73 </span>emptyBuffer :: Buffer
+<span class="lineno">   74 </span><span class="decl"><span class="istickedoff">emptyBuffer = Buffer BS.empty</span></span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | The pending (un-terminated) bytes currently held in the buffer.
+<span class="lineno">   77 </span>unBuffer :: Buffer -&gt; ByteString
+<span class="lineno">   78 </span><span class="decl"><span class="istickedoff">unBuffer (Buffer bs) = bs</span></span>
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- | Split an incoming byte chunk into complete LF-delimited lines plus a
+<span class="lineno">   81 </span>-- residual buffer.
+<span class="lineno">   82 </span>--
+<span class="lineno">   83 </span>-- The incoming 'Buffer' (the partial line left over from previous reads) is
+<span class="lineno">   84 </span>-- prepended to the chunk, so a line split across reads reassembles once its
+<span class="lineno">   85 </span>-- @\\n@ arrives. Every complete line (the bytes up to, but not including, each
+<span class="lineno">   86 </span>-- @\\n@) is emitted in order; the bytes after the final @\\n@ — which have no
+<span class="lineno">   87 </span>-- terminator yet — are carried in the returned 'Buffer' and are /not/ emitted.
+<span class="lineno">   88 </span>--
+<span class="lineno">   89 </span>-- Edge-case semantics (all pinned down by tests):
+<span class="lineno">   90 </span>--
+<span class="lineno">   91 </span>--   * __Empty input__: no lines; the buffer is returned unchanged.
+<span class="lineno">   92 </span>--   * __No LF__: the whole (buffer @&lt;&gt;@ chunk) is buffered; no lines.
+<span class="lineno">   93 </span>--   * __Trailing LF__ (@&quot;a\\n&quot;@): emits @[&quot;a&quot;]@, residual empty.
+<span class="lineno">   94 </span>--   * __Leading LF__ (@&quot;\\nx\\n&quot;@): emits @[&quot;&quot;, &quot;x&quot;]@ (leading empty line).
+<span class="lineno">   95 </span>--   * __Consecutive LFs__ (@&quot;a\\n\\nb\\n&quot;@): emits @[&quot;a&quot;, &quot;&quot;, &quot;b&quot;]@.
+<span class="lineno">   96 </span>--   * __Lone LF__ (@&quot;\\n&quot;@): emits a single empty line @[&quot;&quot;]@.
+<span class="lineno">   97 </span>--   * __CR preserved__ (@&quot;a\\r\\nb\\n&quot;@): emits @[&quot;a\\r&quot;, &quot;b&quot;]@ — the @\\r@
+<span class="lineno">   98 </span>--     stays on the first line; CRLF is not special-cased.
+<span class="lineno">   99 </span>--
+<span class="lineno">  100 </span>-- Total function: no partial functions, no exceptions, for any input.
+<span class="lineno">  101 </span>splitLines :: ByteString -&gt; Buffer -&gt; ([CompleteLine], Buffer)
+<span class="lineno">  102 </span><span class="decl"><span class="istickedoff">splitLines chunk (Buffer pending) = (map CompleteLine completed, Buffer residual)</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  104 </span><span class="spaces">    </span><span class="istickedoff">-- Reassemble: the buffered partial precedes the fresh bytes.</span>
+<span class="lineno">  105 </span><span class="spaces">    </span><span class="istickedoff">combined :: ByteString</span>
+<span class="lineno">  106 </span><span class="spaces">    </span><span class="istickedoff">combined = pending &lt;&gt; chunk</span>
+<span class="lineno">  107 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  108 </span><span class="spaces">    </span><span class="istickedoff">-- 'BS.split' on a stream containing @n@ LF separators yields @n + 1@</span>
+<span class="lineno">  109 </span><span class="spaces">    </span><span class="istickedoff">-- pieces (one per inter-separator gap, including empties). The trailing</span>
+<span class="lineno">  110 </span><span class="spaces">    </span><span class="istickedoff">-- piece is everything after the final LF — un-terminated — so it becomes</span>
+<span class="lineno">  111 </span><span class="spaces">    </span><span class="istickedoff">-- the residual; the earlier pieces are the complete lines.</span>
+<span class="lineno">  112 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  113 </span><span class="spaces">    </span><span class="istickedoff">-- The one exception is /empty/ input: 'BS.split' returns @[]@ (zero</span>
+<span class="lineno">  114 </span><span class="spaces">    </span><span class="istickedoff">-- pieces) for the empty 'ByteString', which 'splitLast' maps to no lines</span>
+<span class="lineno">  115 </span><span class="spaces">    </span><span class="istickedoff">-- and an empty residual. (For any non-empty input 'BS.split' is non-empty.)</span>
+<span class="lineno">  116 </span><span class="spaces">    </span><span class="istickedoff">(completed, residual) = splitLast (BS.split 0x0A combined)</span></span>
+<span class="lineno">  117 </span>
+<span class="lineno">  118 </span>-- | Separate the pieces of a 'BS.split' into the complete lines (all but the
+<span class="lineno">  119 </span>-- last piece) and the residual partial (the last piece). For the @[]@ result
+<span class="lineno">  120 </span>-- that 'BS.split' produces on empty input, there are no lines and the residual
+<span class="lineno">  121 </span>-- is empty. Total in all cases.
+<span class="lineno">  122 </span>splitLast :: [ByteString] -&gt; ([ByteString], ByteString)
+<span class="lineno">  123 </span><span class="decl"><span class="istickedoff">splitLast [] = ([], BS.empty)</span>
+<span class="lineno">  124 </span><span class="spaces"></span><span class="istickedoff">splitLast [x] = ([], x)</span>
+<span class="lineno">  125 </span><span class="spaces"></span><span class="istickedoff">splitLast (x : xs) =</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">let (initLines, lst) = splitLast xs</span>
+<span class="lineno">  127 </span><span class="spaces">   </span><span class="istickedoff">in (x : initLines, lst)</span></span>
+<span class="lineno">  128 </span>
+<span class="lineno">  129 </span>-- | The only cap-exceeded outcome from 'splitLinesBounded'.
+<span class="lineno">  130 </span>data SplitCap = OverCap
+<span class="lineno">  131 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | Like 'splitLines', but fails closed if the residual partial line would
+<span class="lineno">  134 </span>-- exceed @maxBuffer@ bytes (a no-LF flood). The cap is checked BEFORE the split
+<span class="lineno">  135 </span>-- so an over-cap chunk never transiently allocates the concatenation.
+<span class="lineno">  136 </span>splitLinesBounded :: Int -&gt; ByteString -&gt; Buffer -&gt; Either SplitCap ([CompleteLine], Buffer)
+<span class="lineno">  137 </span><span class="decl"><span class="istickedoff">splitLinesBounded maxBuffer chunk buf@(Buffer pending)</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="istickedoff">-- If there is no LF anywhere in chunk and pending&lt;&gt;chunk already exceeds the</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">-- cap, reject without building the full residual.</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="istickedoff">| not (0x0A `BS.elem` chunk)</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="istickedoff">, BS.length pending + BS.length chunk &gt; maxBuffer = Left OverCap</span>
+<span class="lineno">  142 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  143 </span><span class="spaces">      </span><span class="istickedoff">let (ls, resid@(Buffer r)) = splitLines chunk buf</span>
+<span class="lineno">  144 </span><span class="spaces">       </span><span class="istickedoff">in if <span class="tickonlyfalse">BS.length r &gt; maxBuffer</span> then <span class="nottickedoff">Left OverCap</span> else Right (ls, resid)</span></span>
+
+</pre>
+</body>
+</html>

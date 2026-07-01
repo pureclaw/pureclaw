@@ -1,0 +1,971 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Handles.Backend
+<span class="lineno">    3 </span>-- Description : Unified terminal backend type layer (WU1).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- == Choose-a-kind decision tree
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- Use this decision tree to pick a 'BackendKind':
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- * 'Pipe' — one-shot, non-conversational. Write stdin, close stdin,
+<span class="lineno">   10 </span>--   read stdout until EOF. Stderr is merged into stdout at the OS
+<span class="lineno">   11 </span>--   level. Use for: @hostname@, @nix build@, one-shot @ssh host hostname@,
+<span class="lineno">   12 </span>--   any program that does its work and exits.
+<span class="lineno">   13 </span>-- * 'Pty' — conversational, PTY-backed, idle-detected. The child sees a
+<span class="lineno">   14 </span>--   real terminal; stdout and stderr are merged (this is how every
+<span class="lineno">   15 </span>--   terminal works). Use for: local @bash@, @ghci@, remote @ssh -tt@
+<span class="lineno">   16 </span>--   shells, and @ssh -tt … tmux attach@ when attaching to a
+<span class="lineno">   17 </span>--   pre-existing tmux window.
+<span class="lineno">   18 </span>-- * @TmuxRpc@ (future) — non-PTY tmux RPC via @send-keys@ /
+<span class="lineno">   19 </span>--   @capture-pane@. Not yet implemented. Will be additive: a new
+<span class="lineno">   20 </span>--   'BackendKind' constructor and a new factory. The decision tree
+<span class="lineno">   21 </span>--   gains: \&quot;if you need to control a tmux window someone else owns
+<span class="lineno">   22 </span>--   without disturbing them, use TmuxRpc.\&quot;
+<span class="lineno">   23 </span>--
+<span class="lineno">   24 </span>-- The trade-off in one line: 'Pipe' is the safest one-shot, 'Pty' is
+<span class="lineno">   25 </span>-- the only conversational kind in v1, and @TmuxRpc@ (future) is the
+<span class="lineno">   26 </span>-- only non-intrusive controller.
+<span class="lineno">   27 </span>--
+<span class="lineno">   28 </span>-- == Field-naming convention
+<span class="lineno">   29 </span>--
+<span class="lineno">   30 </span>-- The handle record uses @_bh_*@; per-kind option records use prefixes
+<span class="lineno">   31 </span>-- that match the project's universal Handle convention
+<span class="lineno">   32 </span>-- (@_pto_*@ for 'PtyOpts', @_po_*@ for 'PipeOpts').
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- == Scope of WU1
+<span class="lineno">   35 </span>--
+<span class="lineno">   36 </span>-- This module currently lands the type layer only: types, smart
+<span class="lineno">   37 </span>-- constructors, tiered defaults, and helpers. No-op / in-memory
+<span class="lineno">   38 </span>-- backends, the PTY allocation seam, factory functions, drainer
+<span class="lineno">   39 </span>-- infrastructure, and the process-wide buffer quota live in later
+<span class="lineno">   40 </span>-- work units.
+<span class="lineno">   41 </span>module PureClaw.Handles.Backend
+<span class="lineno">   42 </span>  ( -- * Backend kind
+<span class="lineno">   43 </span>    BackendKind (..)
+<span class="lineno">   44 </span>    -- * Recv outcomes
+<span class="lineno">   45 </span>  , RecvResult (..)
+<span class="lineno">   46 </span>  , recvBytes
+<span class="lineno">   47 </span>  , RecvOutcome (..)
+<span class="lineno">   48 </span>  , recvOutcome
+<span class="lineno">   49 </span>    -- * Terminal geometry
+<span class="lineno">   50 </span>  , Cols (..)
+<span class="lineno">   51 </span>  , Rows (..)
+<span class="lineno">   52 </span>    -- * Idle policy
+<span class="lineno">   53 </span>  , IdleSpec
+<span class="lineno">   54 </span>  , mkIdleSpec
+<span class="lineno">   55 </span>  , idleQuietMs
+<span class="lineno">   56 </span>  , idleTimeoutMs
+<span class="lineno">   57 </span>  , idleMinFirstByte
+<span class="lineno">   58 </span>  , localIdle
+<span class="lineno">   59 </span>  , sshIdle
+<span class="lineno">   60 </span>  , tmuxIdle
+<span class="lineno">   61 </span>  , testIdleSpec
+<span class="lineno">   62 </span>    -- * Subprocess environment
+<span class="lineno">   63 </span>  , EnvValue (..)
+<span class="lineno">   64 </span>  , EnvMap
+<span class="lineno">   65 </span>  , forbiddenEnvVars
+<span class="lineno">   66 </span>  , mkEnvMap
+<span class="lineno">   67 </span>    -- * Credential redaction
+<span class="lineno">   68 </span>  , defaultCredentialRedactor
+<span class="lineno">   69 </span>    -- * Backend context vocabulary
+<span class="lineno">   70 </span>  , BackendContext (..)
+<span class="lineno">   71 </span>  , backendContextLabel
+<span class="lineno">   72 </span>    -- * Failure mode payloads
+<span class="lineno">   73 </span>  , SshConnectFailure (..)
+<span class="lineno">   74 </span>  , PtyAllocFailure (..)
+<span class="lineno">   75 </span>  , InvalidOptionDetail (..)
+<span class="lineno">   76 </span>  , TmuxTargetRef (..)
+<span class="lineno">   77 </span>    -- * Error types
+<span class="lineno">   78 </span>  , BackendError (..)
+<span class="lineno">   79 </span>  , PublicBackendError (..)
+<span class="lineno">   80 </span>  , toPublicError
+<span class="lineno">   81 </span>  , BackendException (..)
+<span class="lineno">   82 </span>  , toPublicException
+<span class="lineno">   83 </span>    -- * Per-kind option records
+<span class="lineno">   84 </span>  , PtyOpts (..)
+<span class="lineno">   85 </span>  , PipeOpts (..)
+<span class="lineno">   86 </span>  , defaultPipeOpts
+<span class="lineno">   87 </span>  , defaultPtyOpts
+<span class="lineno">   88 </span>    -- * Handle
+<span class="lineno">   89 </span>  , BackendHandle (..)
+<span class="lineno">   90 </span>    -- * Top-level helpers
+<span class="lineno">   91 </span>  , runBackend
+<span class="lineno">   92 </span>  , isConversational
+<span class="lineno">   93 </span>  , recv
+<span class="lineno">   94 </span>  , recvWith
+<span class="lineno">   95 </span>    -- * Bracket helpers
+<span class="lineno">   96 </span>  , withBackendHandle
+<span class="lineno">   97 </span>  , withBackendHandleE
+<span class="lineno">   98 </span>    -- * Concurrent-use guard
+<span class="lineno">   99 </span>  , withConcurrentUseGuard
+<span class="lineno">  100 </span>    -- * No-op + in-memory test backends
+<span class="lineno">  101 </span>  , mkNoOpBackendHandle
+<span class="lineno">  102 </span>  , InMemoryConfig (..)
+<span class="lineno">  103 </span>  , InMemoryState (..)
+<span class="lineno">  104 </span>  , newInMemoryState
+<span class="lineno">  105 </span>  , mkInMemoryBackendHandle
+<span class="lineno">  106 </span>    -- * Process-wide recv-buffer quota (WU7)
+<span class="lineno">  107 </span>  , BackendBufferQuota
+<span class="lineno">  108 </span>  , newBackendBufferQuota
+<span class="lineno">  109 </span>  , globalBackendBufferQuota
+<span class="lineno">  110 </span>  , acquireBufferQuota
+<span class="lineno">  111 </span>  , releaseBufferQuota
+<span class="lineno">  112 </span>  , bufferQuotaAvailableMiB
+<span class="lineno">  113 </span>  , setGlobalBackendBufferQuotaForTest
+<span class="lineno">  114 </span>  , defaultAggregateBufferCapMiB
+<span class="lineno">  115 </span>    -- * Re-exports
+<span class="lineno">  116 </span>  , CommandName (..)
+<span class="lineno">  117 </span>  , AutonomyLevel (..)
+<span class="lineno">  118 </span>  , FakeClock
+<span class="lineno">  119 </span>  ) where
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>import Control.Concurrent.MVar
+<span class="lineno">  122 </span>  ( MVar
+<span class="lineno">  123 </span>  , newMVar
+<span class="lineno">  124 </span>  , putMVar
+<span class="lineno">  125 </span>  , tryTakeMVar
+<span class="lineno">  126 </span>  )
+<span class="lineno">  127 </span>import Control.Exception
+<span class="lineno">  128 </span>  ( Exception
+<span class="lineno">  129 </span>  , SomeException
+<span class="lineno">  130 </span>  , bracket
+<span class="lineno">  131 </span>  , displayException
+<span class="lineno">  132 </span>  , finally
+<span class="lineno">  133 </span>  , throwIO
+<span class="lineno">  134 </span>  , toException
+<span class="lineno">  135 </span>  )
+<span class="lineno">  136 </span>import Data.ByteString (ByteString)
+<span class="lineno">  137 </span>import Data.ByteString qualified as BS
+<span class="lineno">  138 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+<span class="lineno">  139 </span>import Data.Map.Strict (Map)
+<span class="lineno">  140 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">  141 </span>import Data.Set (Set)
+<span class="lineno">  142 </span>import Data.Set qualified as Set
+<span class="lineno">  143 </span>import Data.Text (Text)
+<span class="lineno">  144 </span>import Data.Text qualified as T
+<span class="lineno">  145 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">  146 </span>import System.Environment (lookupEnv)
+<span class="lineno">  147 </span>import System.IO.Unsafe (unsafePerformIO)
+<span class="lineno">  148 </span>import Text.Read (readMaybe)
+<span class="lineno">  149 </span>
+<span class="lineno">  150 </span>import {-# SOURCE #-} PureClaw.Internal.Redact qualified as Redact
+<span class="lineno">  151 </span>import PureClaw.Core.Types (AutonomyLevel (..), CommandName (..))
+<span class="lineno">  152 </span>import PureClaw.Internal.FakeClock (FakeClock)
+<span class="lineno">  153 </span>
+<span class="lineno">  154 </span>-- | The mechanism a 'BackendHandle' uses to talk to its subprocess.
+<span class="lineno">  155 </span>--
+<span class="lineno">  156 </span>-- A future @TmuxRpc@ constructor will be added when non-PTY tmux RPC
+<span class="lineno">  157 </span>-- (send-keys / capture-pane) lands; pattern matches on 'BackendKind'
+<span class="lineno">  158 </span>-- in dependent code should remain exhaustive across the existing
+<span class="lineno">  159 </span>-- constructors and explicitly handle (or @-Wall@-fail-shut) any new
+<span class="lineno">  160 </span>-- one.
+<span class="lineno">  161 </span>data BackendKind
+<span class="lineno">  162 </span>  = Pipe
+<span class="lineno">  163 </span>    -- ^ One-shot, non-conversational: write stdin, close, read until EOF.
+<span class="lineno">  164 </span>  | Pty
+<span class="lineno">  165 </span>    -- ^ Conversational, PTY-backed, idle-detected.
+<span class="lineno">  166 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>-- | Result of a single recv call.
+<span class="lineno">  169 </span>--
+<span class="lineno">  170 </span>-- Idle-timeout and EOF are reported, not thrown, so callers can decide
+<span class="lineno">  171 </span>-- whether to retry, keep waiting, or move on. 'RecvTruncated' latches
+<span class="lineno">  172 </span>-- across recv calls until '_bh_close'.
+<span class="lineno">  173 </span>data RecvResult a
+<span class="lineno">  174 </span>  = RecvSettled !a
+<span class="lineno">  175 </span>    -- ^ Output settled within @idleQuietMs@.
+<span class="lineno">  176 </span>  | RecvTimedOut !a
+<span class="lineno">  177 </span>    -- ^ @idleTimeoutMs@ reached; bytes accumulated so far returned.
+<span class="lineno">  178 </span>  | RecvEof !a
+<span class="lineno">  179 </span>    -- ^ Subprocess / PTY closed; bytes accumulated so far returned.
+<span class="lineno">  180 </span>  | RecvTruncated !a
+<span class="lineno">  181 </span>    -- ^ Per-backend read-buffer cap reached; subsequent recvs continue
+<span class="lineno">  182 </span>    -- to return 'RecvTruncated' until close.
+<span class="lineno">  183 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Functor</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Foldable</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Traversable</span></span></span></span></span></span></span></span>)
+<span class="lineno">  184 </span>
+<span class="lineno">  185 </span>-- | Project a 'RecvResult' to the accumulated bytes regardless of outcome.
+<span class="lineno">  186 </span>recvBytes :: RecvResult a -&gt; a
+<span class="lineno">  187 </span><span class="decl"><span class="istickedoff">recvBytes r = case r of</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">RecvSettled   a -&gt; a</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">RecvTimedOut  a -&gt; a</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="istickedoff">RecvEof       a -&gt; a</span>
+<span class="lineno">  191 </span><span class="spaces">  </span><span class="istickedoff">RecvTruncated a -&gt; <span class="nottickedoff">a</span></span></span>
+<span class="lineno">  192 </span>
+<span class="lineno">  193 </span>-- | Pure projection of a 'RecvResult'\'s outcome flag.
+<span class="lineno">  194 </span>--
+<span class="lineno">  195 </span>-- Useful when callers only need to switch on the outcome without
+<span class="lineno">  196 </span>-- pattern-matching on the payload.
+<span class="lineno">  197 </span>data RecvOutcome
+<span class="lineno">  198 </span>  = Settled
+<span class="lineno">  199 </span>  | TimedOut
+<span class="lineno">  200 </span>  | Eof
+<span class="lineno">  201 </span>  | Truncated
+<span class="lineno">  202 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  203 </span>
+<span class="lineno">  204 </span>-- | Map a 'RecvResult' to its 'RecvOutcome'.
+<span class="lineno">  205 </span>recvOutcome :: RecvResult a -&gt; RecvOutcome
+<span class="lineno">  206 </span><span class="decl"><span class="istickedoff">recvOutcome r = case r of</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">RecvSettled   _ -&gt; <span class="nottickedoff">Settled</span></span>
+<span class="lineno">  208 </span><span class="spaces">  </span><span class="istickedoff">RecvTimedOut  _ -&gt; TimedOut</span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="istickedoff">RecvEof       _ -&gt; <span class="nottickedoff">Eof</span></span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="istickedoff">RecvTruncated _ -&gt; Truncated</span></span>
+<span class="lineno">  211 </span>
+<span class="lineno">  212 </span>-- | Terminal column count.
+<span class="lineno">  213 </span>newtype Cols = Cols Int
+<span class="lineno">  214 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  215 </span>
+<span class="lineno">  216 </span>-- | Terminal row count.
+<span class="lineno">  217 </span>newtype Rows = Rows Int
+<span class="lineno">  218 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  219 </span>
+<span class="lineno">  220 </span>-- | Construction-time policy for \&quot;when has output settled?\&quot;.
+<span class="lineno">  221 </span>--
+<span class="lineno">  222 </span>-- Constructor is intentionally NOT exported; obtain values via
+<span class="lineno">  223 </span>-- 'mkIdleSpec' or one of the tiered defaults
+<span class="lineno">  224 </span>-- ('localIdle' \/ 'sshIdle' \/ 'tmuxIdle' \/ 'testIdleSpec').
+<span class="lineno">  225 </span>--
+<span class="lineno">  226 </span>-- Invariants enforced by 'mkIdleSpec':
+<span class="lineno">  227 </span>--
+<span class="lineno">  228 </span>-- * Every field is non-negative.
+<span class="lineno">  229 </span>-- * @idleMinFirstByte &lt;= idleTimeoutMs@.
+<span class="lineno">  230 </span>data IdleSpec = IdleSpec
+<span class="lineno">  231 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_idle_quietMs</span></span></span>       :: !Int
+<span class="lineno">  232 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_idle_timeoutMs</span></span></span>     :: !Int
+<span class="lineno">  233 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_idle_minFirstByte</span></span></span>  :: !Int
+<span class="lineno">  234 </span>  }
+<span class="lineno">  235 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  236 </span>
+<span class="lineno">  237 </span>-- | Quiet-window in milliseconds, measured from the latest byte received.
+<span class="lineno">  238 </span>idleQuietMs :: IdleSpec -&gt; Int
+<span class="lineno">  239 </span><span class="decl"><span class="istickedoff">idleQuietMs = _idle_quietMs</span></span>
+<span class="lineno">  240 </span>
+<span class="lineno">  241 </span>-- | Hard ceiling in milliseconds on the total wait per recv.
+<span class="lineno">  242 </span>idleTimeoutMs :: IdleSpec -&gt; Int
+<span class="lineno">  243 </span><span class="decl"><span class="istickedoff">idleTimeoutMs = _idle_timeoutMs</span></span>
+<span class="lineno">  244 </span>
+<span class="lineno">  245 </span>-- | Minimum wait in milliseconds for the first byte before treating
+<span class="lineno">  246 </span>-- \&quot;no bytes\&quot; as settled.
+<span class="lineno">  247 </span>idleMinFirstByte :: IdleSpec -&gt; Int
+<span class="lineno">  248 </span><span class="decl"><span class="istickedoff">idleMinFirstByte = _idle_minFirstByte</span></span>
+<span class="lineno">  249 </span>
+<span class="lineno">  250 </span>-- | The only way to construct an 'IdleSpec'.
+<span class="lineno">  251 </span>--
+<span class="lineno">  252 </span>-- Arguments are @idleQuietMs@, @idleTimeoutMs@, @idleMinFirstByte@ in
+<span class="lineno">  253 </span>-- that order. Returns @Left 'BackendInvalidOption'@ if any argument is
+<span class="lineno">  254 </span>-- negative or if @idleMinFirstByte &gt; idleTimeoutMs@.
+<span class="lineno">  255 </span>mkIdleSpec :: Int -&gt; Int -&gt; Int -&gt; Either BackendError IdleSpec
+<span class="lineno">  256 </span><span class="decl"><span class="istickedoff">mkIdleSpec quietMs timeoutMs minFirstByte</span>
+<span class="lineno">  257 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">quietMs &lt; 0</span> =</span>
+<span class="lineno">  258 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">Left (BackendInvalidOption</span></span>
+<span class="lineno">  259 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(InvalidOptionDetail &quot;IdleSpec: idleQuietMs must be non-negative&quot;))</span></span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">timeoutMs &lt; 0</span> =</span>
+<span class="lineno">  261 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">Left (BackendInvalidOption</span></span>
+<span class="lineno">  262 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(InvalidOptionDetail &quot;IdleSpec: idleTimeoutMs must be non-negative&quot;))</span></span>
+<span class="lineno">  263 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">minFirstByte &lt; 0</span> =</span>
+<span class="lineno">  264 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">Left (BackendInvalidOption</span></span>
+<span class="lineno">  265 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(InvalidOptionDetail &quot;IdleSpec: idleMinFirstByte must be non-negative&quot;))</span></span>
+<span class="lineno">  266 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">minFirstByte &gt; timeoutMs</span> =</span>
+<span class="lineno">  267 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">Left (BackendInvalidOption</span></span>
+<span class="lineno">  268 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(InvalidOptionDetail</span></span>
+<span class="lineno">  269 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;IdleSpec: idleMinFirstByte must be &lt;= idleTimeoutMs&quot;))</span></span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  271 </span><span class="spaces">      </span><span class="istickedoff">Right IdleSpec</span>
+<span class="lineno">  272 </span><span class="spaces">        </span><span class="istickedoff">{ _idle_quietMs      = quietMs</span>
+<span class="lineno">  273 </span><span class="spaces">        </span><span class="istickedoff">, _idle_timeoutMs    = timeoutMs</span>
+<span class="lineno">  274 </span><span class="spaces">        </span><span class="istickedoff">, _idle_minFirstByte = minFirstByte</span>
+<span class="lineno">  275 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  276 </span>
+<span class="lineno">  277 </span>-- | Helper for building compile-time 'IdleSpec' constants. The argument
+<span class="lineno">  278 </span>-- triples are statically known and validated, so a 'mkIdleSpec' failure
+<span class="lineno">  279 </span>-- is a programming error in this module itself, not a runtime
+<span class="lineno">  280 </span>-- condition that callers can recover from.
+<span class="lineno">  281 </span>unsafeMkIdleSpec :: String -&gt; Int -&gt; Int -&gt; Int -&gt; IdleSpec
+<span class="lineno">  282 </span><span class="decl"><span class="istickedoff">unsafeMkIdleSpec label quietMs timeoutMs minFirstByte =</span>
+<span class="lineno">  283 </span><span class="spaces">  </span><span class="istickedoff">case mkIdleSpec quietMs timeoutMs minFirstByte of</span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff">Right s -&gt; s</span>
+<span class="lineno">  285 </span><span class="spaces">    </span><span class="istickedoff">Left _  -&gt; <span class="nottickedoff">error (&quot;unsafeMkIdleSpec: invalid &quot; ++ label)</span></span></span>
+<span class="lineno">  286 </span>
+<span class="lineno">  287 </span>-- | Local-process idle defaults: quiet 150ms, total 15s, no minimum first byte.
+<span class="lineno">  288 </span>localIdle :: IdleSpec
+<span class="lineno">  289 </span><span class="decl"><span class="istickedoff">localIdle = unsafeMkIdleSpec <span class="nottickedoff">&quot;localIdle&quot;</span> 150 15_000 0</span></span>
+<span class="lineno">  290 </span>
+<span class="lineno">  291 </span>-- | SSH idle defaults: quiet 750ms, total 60s, 500ms minimum first byte.
+<span class="lineno">  292 </span>sshIdle :: IdleSpec
+<span class="lineno">  293 </span><span class="decl"><span class="istickedoff">sshIdle = unsafeMkIdleSpec <span class="nottickedoff">&quot;sshIdle&quot;</span> 750 60_000 500</span></span>
+<span class="lineno">  294 </span>
+<span class="lineno">  295 </span>-- | Tmux idle defaults: quiet 500ms, total 30s, 200ms minimum first byte.
+<span class="lineno">  296 </span>tmuxIdle :: IdleSpec
+<span class="lineno">  297 </span><span class="decl"><span class="istickedoff">tmuxIdle = unsafeMkIdleSpec <span class="nottickedoff">&quot;tmuxIdle&quot;</span> 500 30_000 200</span></span>
+<span class="lineno">  298 </span>
+<span class="lineno">  299 </span>-- | Test idle defaults: quiet 5ms, total 50ms, no minimum first byte.
+<span class="lineno">  300 </span>testIdleSpec :: IdleSpec
+<span class="lineno">  301 </span><span class="decl"><span class="istickedoff">testIdleSpec = unsafeMkIdleSpec <span class="nottickedoff">&quot;testIdleSpec&quot;</span> 5 50 0</span></span>
+<span class="lineno">  302 </span>
+<span class="lineno">  303 </span>-- | A single environment variable value.
+<span class="lineno">  304 </span>--
+<span class="lineno">  305 </span>-- The hand-written 'Show' instance renders @EnvValue \&lt;redacted\&gt;@ so
+<span class="lineno">  306 </span>-- accidental 'show'ing of an 'EnvMap' (e.g. via 'BackendError' or
+<span class="lineno">  307 </span>-- structured logging) cannot leak secrets.
+<span class="lineno">  308 </span>newtype EnvValue = EnvValue ByteString
+<span class="lineno">  309 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  310 </span>
+<span class="lineno">  311 </span>-- Hand-written: deliberately does NOT show the underlying bytes.
+<span class="lineno">  312 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show EnvValue</span></span></span></span> where
+<span class="lineno">  313 </span>  <span class="decl"><span class="nottickedoff">show _ = &quot;EnvValue &lt;redacted&gt;&quot;</span></span>
+<span class="lineno">  314 </span>
+<span class="lineno">  315 </span>-- | A complete subprocess environment.
+<span class="lineno">  316 </span>--
+<span class="lineno">  317 </span>-- This map is the entire environment the child will see; PureClaw does
+<span class="lineno">  318 </span>-- not inherit from the agent's process environment.
+<span class="lineno">  319 </span>type EnvMap = Map String EnvValue
+<span class="lineno">  320 </span>
+<span class="lineno">  321 </span>-- | Environment variable names that must never appear in a caller-supplied
+<span class="lineno">  322 </span>-- 'EnvMap'.
+<span class="lineno">  323 </span>--
+<span class="lineno">  324 </span>-- Includes loader-hijack hooks ('LD_PRELOAD' \/ 'DYLD_INSERT_LIBRARIES' \/
+<span class="lineno">  325 </span>-- the @LIBRARY_PATH@ family), ssh-agent\/askpass channels, shell init
+<span class="lineno">  326 </span>-- hooks ('BASH_ENV', 'ENV', 'PROMPT_COMMAND', 'PS4'), and Git\'s
+<span class="lineno">  327 </span>-- @GIT_SSH_COMMAND@ \/ @GIT_SSH@ overrides.
+<span class="lineno">  328 </span>forbiddenEnvVars :: Set String
+<span class="lineno">  329 </span><span class="decl"><span class="nottickedoff">forbiddenEnvVars = Set.fromList</span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="nottickedoff">[ &quot;LD_PRELOAD&quot;</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;DYLD_INSERT_LIBRARIES&quot;</span>
+<span class="lineno">  332 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;LD_LIBRARY_PATH&quot;</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;DYLD_LIBRARY_PATH&quot;</span>
+<span class="lineno">  334 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;DYLD_FALLBACK_LIBRARY_PATH&quot;</span>
+<span class="lineno">  335 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;SSH_AUTH_SOCK&quot;</span>
+<span class="lineno">  336 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;SSH_ASKPASS&quot;</span>
+<span class="lineno">  337 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;SSH_ASKPASS_REQUIRE&quot;</span>
+<span class="lineno">  338 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;SSH_AGENT_PID&quot;</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;BASH_ENV&quot;</span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;ENV&quot;</span>
+<span class="lineno">  341 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;GIT_SSH_COMMAND&quot;</span>
+<span class="lineno">  342 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;GIT_SSH&quot;</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;PROMPT_COMMAND&quot;</span>
+<span class="lineno">  344 </span><span class="spaces">  </span><span class="nottickedoff">, &quot;PS4&quot;</span>
+<span class="lineno">  345 </span><span class="spaces">  </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  346 </span>
+<span class="lineno">  347 </span>-- | Build an 'EnvMap' from a key/value list.
+<span class="lineno">  348 </span>--
+<span class="lineno">  349 </span>-- Rejects any key listed in 'forbiddenEnvVars' with a
+<span class="lineno">  350 </span>-- 'BackendInvalidOption' carrying the offending name.
+<span class="lineno">  351 </span>mkEnvMap :: [(String, String)] -&gt; Either BackendError EnvMap
+<span class="lineno">  352 </span><span class="decl"><span class="nottickedoff">mkEnvMap = go Map.empty</span>
+<span class="lineno">  353 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  354 </span><span class="spaces">    </span><span class="nottickedoff">go acc [] = Right acc</span>
+<span class="lineno">  355 </span><span class="spaces">    </span><span class="nottickedoff">go acc ((k, v) : rest)</span>
+<span class="lineno">  356 </span><span class="spaces">      </span><span class="nottickedoff">| Set.member k forbiddenEnvVars =</span>
+<span class="lineno">  357 </span><span class="spaces">          </span><span class="nottickedoff">Left (BackendInvalidOption</span>
+<span class="lineno">  358 </span><span class="spaces">                  </span><span class="nottickedoff">(InvalidOptionDetail</span>
+<span class="lineno">  359 </span><span class="spaces">                    </span><span class="nottickedoff">(T.pack (&quot;EnvMap: forbidden var '&quot; ++ k ++ &quot;'&quot;))))</span>
+<span class="lineno">  360 </span><span class="spaces">      </span><span class="nottickedoff">| otherwise =</span>
+<span class="lineno">  361 </span><span class="spaces">          </span><span class="nottickedoff">go (Map.insert k (EnvValue (encodeUtf8Latin1 v)) acc) rest</span>
+<span class="lineno">  362 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  363 </span><span class="spaces">    </span><span class="nottickedoff">-- Latin-1 round-trip ByteString-encode for environment values without</span>
+<span class="lineno">  364 </span><span class="spaces">    </span><span class="nottickedoff">-- pulling in 'text' \&lt;-\&gt; 'bytestring' overhead. Environment values are</span>
+<span class="lineno">  365 </span><span class="spaces">    </span><span class="nottickedoff">-- typically ASCII; non-ASCII bytes are preserved 1:1 because the</span>
+<span class="lineno">  366 </span><span class="spaces">    </span><span class="nottickedoff">-- subprocess sees raw bytes.</span>
+<span class="lineno">  367 </span><span class="spaces">    </span><span class="nottickedoff">encodeUtf8Latin1 :: String -&gt; ByteString</span>
+<span class="lineno">  368 </span><span class="spaces">    </span><span class="nottickedoff">encodeUtf8Latin1 s = TE.encodeUtf8 (T.pack s)</span></span>
+<span class="lineno">  369 </span>
+<span class="lineno">  370 </span>-- | Default 'PtyOpts._pto_redactor'.
+<span class="lineno">  371 </span>--
+<span class="lineno">  372 </span>-- Scrubs the known credential prompts @password:@, @passphrase:@,
+<span class="lineno">  373 </span>-- @Sorry, try again@, and @[sudo] password for@ from recv chunks
+<span class="lineno">  374 </span>-- before the caller sees them. The actual scan is implemented in
+<span class="lineno">  375 </span>-- 'PureClaw.Internal.Redact.credentialPromptScrubber'; this is the
+<span class="lineno">  376 </span>-- public name that 'PtyOpts._pto_redactor' defaults to.
+<span class="lineno">  377 </span>--
+<span class="lineno">  378 </span>-- Per-chunk only: the 64-byte overlap-window carry-forward across
+<span class="lineno">  379 </span>-- chunk boundaries lives inside the drainer (WU7).
+<span class="lineno">  380 </span>defaultCredentialRedactor :: ByteString -&gt; ByteString
+<span class="lineno">  381 </span><span class="decl"><span class="nottickedoff">defaultCredentialRedactor = Redact.credentialPromptScrubber</span></span>
+<span class="lineno">  382 </span>
+<span class="lineno">  383 </span>-- | Fixed-vocabulary context tag attached to a 'BackendException'.
+<span class="lineno">  384 </span>--
+<span class="lineno">  385 </span>-- Adding a new context MUST happen here; throw sites are not allowed
+<span class="lineno">  386 </span>-- to freelance free 'Text'. This keeps the universe of contexts small
+<span class="lineno">  387 </span>-- enough to grep for and to redact safely.
+<span class="lineno">  388 </span>data BackendContext
+<span class="lineno">  389 </span>  = BcSend
+<span class="lineno">  390 </span>  | BcRecv
+<span class="lineno">  391 </span>  | BcClose
+<span class="lineno">  392 </span>  | BcSshWrite
+<span class="lineno">  393 </span>  | BcSshDisconnect
+<span class="lineno">  394 </span>  | BcPtyEof
+<span class="lineno">  395 </span>  | BcConcurrentUse
+<span class="lineno">  396 </span>  | BcTmuxDetach
+<span class="lineno">  397 </span>  | BcBufferOverflow
+<span class="lineno">  398 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  399 </span>
+<span class="lineno">  400 </span>-- | Render a 'BackendContext' as the short label that appears in
+<span class="lineno">  401 </span>-- structured logs and the redacted 'Show' for 'BackendException'.
+<span class="lineno">  402 </span>backendContextLabel :: BackendContext -&gt; Text
+<span class="lineno">  403 </span><span class="decl"><span class="nottickedoff">backendContextLabel ctx = case ctx of</span>
+<span class="lineno">  404 </span><span class="spaces">  </span><span class="nottickedoff">BcSend           -&gt; &quot;send&quot;</span>
+<span class="lineno">  405 </span><span class="spaces">  </span><span class="nottickedoff">BcRecv           -&gt; &quot;recv&quot;</span>
+<span class="lineno">  406 </span><span class="spaces">  </span><span class="nottickedoff">BcClose          -&gt; &quot;close&quot;</span>
+<span class="lineno">  407 </span><span class="spaces">  </span><span class="nottickedoff">BcSshWrite       -&gt; &quot;ssh-write&quot;</span>
+<span class="lineno">  408 </span><span class="spaces">  </span><span class="nottickedoff">BcSshDisconnect  -&gt; &quot;ssh-disconnect&quot;</span>
+<span class="lineno">  409 </span><span class="spaces">  </span><span class="nottickedoff">BcPtyEof         -&gt; &quot;pty-eof&quot;</span>
+<span class="lineno">  410 </span><span class="spaces">  </span><span class="nottickedoff">BcConcurrentUse  -&gt; &quot;concurrent-use&quot;</span>
+<span class="lineno">  411 </span><span class="spaces">  </span><span class="nottickedoff">BcTmuxDetach     -&gt; &quot;tmux-detach&quot;</span>
+<span class="lineno">  412 </span><span class="spaces">  </span><span class="nottickedoff">BcBufferOverflow -&gt; &quot;buffer-overflow&quot;</span></span>
+<span class="lineno">  413 </span>
+<span class="lineno">  414 </span>-- | Structured SSH connect-time failure modes.
+<span class="lineno">  415 </span>--
+<span class="lineno">  416 </span>-- No constructor carries free 'Text' \/ raw stderr — that would defeat
+<span class="lineno">  417 </span>-- the redaction guarantee on 'BackendError'\'s 'Show'.
+<span class="lineno">  418 </span>data SshConnectFailure
+<span class="lineno">  419 </span>  = SshNetUnreachable
+<span class="lineno">  420 </span>  | SshAuthRefused
+<span class="lineno">  421 </span>  | SshHostKeyMismatch
+<span class="lineno">  422 </span>  | SshConnectTimeout
+<span class="lineno">  423 </span>  | SshOtherFailure
+<span class="lineno">  424 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  425 </span>
+<span class="lineno">  426 </span>-- | Structured PTY-allocation failure modes.
+<span class="lineno">  427 </span>data PtyAllocFailure
+<span class="lineno">  428 </span>  = PtyOpenFailed
+<span class="lineno">  429 </span>  | PtyForkFailed
+<span class="lineno">  430 </span>  | PtyExecFailed
+<span class="lineno">  431 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  432 </span>
+<span class="lineno">  433 </span>-- | The short, redaction-safe message attached to a
+<span class="lineno">  434 </span>-- 'BackendInvalidOption'.
+<span class="lineno">  435 </span>--
+<span class="lineno">  436 </span>-- The constructor is exported so callers (and tests) can pattern-match
+<span class="lineno">  437 </span>-- on the message; the contents are short, fixed-vocabulary strings —
+<span class="lineno">  438 </span>-- never free user input or raw stderr.
+<span class="lineno">  439 </span>newtype InvalidOptionDetail = InvalidOptionDetail Text
+<span class="lineno">  440 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  441 </span>
+<span class="lineno">  442 </span>-- | Redaction-safe reference to a tmux target.
+<span class="lineno">  443 </span>--
+<span class="lineno">  444 </span>-- WU1 ships the simpler @Text@-only form; the smart-constructor
+<span class="lineno">  445 </span>-- newtypes 'TmuxSession' \/ 'TmuxWindow' \/ 'TmuxPane' (with rejection
+<span class="lineno">  446 </span>-- of leading @-@, whitespace, and shell metacharacters) land in WU10
+<span class="lineno">  447 </span>-- — at which point this becomes the redaction-safe carrier for those
+<span class="lineno">  448 </span>-- typed values inside 'BackendError'.
+<span class="lineno">  449 </span>data TmuxTargetRef = TmuxTargetRef !Text !Text !(Maybe Text)
+<span class="lineno">  450 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  451 </span>
+<span class="lineno">  452 </span>-- | Construction-time backend errors.
+<span class="lineno">  453 </span>--
+<span class="lineno">  454 </span>-- Every constructor's payload is itself a redaction-safe ADT — no
+<span class="lineno">  455 </span>-- field carries a free 'Text', a raw 'SomeException' message, or a
+<span class="lineno">  456 </span>-- raw filesystem path. The hand-written 'Show' just calls 'show' on
+<span class="lineno">  457 </span>-- the inner payload, so adding a new constructor cannot accidentally
+<span class="lineno">  458 </span>-- regress the redaction guarantee.
+<span class="lineno">  459 </span>data BackendError
+<span class="lineno">  460 </span>  = BackendBinaryNotFound !CommandName
+<span class="lineno">  461 </span>  | BackendPtyAllocFailed !PtyAllocFailure
+<span class="lineno">  462 </span>  | BackendSshConnectFailed !SshConnectFailure
+<span class="lineno">  463 </span>  | BackendTmuxTargetMissing !TmuxTargetRef
+<span class="lineno">  464 </span>  | BackendInvalidOption !InvalidOptionDetail
+<span class="lineno">  465 </span>  | BackendBufferQuotaExceeded !Int
+<span class="lineno">  466 </span>    -- ^ The 'Int' is the requested per-backend cap, in MiB.
+<span class="lineno">  467 </span>  | BackendBrokenTmuxTarget !TmuxTargetRef
+<span class="lineno">  468 </span>    -- ^ The pinned @\@window_id@ no longer matches a live tmux window.
+<span class="lineno">  469 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  470 </span>
+<span class="lineno">  471 </span>-- Hand-written: routes through 'PureClaw.Internal.Redact.redactedShowString'
+<span class="lineno">  472 </span>-- so the rendered output is always redaction-safe — no raw hostnames,
+<span class="lineno">  473 </span>-- IPv4 addresses, paths, or ssh stderr fragments.
+<span class="lineno">  474 </span>--
+<span class="lineno">  475 </span>-- The constructor-by-constructor case is here (not in @Redact@) to
+<span class="lineno">  476 </span>-- keep @Redact@ outside @Handles.Backend@\'s import cycle: each branch
+<span class="lineno">  477 </span>-- renders a fixed prefix plus 'show' on a leaf ADT, then the whole
+<span class="lineno">  478 </span>-- string is passed through the same pipeline 'redactErr' uses.
+<span class="lineno">  479 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show BackendError</span></span></span></span> where
+<span class="lineno">  480 </span>  <span class="decl"><span class="istickedoff">show e = T.unpack (Redact.redactedShowString (renderBackendError e))</span></span>
+<span class="lineno">  481 </span>
+<span class="lineno">  482 </span>renderBackendError :: BackendError -&gt; String
+<span class="lineno">  483 </span><span class="decl"><span class="istickedoff">renderBackendError e = case e of</span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="istickedoff">BackendBinaryNotFound c -&gt;</span>
+<span class="lineno">  485 </span><span class="spaces">    </span><span class="istickedoff">&quot;BackendBinaryNotFound &quot; &lt;&gt; show c</span>
+<span class="lineno">  486 </span><span class="spaces">  </span><span class="istickedoff">BackendPtyAllocFailed f -&gt;</span>
+<span class="lineno">  487 </span><span class="spaces">    </span><span class="istickedoff">&quot;BackendPtyAllocFailed &quot; &lt;&gt; show f</span>
+<span class="lineno">  488 </span><span class="spaces">  </span><span class="istickedoff">BackendSshConnectFailed f -&gt;</span>
+<span class="lineno">  489 </span><span class="spaces">    </span><span class="istickedoff">&quot;BackendSshConnectFailed &quot; &lt;&gt; show f</span>
+<span class="lineno">  490 </span><span class="spaces">  </span><span class="istickedoff">BackendTmuxTargetMissing t -&gt;</span>
+<span class="lineno">  491 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">&quot;BackendTmuxTargetMissing &quot; &lt;&gt; show t</span></span>
+<span class="lineno">  492 </span><span class="spaces">  </span><span class="istickedoff">BackendInvalidOption d -&gt;</span>
+<span class="lineno">  493 </span><span class="spaces">    </span><span class="istickedoff">&quot;BackendInvalidOption &quot; &lt;&gt; show d</span>
+<span class="lineno">  494 </span><span class="spaces">  </span><span class="istickedoff">BackendBufferQuotaExceeded n -&gt;</span>
+<span class="lineno">  495 </span><span class="spaces">    </span><span class="istickedoff">&quot;BackendBufferQuotaExceeded &quot; &lt;&gt; show n</span>
+<span class="lineno">  496 </span><span class="spaces">  </span><span class="istickedoff">BackendBrokenTmuxTarget t -&gt;</span>
+<span class="lineno">  497 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">&quot;BackendBrokenTmuxTarget &quot; &lt;&gt; show t</span></span></span>
+<span class="lineno">  498 </span>
+<span class="lineno">  499 </span>-- | User-visible (channel-safe) projection of a 'BackendError'.
+<span class="lineno">  500 </span>--
+<span class="lineno">  501 </span>-- The wrapped 'Text' is short, fixed-vocabulary, and contains no
+<span class="lineno">  502 </span>-- hostnames, paths, or secrets.
+<span class="lineno">  503 </span>newtype PublicBackendError = PublicBackendError Text
+<span class="lineno">  504 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  505 </span>
+<span class="lineno">  506 </span>-- | Project a 'BackendError' to its user-visible form.
+<span class="lineno">  507 </span>toPublicError :: BackendError -&gt; PublicBackendError
+<span class="lineno">  508 </span><span class="decl"><span class="nottickedoff">toPublicError e = PublicBackendError $ case e of</span>
+<span class="lineno">  509 </span><span class="spaces">  </span><span class="nottickedoff">BackendBinaryNotFound _ -&gt;</span>
+<span class="lineno">  510 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: required program not available&quot;</span>
+<span class="lineno">  511 </span><span class="spaces">  </span><span class="nottickedoff">BackendPtyAllocFailed _ -&gt;</span>
+<span class="lineno">  512 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: failed to allocate a pseudo-terminal&quot;</span>
+<span class="lineno">  513 </span><span class="spaces">  </span><span class="nottickedoff">BackendSshConnectFailed _ -&gt;</span>
+<span class="lineno">  514 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: ssh connection failed&quot;</span>
+<span class="lineno">  515 </span><span class="spaces">  </span><span class="nottickedoff">BackendTmuxTargetMissing _ -&gt;</span>
+<span class="lineno">  516 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: tmux target window not found&quot;</span>
+<span class="lineno">  517 </span><span class="spaces">  </span><span class="nottickedoff">BackendInvalidOption _ -&gt;</span>
+<span class="lineno">  518 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: invalid construction option&quot;</span>
+<span class="lineno">  519 </span><span class="spaces">  </span><span class="nottickedoff">BackendBufferQuotaExceeded _ -&gt;</span>
+<span class="lineno">  520 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: aggregate recv-buffer quota exceeded&quot;</span>
+<span class="lineno">  521 </span><span class="spaces">  </span><span class="nottickedoff">BackendBrokenTmuxTarget _ -&gt;</span>
+<span class="lineno">  522 </span><span class="spaces">    </span><span class="nottickedoff">&quot;backend: tmux target no longer present (window destroyed mid-session)&quot;</span></span>
+<span class="lineno">  523 </span>
+<span class="lineno">  524 </span>-- | Runtime exception raised from inside '_bh_send' \/ '_bh_recv' \/
+<span class="lineno">  525 </span>-- '_bh_close' when something below the abstraction goes wrong (broken
+<span class="lineno">  526 </span>-- pipe, ssh transport drop, kernel error during PTY I\/O, etc.).
+<span class="lineno">  527 </span>--
+<span class="lineno">  528 </span>-- The hand-written 'Show' deliberately does NOT include the inner
+<span class="lineno">  529 </span>-- 'SomeException'\'s message: that message may carry raw hostnames or
+<span class="lineno">  530 </span>-- file paths from a child program. The real redaction-routing
+<span class="lineno">  531 </span>-- replaces this stub in WU2.
+<span class="lineno">  532 </span>data BackendException = BackendException
+<span class="lineno">  533 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_be_context</span></span></span> :: !BackendContext
+<span class="lineno">  534 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_be_cause</span></span></span>   :: !SomeException
+<span class="lineno">  535 </span>  }
+<span class="lineno">  536 </span>
+<span class="lineno">  537 </span>-- Hand-written: routes through 'PureClaw.Internal.Redact.redactedShowString'.
+<span class="lineno">  538 </span>-- The wrapped 'SomeException'\'s message is rendered first via
+<span class="lineno">  539 </span>-- 'displayException' and then fed through the redaction pipeline.
+<span class="lineno">  540 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show BackendException</span></span></span></span> where
+<span class="lineno">  541 </span>  <span class="decl"><span class="istickedoff">show be =</span>
+<span class="lineno">  542 </span><span class="spaces">    </span><span class="istickedoff">T.unpack</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">(Redact.redactedShowString</span>
+<span class="lineno">  544 </span><span class="spaces">        </span><span class="istickedoff">( &quot;BackendException { _be_context = &quot;</span>
+<span class="lineno">  545 </span><span class="spaces">            </span><span class="istickedoff">&lt;&gt; show (_be_context be)</span>
+<span class="lineno">  546 </span><span class="spaces">            </span><span class="istickedoff">&lt;&gt; &quot;, _be_cause = &quot;</span>
+<span class="lineno">  547 </span><span class="spaces">            </span><span class="istickedoff">&lt;&gt; displayException (_be_cause be)</span>
+<span class="lineno">  548 </span><span class="spaces">            </span><span class="istickedoff">&lt;&gt; &quot; }&quot;</span>
+<span class="lineno">  549 </span><span class="spaces">        </span><span class="istickedoff">))</span></span>
+<span class="lineno">  550 </span>
+<span class="lineno">  551 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff">Exception BackendException</span></span></span></span></span></span></span></span>
+<span class="lineno">  552 </span>
+<span class="lineno">  553 </span>-- | Project a 'BackendException' to its user-visible form.
+<span class="lineno">  554 </span>toPublicException :: BackendException -&gt; PublicBackendError
+<span class="lineno">  555 </span><span class="decl"><span class="nottickedoff">toPublicException be =</span>
+<span class="lineno">  556 </span><span class="spaces">  </span><span class="nottickedoff">PublicBackendError</span>
+<span class="lineno">  557 </span><span class="spaces">    </span><span class="nottickedoff">(&quot;backend exception during &quot;</span>
+<span class="lineno">  558 </span><span class="spaces">       </span><span class="nottickedoff">&lt;&gt; backendContextLabel (_be_context be))</span></span>
+<span class="lineno">  559 </span>
+<span class="lineno">  560 </span>-- | PTY-backend construction options.
+<span class="lineno">  561 </span>--
+<span class="lineno">  562 </span>-- '_pto_io' (the injectable PTY allocation seam) and the wiring to
+<span class="lineno">  563 </span>-- 'defaultCredentialRedactor' land in 'PureClaw.Backend.Pty' (WU7);
+<span class="lineno">  564 </span>-- putting the @PtyIO@ field here would create a circular import.
+<span class="lineno">  565 </span>-- TODO: WU7 wire PtyIO seam.
+<span class="lineno">  566 </span>data PtyOpts = PtyOpts
+<span class="lineno">  567 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pto_cols</span></span></span>          :: !Cols
+<span class="lineno">  568 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pto_rows</span></span></span>          :: !Rows
+<span class="lineno">  569 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pto_env</span></span></span>           :: !EnvMap
+<span class="lineno">  570 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pto_cwd</span></span></span>           :: !(Maybe FilePath)
+<span class="lineno">  571 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pto_idle</span></span></span>          :: !IdleSpec
+<span class="lineno">  572 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pto_recvBufferCap</span></span></span> :: !Int
+<span class="lineno">  573 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pto_redactor</span></span></span>      :: ByteString -&gt; ByteString
+<span class="lineno">  574 </span>  }
+<span class="lineno">  575 </span>
+<span class="lineno">  576 </span>-- | Pipe-backend construction options.
+<span class="lineno">  577 </span>data PipeOpts = PipeOpts
+<span class="lineno">  578 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_po_stdinBytes</span></span></span>    :: !ByteString
+<span class="lineno">  579 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_po_env</span></span></span>           :: !EnvMap
+<span class="lineno">  580 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_po_cwd</span></span></span>           :: !(Maybe FilePath)
+<span class="lineno">  581 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_po_recvBufferCap</span></span></span> :: !Int
+<span class="lineno">  582 </span>  }
+<span class="lineno">  583 </span>
+<span class="lineno">  584 </span>-- | Default 'PipeOpts': empty stdin, empty env, no cwd, 4 MiB recv cap.
+<span class="lineno">  585 </span>defaultPipeOpts :: PipeOpts
+<span class="lineno">  586 </span><span class="decl"><span class="istickedoff">defaultPipeOpts = PipeOpts</span>
+<span class="lineno">  587 </span><span class="spaces">  </span><span class="istickedoff">{ _po_stdinBytes    = mempty</span>
+<span class="lineno">  588 </span><span class="spaces">  </span><span class="istickedoff">, _po_env           = Map.empty</span>
+<span class="lineno">  589 </span><span class="spaces">  </span><span class="istickedoff">, _po_cwd           = Nothing</span>
+<span class="lineno">  590 </span><span class="spaces">  </span><span class="istickedoff">, _po_recvBufferCap = 4 * 1024 * 1024</span>
+<span class="lineno">  591 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  592 </span>
+<span class="lineno">  593 </span>-- | Default 'PtyOpts': 200x50 geometry, empty env, no cwd, 'localIdle',
+<span class="lineno">  594 </span>-- 4 MiB recv cap, 'defaultCredentialRedactor'.
+<span class="lineno">  595 </span>--
+<span class="lineno">  596 </span>-- Opt-out for the credential scrubber is explicit: set
+<span class="lineno">  597 </span>-- @_pto_redactor = id@ on the constructed record.
+<span class="lineno">  598 </span>defaultPtyOpts :: PtyOpts
+<span class="lineno">  599 </span><span class="decl"><span class="istickedoff">defaultPtyOpts = PtyOpts</span>
+<span class="lineno">  600 </span><span class="spaces">  </span><span class="istickedoff">{ _pto_cols          = Cols 200</span>
+<span class="lineno">  601 </span><span class="spaces">  </span><span class="istickedoff">, _pto_rows          = Rows 50</span>
+<span class="lineno">  602 </span><span class="spaces">  </span><span class="istickedoff">, _pto_env           = Map.empty</span>
+<span class="lineno">  603 </span><span class="spaces">  </span><span class="istickedoff">, _pto_cwd           = Nothing</span>
+<span class="lineno">  604 </span><span class="spaces">  </span><span class="istickedoff">, _pto_idle          = localIdle</span>
+<span class="lineno">  605 </span><span class="spaces">  </span><span class="istickedoff">, _pto_recvBufferCap = 4 * 1024 * 1024</span>
+<span class="lineno">  606 </span><span class="spaces">  </span><span class="istickedoff">, _pto_redactor      = <span class="nottickedoff">defaultCredentialRedactor</span></span>
+<span class="lineno">  607 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  608 </span>
+<span class="lineno">  609 </span>-- | Subprocess I\/O capability: a record of IO actions tagged with its
+<span class="lineno">  610 </span>-- 'BackendKind'.
+<span class="lineno">  611 </span>--
+<span class="lineno">  612 </span>-- Concurrency contract (documented in the design doc): '_bh_send' and
+<span class="lineno">  613 </span>-- '_bh_recv' MUST NOT be called concurrently from multiple caller
+<span class="lineno">  614 </span>-- threads against the same handle. Callers needing shared access wrap
+<span class="lineno">  615 </span>-- in an 'Control.Concurrent.MVar.MVar BackendHandle'.
+<span class="lineno">  616 </span>--
+<span class="lineno">  617 </span>-- '_bh_close' is idempotent and never throws on any backend kind.
+<span class="lineno">  618 </span>data BackendHandle = BackendHandle
+<span class="lineno">  619 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_bh_name</span></span></span>        :: !Text
+<span class="lineno">  620 </span>    -- ^ Human-readable, for logs; not an identity.
+<span class="lineno">  621 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_bh_kind</span></span></span>        :: !BackendKind
+<span class="lineno">  622 </span>    -- ^ Kind tag for introspection.
+<span class="lineno">  623 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_bh_defaultIdle</span></span></span> :: !IdleSpec
+<span class="lineno">  624 </span>    -- ^ The 'IdleSpec' bound at construction.
+<span class="lineno">  625 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bh_send</span></span></span>        :: ByteString -&gt; IO ()
+<span class="lineno">  626 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bh_recv</span></span></span>        :: Maybe IdleSpec -&gt; IO (RecvResult ByteString)
+<span class="lineno">  627 </span>    -- ^ Read output. @Nothing@ uses '_bh_defaultIdle';
+<span class="lineno">  628 </span>    -- @Just s@ overrides for this call only.
+<span class="lineno">  629 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bh_resize</span></span></span>      :: Cols -&gt; Rows -&gt; IO ()
+<span class="lineno">  630 </span>    -- ^ No-op on 'Pipe'-kind backends (and future @TmuxRpc@).
+<span class="lineno">  631 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bh_close</span></span></span>       :: IO ()
+<span class="lineno">  632 </span>    -- ^ Idempotent; never throws.
+<span class="lineno">  633 </span>  }
+<span class="lineno">  634 </span>
+<span class="lineno">  635 </span>-- | Send a request and receive the response with the handle's default
+<span class="lineno">  636 </span>-- idle policy. For 'Pipe' backends this is a true request\/response;
+<span class="lineno">  637 </span>-- for 'Pty' backends the response is whatever the idle policy
+<span class="lineno">  638 </span>-- captures, which may include unrelated background output.
+<span class="lineno">  639 </span>runBackend :: BackendHandle -&gt; ByteString -&gt; IO (RecvResult ByteString)
+<span class="lineno">  640 </span><span class="decl"><span class="istickedoff">runBackend b bs = _bh_send b bs *&gt; _bh_recv b Nothing</span></span>
+<span class="lineno">  641 </span>
+<span class="lineno">  642 </span>-- | Whether the handle's kind is conversational
+<span class="lineno">  643 </span>-- ('Pty' — @True@; 'Pipe' — @False@).
+<span class="lineno">  644 </span>isConversational :: BackendHandle -&gt; Bool
+<span class="lineno">  645 </span><span class="decl"><span class="nottickedoff">isConversational b = case _bh_kind b of</span>
+<span class="lineno">  646 </span><span class="spaces">  </span><span class="nottickedoff">Pty  -&gt; True</span>
+<span class="lineno">  647 </span><span class="spaces">  </span><span class="nottickedoff">Pipe -&gt; False</span></span>
+<span class="lineno">  648 </span>
+<span class="lineno">  649 </span>-- | Equivalent to @_bh_recv b Nothing@ as a top-level helper.
+<span class="lineno">  650 </span>recv :: BackendHandle -&gt; IO (RecvResult ByteString)
+<span class="lineno">  651 </span><span class="decl"><span class="nottickedoff">recv b = _bh_recv b Nothing</span></span>
+<span class="lineno">  652 </span>
+<span class="lineno">  653 </span>-- | Equivalent to @_bh_recv b (Just s)@ as a top-level helper, for the
+<span class="lineno">  654 </span>-- common case of overriding the default idle policy for a single call.
+<span class="lineno">  655 </span>recvWith :: BackendHandle -&gt; IdleSpec -&gt; IO (RecvResult ByteString)
+<span class="lineno">  656 </span><span class="decl"><span class="nottickedoff">recvWith b s = _bh_recv b (Just s)</span></span>
+<span class="lineno">  657 </span>
+<span class="lineno">  658 </span>-- | Run an action with an already-constructed 'BackendHandle',
+<span class="lineno">  659 </span>-- guaranteeing '_bh_close' runs on success or exception.
+<span class="lineno">  660 </span>--
+<span class="lineno">  661 </span>-- Body exceptions are re-raised after the close action finishes.
+<span class="lineno">  662 </span>-- '_bh_close' is documented as idempotent and never-throwing on every
+<span class="lineno">  663 </span>-- backend kind, so the close phase cannot mask a body exception.
+<span class="lineno">  664 </span>withBackendHandle :: BackendHandle -&gt; (BackendHandle -&gt; IO a) -&gt; IO a
+<span class="lineno">  665 </span><span class="decl"><span class="nottickedoff">withBackendHandle b = bracket (pure b) (\_ -&gt; _bh_close b)</span></span>
+<span class="lineno">  666 </span>
+<span class="lineno">  667 </span>-- | Combined acquire-and-bracket helper for the common factory pattern
+<span class="lineno">  668 </span>-- @IO (Either BackendError BackendHandle)@.
+<span class="lineno">  669 </span>--
+<span class="lineno">  670 </span>-- On a 'Left' result from @acquire@, no body is run and the error is
+<span class="lineno">  671 </span>-- returned as-is. On a 'Right' result, behaves like 'withBackendHandle'
+<span class="lineno">  672 </span>-- and re-raises any body exception after closing.
+<span class="lineno">  673 </span>withBackendHandleE
+<span class="lineno">  674 </span>  :: IO (Either BackendError BackendHandle)
+<span class="lineno">  675 </span>  -&gt; (BackendHandle -&gt; IO a)
+<span class="lineno">  676 </span>  -&gt; IO (Either BackendError a)
+<span class="lineno">  677 </span><span class="decl"><span class="nottickedoff">withBackendHandleE acquire body = do</span>
+<span class="lineno">  678 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- acquire</span>
+<span class="lineno">  679 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  680 </span><span class="spaces">    </span><span class="nottickedoff">Left  e -&gt; pure (Left e)</span>
+<span class="lineno">  681 </span><span class="spaces">    </span><span class="nottickedoff">Right b -&gt; Right &lt;$&gt; withBackendHandle b body</span></span>
+<span class="lineno">  682 </span>
+<span class="lineno">  683 </span>-- | Wrap a 'BackendHandle' so that concurrent entry into '_bh_send'
+<span class="lineno">  684 </span>-- and '_bh_recv' from multiple threads is detected and rejected.
+<span class="lineno">  685 </span>--
+<span class="lineno">  686 </span>-- The documented concurrency contract on 'BackendHandle' says callers
+<span class="lineno">  687 </span>-- MUST NOT invoke '_bh_send' or '_bh_recv' from two threads at once;
+<span class="lineno">  688 </span>-- this wrapper enforces that contract by gating both actions on a
+<span class="lineno">  689 </span>-- single 'MVar'. The second-entrant observes a 'BackendException' with
+<span class="lineno">  690 </span>-- @_be_context = 'BcConcurrentUse'@ instead of corrupting state.
+<span class="lineno">  691 </span>--
+<span class="lineno">  692 </span>-- '_bh_resize' and '_bh_close' are NOT gated: resize is documented as
+<span class="lineno">  693 </span>-- safe from any thread, and close is documented as idempotent.
+<span class="lineno">  694 </span>withConcurrentUseGuard :: BackendHandle -&gt; IO BackendHandle
+<span class="lineno">  695 </span><span class="decl"><span class="istickedoff">withConcurrentUseGuard bh = do</span>
+<span class="lineno">  696 </span><span class="spaces">  </span><span class="istickedoff">gate &lt;- newMVar ()</span>
+<span class="lineno">  697 </span><span class="spaces">  </span><span class="istickedoff">pure bh</span>
+<span class="lineno">  698 </span><span class="spaces">    </span><span class="istickedoff">{ _bh_send = guarded gate . _bh_send bh</span>
+<span class="lineno">  699 </span><span class="spaces">    </span><span class="istickedoff">, _bh_recv = guarded gate . _bh_recv bh</span>
+<span class="lineno">  700 </span><span class="spaces">    </span><span class="istickedoff">}</span>
+<span class="lineno">  701 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  702 </span><span class="spaces">    </span><span class="istickedoff">guarded :: MVar () -&gt; IO a -&gt; IO a</span>
+<span class="lineno">  703 </span><span class="spaces">    </span><span class="istickedoff">guarded gate io = do</span>
+<span class="lineno">  704 </span><span class="spaces">      </span><span class="istickedoff">m &lt;- tryTakeMVar gate</span>
+<span class="lineno">  705 </span><span class="spaces">      </span><span class="istickedoff">case m of</span>
+<span class="lineno">  706 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  707 </span><span class="spaces">          </span><span class="istickedoff">throwIO $ BackendException</span>
+<span class="lineno">  708 </span><span class="spaces">            </span><span class="istickedoff">BcConcurrentUse</span>
+<span class="lineno">  709 </span><span class="spaces">            </span><span class="istickedoff">(toException</span>
+<span class="lineno">  710 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">(userError &quot;concurrent _bh_send/_bh_recv on a BackendHandle&quot;)</span>)</span>
+<span class="lineno">  711 </span><span class="spaces">        </span><span class="istickedoff">Just () -&gt; io `finally` putMVar gate ()</span></span>
+<span class="lineno">  712 </span>
+<span class="lineno">  713 </span>--------------------------------------------------------------------------------
+<span class="lineno">  714 </span>-- No-op backend
+<span class="lineno">  715 </span>--------------------------------------------------------------------------------
+<span class="lineno">  716 </span>
+<span class="lineno">  717 </span>-- | A purely no-op 'BackendHandle' for both 'Pipe' and 'Pty' kinds.
+<span class="lineno">  718 </span>--
+<span class="lineno">  719 </span>-- * '_bh_send' silently discards its argument.
+<span class="lineno">  720 </span>-- * '_bh_recv' (with or without an idle override) returns 'RecvSettled' on
+<span class="lineno">  721 </span>--   an empty payload.
+<span class="lineno">  722 </span>-- * '_bh_resize' is a silent no-op for both kinds.
+<span class="lineno">  723 </span>-- * '_bh_close' is idempotent and never throws.
+<span class="lineno">  724 </span>mkNoOpBackendHandle :: BackendKind -&gt; BackendHandle
+<span class="lineno">  725 </span><span class="decl"><span class="istickedoff">mkNoOpBackendHandle kind = BackendHandle</span>
+<span class="lineno">  726 </span><span class="spaces">  </span><span class="istickedoff">{ _bh_name        = &quot;noop&quot;</span>
+<span class="lineno">  727 </span><span class="spaces">  </span><span class="istickedoff">, _bh_kind        = kind</span>
+<span class="lineno">  728 </span><span class="spaces">  </span><span class="istickedoff">, _bh_defaultIdle = testIdleSpec</span>
+<span class="lineno">  729 </span><span class="spaces">  </span><span class="istickedoff">, _bh_send        = <span class="nottickedoff">\_   -&gt; pure ()</span></span>
+<span class="lineno">  730 </span><span class="spaces">  </span><span class="istickedoff">, _bh_recv        = \_   -&gt; pure (RecvSettled BS.empty)</span>
+<span class="lineno">  731 </span><span class="spaces">  </span><span class="istickedoff">, _bh_resize      = \_ _ -&gt; pure ()</span>
+<span class="lineno">  732 </span><span class="spaces">  </span><span class="istickedoff">, _bh_close       = pure ()</span>
+<span class="lineno">  733 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  734 </span>
+<span class="lineno">  735 </span>--------------------------------------------------------------------------------
+<span class="lineno">  736 </span>-- In-memory backend
+<span class="lineno">  737 </span>--------------------------------------------------------------------------------
+<span class="lineno">  738 </span>
+<span class="lineno">  739 </span>-- | Construction-time configuration for 'mkInMemoryBackendHandle'.
+<span class="lineno">  740 </span>--
+<span class="lineno">  741 </span>-- The caller owns @_imc_state@ — create it with 'newInMemoryState'
+<span class="lineno">  742 </span>-- ahead of time and inspect it via 'readIORef' after exercising the
+<span class="lineno">  743 </span>-- returned handle. This shape keeps the factory's signature
+<span class="lineno">  744 </span>-- @BackendKind -&gt; InMemoryConfig -&gt; IO BackendHandle@ (per the design
+<span class="lineno">  745 </span>-- doc) while still giving tests a way to introspect what was sent /
+<span class="lineno">  746 </span>-- received / resized / closed.
+<span class="lineno">  747 </span>data InMemoryConfig = InMemoryConfig
+<span class="lineno">  748 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_imc_clock</span></span></span>           :: !FakeClock
+<span class="lineno">  749 </span>    -- ^ Deterministic clock used for idle measurement (not yet wired
+<span class="lineno">  750 </span>    -- to the recv path in WU3; required by the design doc for parity
+<span class="lineno">  751 </span>    -- with @fakePtyIO@ and for forward-compatibility with the
+<span class="lineno">  752 </span>    -- property-test seam in WU7).
+<span class="lineno">  753 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_imc_scriptedReplies</span></span></span> :: ![ByteString]
+<span class="lineno">  754 </span>    -- ^ Consumed in order on each '_bh_recv'. Once exhausted,
+<span class="lineno">  755 </span>    -- subsequent recvs return @RecvEof BS.empty@.
+<span class="lineno">  756 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_imc_eofAfter</span></span></span>        :: !(Maybe Int)
+<span class="lineno">  757 </span>    -- ^ Optional cap: after this many '_bh_recv' calls, every
+<span class="lineno">  758 </span>    -- subsequent recv returns @RecvEof BS.empty@ regardless of any
+<span class="lineno">  759 </span>    -- remaining scripted replies.
+<span class="lineno">  760 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_imc_state</span></span></span>           :: !(IORef InMemoryState)
+<span class="lineno">  761 </span>    -- ^ Caller-supplied introspection state. Construct via
+<span class="lineno">  762 </span>    -- 'newInMemoryState'.
+<span class="lineno">  763 </span>  }
+<span class="lineno">  764 </span>
+<span class="lineno">  765 </span>-- | Mutable in-memory backend state. Updated in place by the
+<span class="lineno">  766 </span>-- 'BackendHandle' returned from 'mkInMemoryBackendHandle'.
+<span class="lineno">  767 </span>--
+<span class="lineno">  768 </span>-- Lists are stored in reverse-chronological order for cheap @cons@;
+<span class="lineno">  769 </span>-- callers that want chronological order should 'reverse' on read.
+<span class="lineno">  770 </span>data InMemoryState = InMemoryState
+<span class="lineno">  771 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ims_sentBytes</span></span></span>   :: ![ByteString]
+<span class="lineno">  772 </span>    -- ^ Every payload passed to '_bh_send', most-recent first.
+<span class="lineno">  773 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ims_recvCalls</span></span></span>   :: !Int
+<span class="lineno">  774 </span>    -- ^ Number of '_bh_recv' invocations issued against the handle.
+<span class="lineno">  775 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ims_resizeCalls</span></span></span> :: ![(Cols, Rows)]
+<span class="lineno">  776 </span>    -- ^ Every @(cols, rows)@ pair passed to '_bh_resize', most-recent
+<span class="lineno">  777 </span>    -- first. For 'Pipe'-kind handles, this list always stays empty
+<span class="lineno">  778 </span>    -- because '_bh_resize' is a silent no-op on pipes.
+<span class="lineno">  779 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ims_closed</span></span></span>      :: !Bool
+<span class="lineno">  780 </span>    -- ^ Set to 'True' on first '_bh_close'; remains 'True' on subsequent
+<span class="lineno">  781 </span>    -- (idempotent) calls.
+<span class="lineno">  782 </span>  }
+<span class="lineno">  783 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  784 </span>
+<span class="lineno">  785 </span>-- | Allocate a fresh, empty 'InMemoryState' for 'InMemoryConfig'.
+<span class="lineno">  786 </span>newInMemoryState :: IO (IORef InMemoryState)
+<span class="lineno">  787 </span><span class="decl"><span class="istickedoff">newInMemoryState = newIORef InMemoryState</span>
+<span class="lineno">  788 </span><span class="spaces">  </span><span class="istickedoff">{ _ims_sentBytes   = []</span>
+<span class="lineno">  789 </span><span class="spaces">  </span><span class="istickedoff">, _ims_recvCalls   = 0</span>
+<span class="lineno">  790 </span><span class="spaces">  </span><span class="istickedoff">, _ims_resizeCalls = []</span>
+<span class="lineno">  791 </span><span class="spaces">  </span><span class="istickedoff">, _ims_closed      = False</span>
+<span class="lineno">  792 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  793 </span>
+<span class="lineno">  794 </span>-- | A deterministic, scriptable 'BackendHandle' for property tests.
+<span class="lineno">  795 </span>--
+<span class="lineno">  796 </span>-- The handle:
+<span class="lineno">  797 </span>--
+<span class="lineno">  798 </span>-- * records each '_bh_send' payload into '_imc_state' (newest first);
+<span class="lineno">  799 </span>-- * pulls the next scripted reply from '_imc_scriptedReplies' on each
+<span class="lineno">  800 </span>--   '_bh_recv', wrapping it in 'RecvSettled'. Once the script is
+<span class="lineno">  801 </span>--   exhausted — or @_imc_eofAfter@ recvs have occurred, whichever
+<span class="lineno">  802 </span>--   comes first — every subsequent recv returns @RecvEof BS.empty@;
+<span class="lineno">  803 </span>-- * records each '_bh_resize' call into '_imc_state' if @kind == Pty@;
+<span class="lineno">  804 </span>--   for @kind == Pipe@, resize is a silent no-op (nothing recorded);
+<span class="lineno">  805 </span>-- * marks '_ims_closed' on '_bh_close'. Close is idempotent.
+<span class="lineno">  806 </span>mkInMemoryBackendHandle :: BackendKind -&gt; InMemoryConfig -&gt; IO BackendHandle
+<span class="lineno">  807 </span><span class="decl"><span class="istickedoff">mkInMemoryBackendHandle kind cfg = do</span>
+<span class="lineno">  808 </span><span class="spaces">  </span><span class="istickedoff">scriptRef &lt;- newIORef (_imc_scriptedReplies cfg)</span>
+<span class="lineno">  809 </span><span class="spaces">  </span><span class="istickedoff">let stRef    = _imc_state cfg</span>
+<span class="lineno">  810 </span><span class="spaces">      </span><span class="istickedoff">eofAfter = _imc_eofAfter cfg</span>
+<span class="lineno">  811 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  812 </span><span class="spaces">      </span><span class="istickedoff">doRecv :: IO (RecvResult ByteString)</span>
+<span class="lineno">  813 </span><span class="spaces">      </span><span class="istickedoff">doRecv = do</span>
+<span class="lineno">  814 </span><span class="spaces">        </span><span class="istickedoff">-- Pre-increment so #-of-calls includes the current invocation</span>
+<span class="lineno">  815 </span><span class="spaces">        </span><span class="istickedoff">-- when comparing against eofAfter.</span>
+<span class="lineno">  816 </span><span class="spaces">        </span><span class="istickedoff">n &lt;- atomicModifyIORef' stRef $ \s -&gt;</span>
+<span class="lineno">  817 </span><span class="spaces">          </span><span class="istickedoff">let n' = _ims_recvCalls s + 1</span>
+<span class="lineno">  818 </span><span class="spaces">          </span><span class="istickedoff">in (s { _ims_recvCalls = n' }, n')</span>
+<span class="lineno">  819 </span><span class="spaces">        </span><span class="istickedoff">let pastCap = case eofAfter of</span>
+<span class="lineno">  820 </span><span class="spaces">              </span><span class="istickedoff">Nothing  -&gt; False</span>
+<span class="lineno">  821 </span><span class="spaces">              </span><span class="istickedoff">Just cap -&gt; n &gt; cap</span>
+<span class="lineno">  822 </span><span class="spaces">        </span><span class="istickedoff">if pastCap</span>
+<span class="lineno">  823 </span><span class="spaces">          </span><span class="istickedoff">then pure (RecvEof BS.empty)</span>
+<span class="lineno">  824 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">  825 </span><span class="spaces">            </span><span class="istickedoff">next &lt;- atomicModifyIORef' scriptRef $ \case</span>
+<span class="lineno">  826 </span><span class="spaces">              </span><span class="istickedoff">[]     -&gt; ([], Nothing)</span>
+<span class="lineno">  827 </span><span class="spaces">              </span><span class="istickedoff">(r:tl) -&gt; (tl, Just r)</span>
+<span class="lineno">  828 </span><span class="spaces">            </span><span class="istickedoff">case next of</span>
+<span class="lineno">  829 </span><span class="spaces">              </span><span class="istickedoff">Just r  -&gt; pure (RecvSettled r)</span>
+<span class="lineno">  830 </span><span class="spaces">              </span><span class="istickedoff">Nothing -&gt; pure (RecvEof BS.empty)</span>
+<span class="lineno">  831 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  832 </span><span class="spaces">      </span><span class="istickedoff">doResize :: Cols -&gt; Rows -&gt; IO ()</span>
+<span class="lineno">  833 </span><span class="spaces">      </span><span class="istickedoff">doResize c r = case kind of</span>
+<span class="lineno">  834 </span><span class="spaces">        </span><span class="istickedoff">Pipe -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  835 </span><span class="spaces">        </span><span class="istickedoff">Pty  -&gt; atomicModifyIORef' stRef $ \s -&gt;</span>
+<span class="lineno">  836 </span><span class="spaces">          </span><span class="istickedoff">(s { _ims_resizeCalls = (c, r) : _ims_resizeCalls s }, ())</span>
+<span class="lineno">  837 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  838 </span><span class="spaces">      </span><span class="istickedoff">doSend :: ByteString -&gt; IO ()</span>
+<span class="lineno">  839 </span><span class="spaces">      </span><span class="istickedoff">doSend bs = atomicModifyIORef' stRef $ \s -&gt;</span>
+<span class="lineno">  840 </span><span class="spaces">        </span><span class="istickedoff">(s { _ims_sentBytes = bs : _ims_sentBytes s }, ())</span>
+<span class="lineno">  841 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  842 </span><span class="spaces">      </span><span class="istickedoff">doClose :: IO ()</span>
+<span class="lineno">  843 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">doClose = atomicModifyIORef' stRef $ \s -&gt;</span></span>
+<span class="lineno">  844 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">(s { _ims_closed = True }, ())</span></span>
+<span class="lineno">  845 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  846 </span><span class="spaces">  </span><span class="istickedoff">pure BackendHandle</span>
+<span class="lineno">  847 </span><span class="spaces">    </span><span class="istickedoff">{ _bh_name        = &quot;in-memory&quot;</span>
+<span class="lineno">  848 </span><span class="spaces">    </span><span class="istickedoff">, _bh_kind        = kind</span>
+<span class="lineno">  849 </span><span class="spaces">    </span><span class="istickedoff">, _bh_defaultIdle = testIdleSpec</span>
+<span class="lineno">  850 </span><span class="spaces">    </span><span class="istickedoff">, _bh_send        = doSend</span>
+<span class="lineno">  851 </span><span class="spaces">    </span><span class="istickedoff">, _bh_recv        = const doRecv</span>
+<span class="lineno">  852 </span><span class="spaces">    </span><span class="istickedoff">, _bh_resize      = doResize</span>
+<span class="lineno">  853 </span><span class="spaces">    </span><span class="istickedoff">, _bh_close       = <span class="nottickedoff">doClose</span></span>
+<span class="lineno">  854 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  855 </span>
+<span class="lineno">  856 </span>--------------------------------------------------------------------------------
+<span class="lineno">  857 </span>-- Process-wide recv-buffer quota (WU7)
+<span class="lineno">  858 </span>--------------------------------------------------------------------------------
+<span class="lineno">  859 </span>
+<span class="lineno">  860 </span>-- | The default process-wide aggregate recv-buffer cap (64 MiB).
+<span class="lineno">  861 </span>--
+<span class="lineno">  862 </span>-- Override at process startup by setting the
+<span class="lineno">  863 </span>-- @PURECLAW_BACKEND_AGGREGATE_CAP_MIB@ environment variable; the
+<span class="lineno">  864 </span>-- 'globalBackendBufferQuota' singleton consults this variable once on
+<span class="lineno">  865 </span>-- first use.
+<span class="lineno">  866 </span>defaultAggregateBufferCapMiB :: Int
+<span class="lineno">  867 </span><span class="decl"><span class="istickedoff">defaultAggregateBufferCapMiB = 64</span></span>
+<span class="lineno">  868 </span>
+<span class="lineno">  869 </span>-- | Process-wide recv-buffer quota, in MiB.
+<span class="lineno">  870 </span>--
+<span class="lineno">  871 </span>-- Backed by an 'IORef' counter (not a @QSem@ \/ @QSemN@): the
+<span class="lineno">  872 </span>-- semantics we want are __non-blocking__ @tryAcquire@-style, returning
+<span class="lineno">  873 </span>-- 'Left BackendBufferQuotaExceeded' on oversubscription rather than
+<span class="lineno">  874 </span>-- blocking the calling thread. @QSemN.tryWaitQSemN@ does not exist
+<span class="lineno">  875 </span>-- upstream, and a counter-based 'atomicModifyIORef'' is simpler and
+<span class="lineno">  876 </span>-- equivalent in correctness for a single-process quota.
+<span class="lineno">  877 </span>--
+<span class="lineno">  878 </span>-- The double-release defense in 'releaseBufferQuota' relies on the
+<span class="lineno">  879 </span>-- per-acquisition 'IORef' flag that backend factories thread through
+<span class="lineno">  880 </span>-- their close action; this 'BackendBufferQuota' type itself stores
+<span class="lineno">  881 </span>-- only the running total.
+<span class="lineno">  882 </span>newtype BackendBufferQuota = BackendBufferQuota (IORef Int)
+<span class="lineno">  883 </span>
+<span class="lineno">  884 </span>-- | Construct a quota with the given capacity (in MiB). Available
+<span class="lineno">  885 </span>-- units start at the capacity.
+<span class="lineno">  886 </span>newBackendBufferQuota :: Int -&gt; IO BackendBufferQuota
+<span class="lineno">  887 </span><span class="decl"><span class="istickedoff">newBackendBufferQuota capMiB = BackendBufferQuota &lt;$&gt; newIORef capMiB</span></span>
+<span class="lineno">  888 </span>
+<span class="lineno">  889 </span>-- | The shared, process-wide 'BackendBufferQuota' used by all real
+<span class="lineno">  890 </span>-- backend factories.
+<span class="lineno">  891 </span>--
+<span class="lineno">  892 </span>-- Sized from the @PURECLAW_BACKEND_AGGREGATE_CAP_MIB@ environment
+<span class="lineno">  893 </span>-- variable at first use; falls back to 'defaultAggregateBufferCapMiB'
+<span class="lineno">  894 </span>-- if the variable is unset or unparseable.
+<span class="lineno">  895 </span>--
+<span class="lineno">  896 </span>-- Tests that need to drive oversubscription deterministically can
+<span class="lineno">  897 </span>-- replace the singleton with 'setGlobalBackendBufferQuotaForTest'.
+<span class="lineno">  898 </span>globalBackendBufferQuota :: IORef BackendBufferQuota
+<span class="lineno">  899 </span><span class="decl"><span class="istickedoff">globalBackendBufferQuota = unsafePerformIO $ do</span>
+<span class="lineno">  900 </span><span class="spaces">  </span><span class="istickedoff">cap &lt;- readBufferQuotaCap</span>
+<span class="lineno">  901 </span><span class="spaces">  </span><span class="istickedoff">q   &lt;- newBackendBufferQuota cap</span>
+<span class="lineno">  902 </span><span class="spaces">  </span><span class="istickedoff">newIORef q</span></span>
+<span class="lineno">  903 </span>{-# NOINLINE globalBackendBufferQuota #-}
+<span class="lineno">  904 </span>
+<span class="lineno">  905 </span>readBufferQuotaCap :: IO Int
+<span class="lineno">  906 </span><span class="decl"><span class="istickedoff">readBufferQuotaCap = do</span>
+<span class="lineno">  907 </span><span class="spaces">  </span><span class="istickedoff">mEnv &lt;- lookupEnv &quot;PURECLAW_BACKEND_AGGREGATE_CAP_MIB&quot;</span>
+<span class="lineno">  908 </span><span class="spaces">  </span><span class="istickedoff">case mEnv &gt;&gt;= <span class="nottickedoff">readMaybe</span> of</span>
+<span class="lineno">  909 </span><span class="spaces">    </span><span class="istickedoff">Just n | <span class="nottickedoff">n &gt; 0</span> -&gt; <span class="nottickedoff">pure n</span></span>
+<span class="lineno">  910 </span><span class="spaces">    </span><span class="istickedoff">_              -&gt; pure defaultAggregateBufferCapMiB</span></span>
+<span class="lineno">  911 </span>
+<span class="lineno">  912 </span>-- | Replace the global quota with a fresh one of the given capacity.
+<span class="lineno">  913 </span>-- Test-only helper; production code must not call this.
+<span class="lineno">  914 </span>setGlobalBackendBufferQuotaForTest :: Int -&gt; IO ()
+<span class="lineno">  915 </span><span class="decl"><span class="istickedoff">setGlobalBackendBufferQuotaForTest capMiB = do</span>
+<span class="lineno">  916 </span><span class="spaces">  </span><span class="istickedoff">q &lt;- newBackendBufferQuota capMiB</span>
+<span class="lineno">  917 </span><span class="spaces">  </span><span class="istickedoff">writeIORef globalBackendBufferQuota q</span></span>
+<span class="lineno">  918 </span>
+<span class="lineno">  919 </span>-- | Inspect available MiB in a 'BackendBufferQuota'. Read-only; for
+<span class="lineno">  920 </span>-- tests and diagnostics.
+<span class="lineno">  921 </span>bufferQuotaAvailableMiB :: BackendBufferQuota -&gt; IO Int
+<span class="lineno">  922 </span><span class="decl"><span class="nottickedoff">bufferQuotaAvailableMiB (BackendBufferQuota ref) = readIORef ref</span></span>
+<span class="lineno">  923 </span>
+<span class="lineno">  924 </span>-- | Try to acquire @n@ MiB. Returns 'Left BackendBufferQuotaExceeded'
+<span class="lineno">  925 </span>-- if the quota is oversubscribed; the caller is expected to surface
+<span class="lineno">  926 </span>-- this as a 'BackendError' on construction. Atomically decrements the
+<span class="lineno">  927 </span>-- running counter on success.
+<span class="lineno">  928 </span>--
+<span class="lineno">  929 </span>-- Pass a negative or zero @n@ to acquire nothing — useful for pipe-
+<span class="lineno">  930 </span>-- kind factories that don\'t carry a recv buffer.
+<span class="lineno">  931 </span>acquireBufferQuota :: BackendBufferQuota -&gt; Int -&gt; IO (Either BackendError ())
+<span class="lineno">  932 </span><span class="decl"><span class="istickedoff">acquireBufferQuota (BackendBufferQuota ref) n</span>
+<span class="lineno">  933 </span><span class="spaces">  </span><span class="istickedoff">| n &lt;= 0    = pure (Right ())</span>
+<span class="lineno">  934 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = atomicModifyIORef' ref $ \avail -&gt;</span>
+<span class="lineno">  935 </span><span class="spaces">      </span><span class="istickedoff">if avail &gt;= n</span>
+<span class="lineno">  936 </span><span class="spaces">        </span><span class="istickedoff">then (avail - n, Right ())</span>
+<span class="lineno">  937 </span><span class="spaces">        </span><span class="istickedoff">else (avail, Left (BackendBufferQuotaExceeded n))</span></span>
+<span class="lineno">  938 </span>
+<span class="lineno">  939 </span>-- | Release @n@ MiB back to the quota.
+<span class="lineno">  940 </span>--
+<span class="lineno">  941 </span>-- Designed to be called inside a backend\'s close action. The double-
+<span class="lineno">  942 </span>-- release defense lives at the call site (a per-backend 'IORef Bool'
+<span class="lineno">  943 </span>-- flag flipped on first release); this function unconditionally
+<span class="lineno">  944 </span>-- increments and is therefore safe to call from a 'bracket' cleanup.
+<span class="lineno">  945 </span>releaseBufferQuota :: BackendBufferQuota -&gt; Int -&gt; IO ()
+<span class="lineno">  946 </span><span class="decl"><span class="istickedoff">releaseBufferQuota (BackendBufferQuota ref) n</span>
+<span class="lineno">  947 </span><span class="spaces">  </span><span class="istickedoff">| n &lt;= 0    = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  948 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = atomicModifyIORef' ref $ \avail -&gt; (avail + n, ())</span></span>
+
+</pre>
+</body>
+</html>

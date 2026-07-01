@@ -1,0 +1,1030 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Frontend.API
+<span class="lineno">    2 </span>  ( -- * WAI Application
+<span class="lineno">    3 </span>    apiApp
+<span class="lineno">    4 </span>    -- * Environment
+<span class="lineno">    5 </span>  , FrontendEnv (..)
+<span class="lineno">    6 </span>    -- * Stream connection guard (per-origin cap)
+<span class="lineno">    7 </span>  , StreamGuard (..)
+<span class="lineno">    8 </span>  , mkStreamGuard
+<span class="lineno">    9 </span>    -- * Shared helpers
+<span class="lineno">   10 </span>  , isValidSessionId
+<span class="lineno">   11 </span>    -- * List snapshot (used by Stream.hs for WS push)
+<span class="lineno">   12 </span>  , computeListsSnapshot
+<span class="lineno">   13 </span>  , broadcastLists
+<span class="lineno">   14 </span>    -- * Response types (exported for testing)
+<span class="lineno">   15 </span>  , HarnessInfo (..)
+<span class="lineno">   16 </span>  , HarnessActivity (..)
+<span class="lineno">   17 </span>  , SessionInfo (..)
+<span class="lineno">   18 </span>  , TranscriptEntryInfo (..)
+<span class="lineno">   19 </span>  , AgentInfo (..)
+<span class="lineno">   20 </span>  , ProviderInfo (..)
+<span class="lineno">   21 </span>  , TabSnapshot (..)
+<span class="lineno">   22 </span>    -- * New tab request/response (exported for testing)
+<span class="lineno">   23 </span>  , NewTabRequest (..)
+<span class="lineno">   24 </span>  , NewTabResponse (..)
+<span class="lineno">   25 </span>  ) where
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>import Control.Concurrent.STM (TVar, newTVarIO)
+<span class="lineno">   28 </span>import Control.Exception (IOException, SomeException, bracket_, try)
+<span class="lineno">   29 </span>import Control.Monad (filterM)
+<span class="lineno">   30 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   31 </span>import Data.Aeson (ToJSON (..), FromJSON (..), object, (.=), (.:), (.:?))
+<span class="lineno">   32 </span>import Data.Aeson.Types qualified as AesonTypes
+<span class="lineno">   33 </span>import Data.Aeson.KeyMap qualified as KM
+<span class="lineno">   34 </span>import Data.ByteString qualified as BS
+<span class="lineno">   35 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   36 </span>import Data.Vector qualified as V
+<span class="lineno">   37 </span>import System.IO (IOMode (..), withFile)
+<span class="lineno">   38 </span>import Data.ByteString.Char8 qualified as BSC
+<span class="lineno">   39 </span>import Data.IORef
+<span class="lineno">   40 </span>import Data.Map.Strict (Map)
+<span class="lineno">   41 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   42 </span>import Data.Text (Text)
+<span class="lineno">   43 </span>import Data.Text qualified as T
+<span class="lineno">   44 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   45 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   46 </span>import Data.Time (UTCTime, getCurrentTime)
+<span class="lineno">   47 </span>import Network.HTTP.Types
+<span class="lineno">   48 </span>import Network.Wai
+<span class="lineno">   49 </span>import System.Directory (doesFileExist, getFileSize, renameFile)
+<span class="lineno">   50 </span>import System.FilePath ((&lt;/&gt;), takeDirectory)
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>import PureClaw.Agent.AgentDef (AgentDef (..), discoverAgents, mkAgentName, unAgentName)
+<span class="lineno">   53 </span>import PureClaw.Agent.Context
+<span class="lineno">   54 </span>import PureClaw.Core.Types (ModelId (..), SessionId (..), unModelId, unSessionId)
+<span class="lineno">   55 </span>import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+<span class="lineno">   56 </span>import PureClaw.Frontend.BroadcastingTranscript (mkBroadcastingFileTranscriptHandle)
+<span class="lineno">   57 </span>import PureClaw.Frontend.StreamBroker
+<span class="lineno">   58 </span>  ( BrokerEvent (..)
+<span class="lineno">   59 </span>  , SessionActivity (..)
+<span class="lineno">   60 </span>  , StreamBroker (..)
+<span class="lineno">   61 </span>  )
+<span class="lineno">   62 </span>import PureClaw.Handles.Harness
+<span class="lineno">   63 </span>import PureClaw.Handles.Log
+<span class="lineno">   64 </span>import PureClaw.Handles.Tab (TabKind (..))
+<span class="lineno">   65 </span>import PureClaw.Harness.ClaudeCode (isIdle)
+<span class="lineno">   66 </span>import PureClaw.Harness.Tmux (captureWindow)
+<span class="lineno">   67 </span>import PureClaw.Providers.Class
+<span class="lineno">   68 </span>import PureClaw.Session.Handle
+<span class="lineno">   69 </span>  ( SessionHandle (..)
+<span class="lineno">   70 </span>  , SetArchivedError (..)
+<span class="lineno">   71 </span>  , SetDescriptionError (..)
+<span class="lineno">   72 </span>  , listSessions
+<span class="lineno">   73 </span>  , loadRecentMessages
+<span class="lineno">   74 </span>  , mkSessionHandle
+<span class="lineno">   75 </span>  , setArchived
+<span class="lineno">   76 </span>  , setDescription
+<span class="lineno">   77 </span>  )
+<span class="lineno">   78 </span>import PureClaw.Session.Types
+<span class="lineno">   79 </span>import PureClaw.Handles.Transcript
+<span class="lineno">   80 </span>import PureClaw.Transcript.Provider
+<span class="lineno">   81 </span>import PureClaw.Transcript.Types
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>-- | Runtime environment for the frontend API.
+<span class="lineno">   84 </span>data FrontendEnv = FrontendEnv
+<span class="lineno">   85 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_harnesses</span></span></span>    :: IORef (Map.Map Text HarnessHandle)
+<span class="lineno">   86 </span>    -- ^ Live harness handles from AgentEnv.
+<span class="lineno">   87 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_sessionsDir</span></span></span>  :: FilePath
+<span class="lineno">   88 </span>    -- ^ On-disk sessions directory (e.g. @~\/.pureclaw\/sessions@).
+<span class="lineno">   89 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_recentLimit</span></span></span>  :: Int
+<span class="lineno">   90 </span>    -- ^ Max number of recent sessions to return.
+<span class="lineno">   91 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_provider</span></span></span>     :: IORef (Maybe SomeProvider)
+<span class="lineno">   92 </span>    -- ^ Shared provider ref from AgentEnv.
+<span class="lineno">   93 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_model</span></span></span>        :: IORef (Maybe ModelId)
+<span class="lineno">   94 </span>    -- ^ Shared model ref from AgentEnv.
+<span class="lineno">   95 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_systemPrompt</span></span></span> :: Maybe Text
+<span class="lineno">   96 </span>    -- ^ System prompt for completions.
+<span class="lineno">   97 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_logger</span></span></span>       :: LogHandle
+<span class="lineno">   98 </span>    -- ^ Logger for API operations.
+<span class="lineno">   99 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_agentsDir</span></span></span>    :: FilePath
+<span class="lineno">  100 </span>    -- ^ On-disk agents directory (e.g. @~\/.pureclaw\/agents@).
+<span class="lineno">  101 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_defaultAgent</span></span></span> :: Maybe Text
+<span class="lineno">  102 </span>    -- ^ Default agent name from config.
+<span class="lineno">  103 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_broker</span></span></span>       :: Maybe StreamBroker
+<span class="lineno">  104 </span>    -- ^ Optional in-process broker for live transcript streaming. When
+<span class="lineno">  105 </span>    -- 'Just', the @POST \/sessions\/\&lt;id\&gt;\/send@ completion path opens its
+<span class="lineno">  106 </span>    -- transcript handle via 'mkBroadcastingFileTranscriptHandle' so that
+<span class="lineno">  107 </span>    -- provider Request\/Response entries reach subscribers in real time
+<span class="lineno">  108 </span>    -- (DoD D25). 'Nothing' preserves the legacy non-broadcasting path.
+<span class="lineno">  109 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_streamGuard</span></span></span>  :: Maybe StreamGuard
+<span class="lineno">  110 </span>    -- ^ Optional per-origin WS subscriber counter. The WS endpoint uses
+<span class="lineno">  111 </span>    -- this to enforce '_bc_maxSubsPerOrigin' (DoD D30). 'Nothing' disables
+<span class="lineno">  112 </span>    -- the WS endpoint entirely (it returns 503).
+<span class="lineno">  113 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_maxTabs</span></span></span>      :: Int
+<span class="lineno">  114 </span>    -- ^ Maximum number of tabs allowed (A8 enforcement).
+<span class="lineno">  115 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_tabCount</span></span></span>     :: IORef Int
+<span class="lineno">  116 </span>    -- ^ Current number of open tabs.
+<span class="lineno">  117 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_listTabs</span></span></span>     :: IO [TabSnapshot]
+<span class="lineno">  118 </span>    -- ^ Callback returning a point-in-time snapshot of all open tabs.
+<span class="lineno">  119 </span>    -- Wired by the dispatcher; returns @[]@ when no tab registry exists.
+<span class="lineno">  120 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fe_closeTab</span></span></span>     :: Int -&gt; IO (Either Text ())
+<span class="lineno">  121 </span>    -- ^ Callback to close a tab by index. The dispatcher provides the
+<span class="lineno">  122 </span>    -- real implementation; the default stub returns @Left \&quot;not wired\&quot;@.
+<span class="lineno">  123 </span>    -- On success, the tab is removed from the registry and its resources
+<span class="lineno">  124 </span>    -- are cleaned up (session saved for session-backed tabs, process
+<span class="lineno">  125 </span>    -- killed for raw shells).
+<span class="lineno">  126 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_listModels</span></span></span>   :: Text -&gt; IO [Text]
+<span class="lineno">  127 </span>    -- ^ List model IDs for the named provider. Runs the live
+<span class="lineno">  128 </span>    -- @\/v1\/models@ call on the provider using the currently
+<span class="lineno">  129 </span>    -- configured credentials. Returns @[]@ if the provider is
+<span class="lineno">  130 </span>    -- unknown, no credentials are configured, or the call fails.
+<span class="lineno">  131 </span>    -- Never throws.
+<span class="lineno">  132 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fe_listProviders</span></span></span> :: IO [ProviderInfo]
+<span class="lineno">  133 </span>    -- ^ List the providers the user has actually configured
+<span class="lineno">  134 </span>    -- (API key present in flag\/env\/vault, or Ollama reachable).
+<span class="lineno">  135 </span>    -- Each entry carries @isDefault@: true for the one provider the
+<span class="lineno">  136 </span>    -- running PureClaw instance is configured to use (from CLI flag or
+<span class="lineno">  137 </span>    -- config file). Never throws.
+<span class="lineno">  138 </span>  }
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Per-origin WS subscriber counter. Lives at the same lifetime as the
+<span class="lineno">  141 </span>-- broker (constructed once in @startWithChannel@). The WS handler calls
+<span class="lineno">  142 </span>-- 'tryClaim' on upgrade (rejecting with 503 if the cap is reached) and
+<span class="lineno">  143 </span>-- 'release' on disconnect. Key is the normalized Origin string (see
+<span class="lineno">  144 </span>-- 'normalizeOrigin' in &quot;PureClaw.Frontend.Stream&quot;).
+<span class="lineno">  145 </span>data StreamGuard = StreamGuard
+<span class="lineno">  146 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamGuard_perOrigin</span></span></span>    :: !(TVar (Map Text Int))
+<span class="lineno">  147 </span>    -- ^ Live count per normalized Origin string.
+<span class="lineno">  148 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamGuard_maxPerOrigin</span></span></span> :: !Int
+<span class="lineno">  149 </span>    -- ^ Maximum simultaneous WS subscriptions per origin.
+<span class="lineno">  150 </span>  }
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | Construct a fresh 'StreamGuard' with the given per-origin cap.
+<span class="lineno">  153 </span>mkStreamGuard :: Int -&gt; IO StreamGuard
+<span class="lineno">  154 </span><span class="decl"><span class="istickedoff">mkStreamGuard maxPer = do</span>
+<span class="lineno">  155 </span><span class="spaces">  </span><span class="istickedoff">ref &lt;- newTVarIO Map.empty</span>
+<span class="lineno">  156 </span><span class="spaces">  </span><span class="istickedoff">pure StreamGuard</span>
+<span class="lineno">  157 </span><span class="spaces">    </span><span class="istickedoff">{ _streamGuard_perOrigin    = ref</span>
+<span class="lineno">  158 </span><span class="spaces">    </span><span class="istickedoff">, _streamGuard_maxPerOrigin = maxPer</span>
+<span class="lineno">  159 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  160 </span>
+<span class="lineno">  161 </span>-- | Shared session-ID validation used by every endpoint that consumes a
+<span class="lineno">  162 </span>-- caller-supplied session id (HTTP @\/transcript@, @\/send@, @\/prompt@
+<span class="lineno">  163 </span>-- and the WS @focus@ op). Rejects @..@ and @\/@ to foreclose path
+<span class="lineno">  164 </span>-- traversal; rejects the empty string. Behavioural surface is intentionally
+<span class="lineno">  165 </span>-- the same across the HTTP and WS paths so D26's &quot;shared helper&quot; property
+<span class="lineno">  166 </span>-- holds: changing the rule here changes it everywhere.
+<span class="lineno">  167 </span>isValidSessionId :: Text -&gt; Bool
+<span class="lineno">  168 </span><span class="decl"><span class="istickedoff">isValidSessionId sid</span>
+<span class="lineno">  169 </span><span class="spaces">  </span><span class="istickedoff">| T.null sid = False</span>
+<span class="lineno">  170 </span><span class="spaces">  </span><span class="istickedoff">| T.isInfixOf &quot;..&quot; sid = False</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">| T.isInfixOf &quot;/&quot; sid = False</span>
+<span class="lineno">  172 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = True</span></span>
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>-- | JSON-serializable harness info for the frontend.
+<span class="lineno">  175 </span>data HarnessInfo = HarnessInfo
+<span class="lineno">  176 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_hi_name</span></span></span>     :: Text
+<span class="lineno">  177 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_hi_activity</span></span></span> :: HarnessActivity
+<span class="lineno">  178 </span>  }
+<span class="lineno">  179 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON HarnessInfo</span></span></span></span></span></span></span></span> where
+<span class="lineno">  182 </span>  <span class="decl"><span class="nottickedoff">toJSON hi = object</span>
+<span class="lineno">  183 </span><span class="spaces">    </span><span class="nottickedoff">[ &quot;name&quot;     .= _hi_name hi</span>
+<span class="lineno">  184 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;activity&quot; .= _hi_activity hi</span>
+<span class="lineno">  185 </span><span class="spaces">    </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  186 </span>
+<span class="lineno">  187 </span>-- | JSON-serializable agent info for the frontend.
+<span class="lineno">  188 </span>data AgentInfo = AgentInfo
+<span class="lineno">  189 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ai_name</span></span></span>      :: Text
+<span class="lineno">  190 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ai_isDefault</span></span></span> :: Bool
+<span class="lineno">  191 </span>  }
+<span class="lineno">  192 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  193 </span>
+<span class="lineno">  194 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON AgentInfo</span></span></span></span></span></span></span></span> where
+<span class="lineno">  195 </span>  <span class="decl"><span class="nottickedoff">toJSON ai = object</span>
+<span class="lineno">  196 </span><span class="spaces">    </span><span class="nottickedoff">[ &quot;name&quot;      .= _ai_name ai</span>
+<span class="lineno">  197 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;isDefault&quot; .= _ai_isDefault ai</span>
+<span class="lineno">  198 </span><span class="spaces">    </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  199 </span>
+<span class="lineno">  200 </span>-- | JSON-serializable provider info for the frontend. @isDefault@ marks
+<span class="lineno">  201 </span>-- the provider that the running PureClaw instance is configured to use
+<span class="lineno">  202 </span>-- (from the CLI @--provider@ flag or the config file @provider@ field),
+<span class="lineno">  203 </span>-- and is true for at most one entry.
+<span class="lineno">  204 </span>data ProviderInfo = ProviderInfo
+<span class="lineno">  205 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pi_name</span></span></span>      :: Text
+<span class="lineno">  206 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pi_isDefault</span></span></span> :: Bool
+<span class="lineno">  207 </span>  }
+<span class="lineno">  208 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  209 </span>
+<span class="lineno">  210 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON ProviderInfo</span></span></span></span></span></span></span></span> where
+<span class="lineno">  211 </span>  <span class="decl"><span class="nottickedoff">toJSON pi_ = object</span>
+<span class="lineno">  212 </span><span class="spaces">    </span><span class="nottickedoff">[ &quot;name&quot;      .= _pi_name pi_</span>
+<span class="lineno">  213 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;isDefault&quot; .= _pi_isDefault pi_</span>
+<span class="lineno">  214 </span><span class="spaces">    </span><span class="nottickedoff">]</span></span>
+<span class="lineno">  215 </span>
+<span class="lineno">  216 </span>-- | A point-in-time snapshot of a single tab, pre-resolved to
+<span class="lineno">  217 </span>-- JSON-friendly text values. The snapshot callback in 'FrontendEnv'
+<span class="lineno">  218 </span>-- produces these; the API layer simply serializes them.
+<span class="lineno">  219 </span>data TabSnapshot = TabSnapshot
+<span class="lineno">  220 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_index</span></span></span>     :: !Int
+<span class="lineno">  221 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_kind</span></span></span>      :: !Text
+<span class="lineno">  222 </span>    -- ^ @\&quot;provider\&quot;@, @\&quot;harness\&quot;@, or @\&quot;raw_shell\&quot;@.
+<span class="lineno">  223 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_name</span></span></span>      :: !Text
+<span class="lineno">  224 </span>    -- ^ Human-readable tab name.
+<span class="lineno">  225 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_status</span></span></span>    :: !Text
+<span class="lineno">  226 </span>    -- ^ @\&quot;running\&quot;@, @\&quot;idle\&quot;@, or @\&quot;crashed\&quot;@.
+<span class="lineno">  227 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_sessionId</span></span></span> :: !(Maybe Text)
+<span class="lineno">  228 </span>    -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
+<span class="lineno">  229 </span>  }
+<span class="lineno">  230 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  231 </span>
+<span class="lineno">  232 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">ToJSON TabSnapshot</span></span></span></span></span></span></span></span> where
+<span class="lineno">  233 </span>  <span class="decl"><span class="istickedoff">toJSON ts = object</span>
+<span class="lineno">  234 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;index&quot;      .= _ts_index ts</span>
+<span class="lineno">  235 </span><span class="spaces">    </span><span class="istickedoff">, &quot;kind&quot;       .= _ts_kind ts</span>
+<span class="lineno">  236 </span><span class="spaces">    </span><span class="istickedoff">, &quot;name&quot;       .= _ts_name ts</span>
+<span class="lineno">  237 </span><span class="spaces">    </span><span class="istickedoff">, &quot;status&quot;     .= _ts_status ts</span>
+<span class="lineno">  238 </span><span class="spaces">    </span><span class="istickedoff">, &quot;session_id&quot; .= _ts_sessionId ts</span>
+<span class="lineno">  239 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  240 </span>
+<span class="lineno">  241 </span>-- | JSON-serializable session info for the frontend.
+<span class="lineno">  242 </span>data SessionInfo = SessionInfo
+<span class="lineno">  243 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_id</span></span></span>                   :: Text
+<span class="lineno">  244 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_agent</span></span></span>                :: Maybe Text
+<span class="lineno">  245 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_runtime</span></span></span>              :: Text
+<span class="lineno">  246 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_model</span></span></span>                :: Text
+<span class="lineno">  247 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_lastActive</span></span></span>           :: UTCTime
+<span class="lineno">  248 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_createdAt</span></span></span>            :: UTCTime
+<span class="lineno">  249 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_description</span></span></span>          :: Maybe Text
+<span class="lineno">  250 </span>    -- ^ User-set session description (preferred display title).
+<span class="lineno">  251 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_autoSummary</span></span></span>          :: Maybe Text
+<span class="lineno">  252 </span>    -- ^ Model-generated short summary; cached in session.json.
+<span class="lineno">  253 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_firstMessageSnippet</span></span></span>  :: Maybe Text
+<span class="lineno">  254 </span>    -- ^ Cheap fallback: a trimmed prefix of the first user message
+<span class="lineno">  255 </span>    -- in the transcript. Computed on demand in 'handleRecentSessions'.
+<span class="lineno">  256 </span>  }
+<span class="lineno">  257 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  258 </span>
+<span class="lineno">  259 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">ToJSON SessionInfo</span></span></span></span></span></span></span></span> where
+<span class="lineno">  260 </span>  <span class="decl"><span class="istickedoff">toJSON si = object</span>
+<span class="lineno">  261 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;id&quot;                  .= _si_id si</span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">, &quot;agent&quot;               .= _si_agent si</span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">, &quot;runtime&quot;             .= _si_runtime si</span>
+<span class="lineno">  264 </span><span class="spaces">    </span><span class="istickedoff">, &quot;model&quot;               .= _si_model si</span>
+<span class="lineno">  265 </span><span class="spaces">    </span><span class="istickedoff">, &quot;lastActive&quot;          .= _si_lastActive si</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">, &quot;createdAt&quot;           .= _si_createdAt si</span>
+<span class="lineno">  267 </span><span class="spaces">    </span><span class="istickedoff">, &quot;description&quot;         .= _si_description si</span>
+<span class="lineno">  268 </span><span class="spaces">    </span><span class="istickedoff">, &quot;autoSummary&quot;         .= _si_autoSummary si</span>
+<span class="lineno">  269 </span><span class="spaces">    </span><span class="istickedoff">, &quot;firstMessageSnippet&quot; .= _si_firstMessageSnippet si</span>
+<span class="lineno">  270 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  271 </span>
+<span class="lineno">  272 </span>-- | WAI application handling @\/api\/*@ routes.
+<span class="lineno">  273 </span>apiApp :: FrontendEnv -&gt; Application
+<span class="lineno">  274 </span><span class="decl"><span class="istickedoff">apiApp env req respond = do</span>
+<span class="lineno">  275 </span><span class="spaces">  </span><span class="istickedoff">let method = requestMethod req</span>
+<span class="lineno">  276 </span><span class="spaces">      </span><span class="istickedoff">path   = pathInfo req</span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="istickedoff">case (method, path) of</span>
+<span class="lineno">  278 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;harnesses&quot;])            -&gt; <span class="nottickedoff">handleHarnesses env respond</span></span>
+<span class="lineno">  279 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;tabs&quot;])                 -&gt; handleListTabs env respond</span>
+<span class="lineno">  280 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;sessions&quot;, &quot;recent&quot;])   -&gt; handleRecentSessions env respond</span>
+<span class="lineno">  281 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;sessions&quot;, &quot;archived&quot;]) -&gt; handleArchivedSessions env respond</span>
+<span class="lineno">  282 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;sessions&quot;, sid, &quot;transcript&quot;]) -&gt;</span>
+<span class="lineno">  283 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">handleTranscript env sid respond</span></span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff">(&quot;POST&quot;, [&quot;api&quot;, &quot;tabs&quot;, tidx, &quot;close&quot;]) -&gt;</span>
+<span class="lineno">  285 </span><span class="spaces">      </span><span class="istickedoff">handleCloseTab env tidx respond</span>
+<span class="lineno">  286 </span><span class="spaces">    </span><span class="istickedoff">(&quot;POST&quot;, [&quot;api&quot;, &quot;tabs&quot;, &quot;new&quot;]) -&gt;</span>
+<span class="lineno">  287 </span><span class="spaces">      </span><span class="istickedoff">handleNewTab env req respond</span>
+<span class="lineno">  288 </span><span class="spaces">    </span><span class="istickedoff">(&quot;POST&quot;, [&quot;api&quot;, &quot;sessions&quot;, &quot;new&quot;]) -&gt;</span>
+<span class="lineno">  289 </span><span class="spaces">      </span><span class="istickedoff">handleNewSessionGone respond</span>
+<span class="lineno">  290 </span><span class="spaces">    </span><span class="istickedoff">(&quot;POST&quot;, [&quot;api&quot;, &quot;sessions&quot;, sid, &quot;send&quot;]) -&gt;</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">handleSend env sid req respond</span></span>
+<span class="lineno">  292 </span><span class="spaces">    </span><span class="istickedoff">(&quot;PUT&quot;, [&quot;api&quot;, &quot;sessions&quot;, sid, &quot;prompt&quot;]) -&gt;</span>
+<span class="lineno">  293 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">handleSetPrompt env sid req respond</span></span>
+<span class="lineno">  294 </span><span class="spaces">    </span><span class="istickedoff">(&quot;POST&quot;, [&quot;api&quot;, &quot;sessions&quot;, sid, &quot;archive&quot;]) -&gt;</span>
+<span class="lineno">  295 </span><span class="spaces">      </span><span class="istickedoff">handleSetArchived env sid True respond</span>
+<span class="lineno">  296 </span><span class="spaces">    </span><span class="istickedoff">(&quot;POST&quot;, [&quot;api&quot;, &quot;sessions&quot;, sid, &quot;unarchive&quot;]) -&gt;</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">handleSetArchived env sid False respond</span>
+<span class="lineno">  298 </span><span class="spaces">    </span><span class="istickedoff">(&quot;PUT&quot;, [&quot;api&quot;, &quot;sessions&quot;, sid, &quot;description&quot;]) -&gt;</span>
+<span class="lineno">  299 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">handleSetDescription env sid req respond</span></span>
+<span class="lineno">  300 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;agents&quot;])               -&gt; <span class="nottickedoff">handleAgents env respond</span></span>
+<span class="lineno">  301 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;providers&quot;])            -&gt; <span class="nottickedoff">handleListProviders env respond</span></span>
+<span class="lineno">  302 </span><span class="spaces">    </span><span class="istickedoff">(&quot;GET&quot;, [&quot;api&quot;, &quot;providers&quot;, name, &quot;models&quot;]) -&gt;</span>
+<span class="lineno">  303 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">handleListProviderModels env name respond</span></span>
+<span class="lineno">  304 </span><span class="spaces">    </span><span class="istickedoff">_                                        -&gt; <span class="nottickedoff">respondNotFound respond</span></span></span>
+<span class="lineno">  305 </span>
+<span class="lineno">  306 </span>handleHarnesses :: FrontendEnv -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  307 </span><span class="decl"><span class="nottickedoff">handleHarnesses env respond = do</span>
+<span class="lineno">  308 </span><span class="spaces">  </span><span class="nottickedoff">harnesses &lt;- readIORef (_fe_harnesses env)</span>
+<span class="lineno">  309 </span><span class="spaces">  </span><span class="nottickedoff">infos &lt;- traverse probeHarness (Map.toList harnesses)</span>
+<span class="lineno">  310 </span><span class="spaces">  </span><span class="nottickedoff">respond $ jsonResponse status200 infos</span></span>
+<span class="lineno">  311 </span>
+<span class="lineno">  312 </span>-- | Probe a single harness to determine its activity.
+<span class="lineno">  313 </span>-- Checks process status first, then does a quick screen capture
+<span class="lineno">  314 </span>-- to distinguish thinking from idle.
+<span class="lineno">  315 </span>probeHarness :: (Text, HarnessHandle) -&gt; IO HarnessInfo
+<span class="lineno">  316 </span><span class="decl"><span class="nottickedoff">probeHarness (name, hh) = do</span>
+<span class="lineno">  317 </span><span class="spaces">  </span><span class="nottickedoff">st &lt;- _hh_status hh</span>
+<span class="lineno">  318 </span><span class="spaces">  </span><span class="nottickedoff">activity &lt;- case st of</span>
+<span class="lineno">  319 </span><span class="spaces">    </span><span class="nottickedoff">HarnessExited _ -&gt; pure HarnessStopped</span>
+<span class="lineno">  320 </span><span class="spaces">    </span><span class="nottickedoff">HarnessRunning  -&gt; probeActivity (_hh_session hh) name</span>
+<span class="lineno">  321 </span><span class="spaces">  </span><span class="nottickedoff">pure HarnessInfo</span>
+<span class="lineno">  322 </span><span class="spaces">    </span><span class="nottickedoff">{ _hi_name     = name</span>
+<span class="lineno">  323 </span><span class="spaces">    </span><span class="nottickedoff">, _hi_activity = activity</span>
+<span class="lineno">  324 </span><span class="spaces">    </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  325 </span>
+<span class="lineno">  326 </span>-- | Capture the tmux window and check if the harness is idle or thinking.
+<span class="lineno">  327 </span>probeActivity :: Text -&gt; Text -&gt; IO HarnessActivity
+<span class="lineno">  328 </span><span class="decl"><span class="nottickedoff">probeActivity tmuxSession windowName = do</span>
+<span class="lineno">  329 </span><span class="spaces">  </span><span class="nottickedoff">let target = tmuxSession &lt;&gt; &quot;:&quot; &lt;&gt; extractWindowIdx windowName</span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- try @SomeException $ captureWindow target 50</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  332 </span><span class="spaces">    </span><span class="nottickedoff">Left _        -&gt; pure HarnessIdle</span>
+<span class="lineno">  333 </span><span class="spaces">    </span><span class="nottickedoff">Right capture -&gt; do</span>
+<span class="lineno">  334 </span><span class="spaces">      </span><span class="nottickedoff">let screenText = TE.decodeUtf8Lenient capture</span>
+<span class="lineno">  335 </span><span class="spaces">      </span><span class="nottickedoff">pure $ if isIdle screenText then HarnessIdle else HarnessThinking</span></span>
+<span class="lineno">  336 </span>
+<span class="lineno">  337 </span>-- | Extract the window index suffix from a harness name like &quot;claude-code-0&quot;.
+<span class="lineno">  338 </span>extractWindowIdx :: Text -&gt; Text
+<span class="lineno">  339 </span><span class="decl"><span class="nottickedoff">extractWindowIdx name =</span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="nottickedoff">case T.splitOn &quot;-&quot; name of</span>
+<span class="lineno">  341 </span><span class="spaces">    </span><span class="nottickedoff">parts | length parts &gt;= 2 -&gt; last parts</span>
+<span class="lineno">  342 </span><span class="spaces">    </span><span class="nottickedoff">_                         -&gt; &quot;0&quot;</span></span>
+<span class="lineno">  343 </span>
+<span class="lineno">  344 </span>-- | Return all currently open tabs as a JSON array.
+<span class="lineno">  345 </span>handleListTabs :: FrontendEnv -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  346 </span><span class="decl"><span class="istickedoff">handleListTabs env respond = do</span>
+<span class="lineno">  347 </span><span class="spaces">  </span><span class="istickedoff">tabs &lt;- _fe_listTabs env</span>
+<span class="lineno">  348 </span><span class="spaces">  </span><span class="istickedoff">respond $ jsonResponse status200 tabs</span></span>
+<span class="lineno">  349 </span>
+<span class="lineno">  350 </span>-- | Close a tab by index via the '_fe_closeTab' callback.
+<span class="lineno">  351 </span>handleCloseTab :: FrontendEnv -&gt; Text -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  352 </span><span class="decl"><span class="istickedoff">handleCloseTab env tidxText respond =</span>
+<span class="lineno">  353 </span><span class="spaces">  </span><span class="istickedoff">case reads (T.unpack tidxText) :: [(Int, String)] of</span>
+<span class="lineno">  354 </span><span class="spaces">    </span><span class="istickedoff">[(idx, &quot;&quot;)] -&gt; do</span>
+<span class="lineno">  355 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- _fe_closeTab env idx</span>
+<span class="lineno">  356 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">  357 </span><span class="spaces">        </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  358 </span><span class="spaces">          </span><span class="istickedoff">broadcastLists env</span>
+<span class="lineno">  359 </span><span class="spaces">          </span><span class="istickedoff">respond $ jsonResponse status200 (object [&quot;closed&quot; .= True])</span>
+<span class="lineno">  360 </span><span class="spaces">        </span><span class="istickedoff">Left errMsg -&gt;</span>
+<span class="lineno">  361 </span><span class="spaces">          </span><span class="istickedoff">respond $ jsonResponse status404 (object [&quot;error&quot; .= errMsg])</span>
+<span class="lineno">  362 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt;</span>
+<span class="lineno">  363 </span><span class="spaces">      </span><span class="istickedoff">respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Invalid tab index&quot; :: Text)])</span></span>
+<span class="lineno">  364 </span>
+<span class="lineno">  365 </span>handleRecentSessions :: FrontendEnv -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  366 </span><span class="decl"><span class="istickedoff">handleRecentSessions env respond = do</span>
+<span class="lineno">  367 </span><span class="spaces">  </span><span class="istickedoff">let limit   = _fe_recentLimit env</span>
+<span class="lineno">  368 </span><span class="spaces">      </span><span class="istickedoff">baseDir = _fe_sessionsDir env</span>
+<span class="lineno">  369 </span><span class="spaces">  </span><span class="istickedoff">-- Over-fetch so the empty-transcript filter below can't shrink the</span>
+<span class="lineno">  370 </span><span class="spaces">  </span><span class="istickedoff">-- visible count: listSessions already does a full directory scan and</span>
+<span class="lineno">  371 </span><span class="spaces">  </span><span class="istickedoff">-- sorts the whole metadata set, so a generous bound is essentially</span>
+<span class="lineno">  372 </span><span class="spaces">  </span><span class="istickedoff">-- free. Empty / archived sessions are dropped here, not erased on</span>
+<span class="lineno">  373 </span><span class="spaces">  </span><span class="istickedoff">-- disk — archiving is purely a UI hint controlled by the user.</span>
+<span class="lineno">  374 </span><span class="spaces">  </span><span class="istickedoff">metas    &lt;- listSessions baseDir Nothing (limit * 3)</span>
+<span class="lineno">  375 </span><span class="spaces">  </span><span class="istickedoff">-- Collect session IDs that are currently shown in an active tab so</span>
+<span class="lineno">  376 </span><span class="spaces">  </span><span class="istickedoff">-- the same session does not appear in both &quot;Active Tabs&quot; and</span>
+<span class="lineno">  377 </span><span class="spaces">  </span><span class="istickedoff">-- &quot;Recent Sessions&quot; simultaneously.</span>
+<span class="lineno">  378 </span><span class="spaces">  </span><span class="istickedoff">tabs &lt;- _fe_listTabs env</span>
+<span class="lineno">  379 </span><span class="spaces">  </span><span class="istickedoff">let activeTabSids = [s | TabSnapshot { _ts_sessionId = Just s } &lt;- tabs]</span>
+<span class="lineno">  380 </span><span class="spaces">      </span><span class="istickedoff">notInTab m    = unSessionId (_sm_id m) `notElem` activeTabSids</span>
+<span class="lineno">  381 </span><span class="spaces">      </span><span class="istickedoff">visible       = filter (\m -&gt; not (_sm_archived m) &amp;&amp; notInTab m) metas</span>
+<span class="lineno">  382 </span><span class="spaces">  </span><span class="istickedoff">nonEmpty &lt;- filterM (hasTranscriptEntries baseDir) visible</span>
+<span class="lineno">  383 </span><span class="spaces">  </span><span class="istickedoff">let chosen = take limit nonEmpty</span>
+<span class="lineno">  384 </span><span class="spaces">  </span><span class="istickedoff">-- Read a first-message snippet per session (bounded read per file).</span>
+<span class="lineno">  385 </span><span class="spaces">  </span><span class="istickedoff">-- This is the cheap display fallback when no user description and no</span>
+<span class="lineno">  386 </span><span class="spaces">  </span><span class="istickedoff">-- model-generated summary exist yet.</span>
+<span class="lineno">  387 </span><span class="spaces">  </span><span class="istickedoff">snippets &lt;- traverse (firstMessageSnippet baseDir) chosen</span>
+<span class="lineno">  388 </span><span class="spaces">  </span><span class="istickedoff">let infos = zipWith toSessionInfo chosen snippets</span>
+<span class="lineno">  389 </span><span class="spaces">  </span><span class="istickedoff">respond $ jsonResponse status200 infos</span></span>
+<span class="lineno">  390 </span>
+<span class="lineno">  391 </span>-- | Return all archived sessions, sorted by last-active descending.
+<span class="lineno">  392 </span>handleArchivedSessions :: FrontendEnv -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  393 </span><span class="decl"><span class="istickedoff">handleArchivedSessions env respond = do</span>
+<span class="lineno">  394 </span><span class="spaces">  </span><span class="istickedoff">let baseDir = _fe_sessionsDir env</span>
+<span class="lineno">  395 </span><span class="spaces">  </span><span class="istickedoff">-- Load all sessions with a generous limit; filter to archived-only.</span>
+<span class="lineno">  396 </span><span class="spaces">  </span><span class="istickedoff">metas &lt;- listSessions baseDir Nothing 1000</span>
+<span class="lineno">  397 </span><span class="spaces">  </span><span class="istickedoff">let archived = filter _sm_archived metas</span>
+<span class="lineno">  398 </span><span class="spaces">      </span><span class="istickedoff">infos = map (`toSessionInfo` Nothing) archived</span>
+<span class="lineno">  399 </span><span class="spaces">  </span><span class="istickedoff">respond $ jsonResponse status200 infos</span></span>
+<span class="lineno">  400 </span>
+<span class="lineno">  401 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  402 </span>-- List snapshots (WS push)
+<span class="lineno">  403 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  404 </span>
+<span class="lineno">  405 </span>-- | Compute the same sidebar payloads (tabs, recent sessions, archived
+<span class="lineno">  406 </span>-- sessions) that the three HTTP endpoints return, pre-serialized as a
+<span class="lineno">  407 </span>-- single JSON 'Value'. The WS handler sends this on connect and the
+<span class="lineno">  408 </span>-- mutation handlers call 'broadcastLists' to push it after every change.
+<span class="lineno">  409 </span>computeListsSnapshot :: FrontendEnv -&gt; IO Aeson.Value
+<span class="lineno">  410 </span><span class="decl"><span class="istickedoff">computeListsSnapshot env = do</span>
+<span class="lineno">  411 </span><span class="spaces">  </span><span class="istickedoff">let limit   = _fe_recentLimit env</span>
+<span class="lineno">  412 </span><span class="spaces">      </span><span class="istickedoff">baseDir = _fe_sessionsDir env</span>
+<span class="lineno">  413 </span><span class="spaces">  </span><span class="istickedoff">tabs &lt;- _fe_listTabs env</span>
+<span class="lineno">  414 </span><span class="spaces">  </span><span class="istickedoff">-- Recent sessions: exclude archived, exclude active-tab-backed, exclude</span>
+<span class="lineno">  415 </span><span class="spaces">  </span><span class="istickedoff">-- empty transcripts, enrich with first-message snippet — same pipeline</span>
+<span class="lineno">  416 </span><span class="spaces">  </span><span class="istickedoff">-- as handleRecentSessions.</span>
+<span class="lineno">  417 </span><span class="spaces">  </span><span class="istickedoff">allMetas &lt;- listSessions baseDir Nothing (limit * 3)</span>
+<span class="lineno">  418 </span><span class="spaces">  </span><span class="istickedoff">let activeTabSids = [<span class="nottickedoff">s</span> | TabSnapshot { _ts_sessionId = Just s } &lt;- tabs]</span>
+<span class="lineno">  419 </span><span class="spaces">      </span><span class="istickedoff">notInTab m    = <span class="nottickedoff">unSessionId (_sm_id m)</span> `notElem` activeTabSids</span>
+<span class="lineno">  420 </span><span class="spaces">      </span><span class="istickedoff">visible       = filter (\m -&gt; not (_sm_archived m) &amp;&amp; notInTab <span class="nottickedoff">m</span>) allMetas</span>
+<span class="lineno">  421 </span><span class="spaces">  </span><span class="istickedoff">nonEmpty &lt;- filterM (hasTranscriptEntries baseDir) visible</span>
+<span class="lineno">  422 </span><span class="spaces">  </span><span class="istickedoff">let chosen = take limit nonEmpty</span>
+<span class="lineno">  423 </span><span class="spaces">  </span><span class="istickedoff">snippets &lt;- traverse (firstMessageSnippet baseDir) chosen</span>
+<span class="lineno">  424 </span><span class="spaces">  </span><span class="istickedoff">let recentInfos = zipWith toSessionInfo chosen snippets</span>
+<span class="lineno">  425 </span><span class="spaces">  </span><span class="istickedoff">-- Archived: all archived sessions, sorted by lastActive descending</span>
+<span class="lineno">  426 </span><span class="spaces">  </span><span class="istickedoff">-- (listSessions already sorts; we just filter).</span>
+<span class="lineno">  427 </span><span class="spaces">  </span><span class="istickedoff">archivedMetas &lt;- listSessions baseDir Nothing 1000</span>
+<span class="lineno">  428 </span><span class="spaces">  </span><span class="istickedoff">let archivedChosen = filter _sm_archived archivedMetas</span>
+<span class="lineno">  429 </span><span class="spaces">  </span><span class="istickedoff">archivedSnippets &lt;- traverse <span class="nottickedoff">(firstMessageSnippet baseDir)</span> archivedChosen</span>
+<span class="lineno">  430 </span><span class="spaces">  </span><span class="istickedoff">let archivedInfos = zipWith <span class="nottickedoff">toSessionInfo</span> archivedChosen <span class="nottickedoff">archivedSnippets</span></span>
+<span class="lineno">  431 </span><span class="spaces">  </span><span class="istickedoff">pure $ object</span>
+<span class="lineno">  432 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;type&quot;              .= (&quot;lists&quot; :: Text)</span>
+<span class="lineno">  433 </span><span class="spaces">    </span><span class="istickedoff">, &quot;tabs&quot;              .= tabs</span>
+<span class="lineno">  434 </span><span class="spaces">    </span><span class="istickedoff">, &quot;recentSessions&quot;    .= recentInfos</span>
+<span class="lineno">  435 </span><span class="spaces">    </span><span class="istickedoff">, &quot;archivedSessions&quot;  .= archivedInfos</span>
+<span class="lineno">  436 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  437 </span>
+<span class="lineno">  438 </span>-- | Compute and broadcast a lists snapshot to all WS subscribers.
+<span class="lineno">  439 </span>-- No-op when the broker is absent (test / legacy paths).
+<span class="lineno">  440 </span>broadcastLists :: FrontendEnv -&gt; IO ()
+<span class="lineno">  441 </span><span class="decl"><span class="istickedoff">broadcastLists env = case _fe_broker env of</span>
+<span class="lineno">  442 </span><span class="spaces">  </span><span class="istickedoff">Nothing     -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  443 </span><span class="spaces">  </span><span class="istickedoff">Just broker -&gt; do</span>
+<span class="lineno">  444 </span><span class="spaces">    </span><span class="istickedoff">v &lt;- computeListsSnapshot env</span>
+<span class="lineno">  445 </span><span class="spaces">    </span><span class="istickedoff">_streamBroker_publish broker (ListsSnapshot v)</span></span>
+<span class="lineno">  446 </span>
+<span class="lineno">  447 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  448 </span>-- Archive / description
+<span class="lineno">  449 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  450 </span>
+<span class="lineno">  451 </span>-- | Toggle the archive flag on a session. The 'archived' argument is
+<span class="lineno">  452 </span>-- the **target** value (True for /archive, False for /unarchive), so
+<span class="lineno">  453 </span>-- the routes are idempotent: archiving an already-archived session is
+<span class="lineno">  454 </span>-- a no-op success. The session directory and transcript are never
+<span class="lineno">  455 </span>-- removed — see Session.Handle.setArchived for the disk-side contract.
+<span class="lineno">  456 </span>handleSetArchived
+<span class="lineno">  457 </span>  :: FrontendEnv
+<span class="lineno">  458 </span>  -&gt; Text
+<span class="lineno">  459 </span>  -&gt; Bool
+<span class="lineno">  460 </span>  -&gt; (Response -&gt; IO ResponseReceived)
+<span class="lineno">  461 </span>  -&gt; IO ResponseReceived
+<span class="lineno">  462 </span><span class="decl"><span class="istickedoff">handleSetArchived env sidText archived respond = do</span>
+<span class="lineno">  463 </span><span class="spaces">  </span><span class="istickedoff">let sid = SessionId sidText</span>
+<span class="lineno">  464 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- setArchived (_fe_sessionsDir env) sid archived</span>
+<span class="lineno">  465 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  466 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  467 </span><span class="spaces">      </span><span class="istickedoff">broadcastLists env</span>
+<span class="lineno">  468 </span><span class="spaces">      </span><span class="istickedoff">respond $ jsonResponse status200 (object [&quot;archived&quot; .= archived])</span>
+<span class="lineno">  469 </span><span class="spaces">    </span><span class="istickedoff">Left SetArchivedSessionMissing -&gt;</span>
+<span class="lineno">  470 </span><span class="spaces">      </span><span class="istickedoff">respondNotFound respond</span>
+<span class="lineno">  471 </span><span class="spaces">    </span><span class="istickedoff">Left (SetArchivedParseFailed msg) -&gt;</span>
+<span class="lineno">  472 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">respond $ jsonResponse status500 (object [&quot;error&quot; .= msg])</span></span></span>
+<span class="lineno">  473 </span>
+<span class="lineno">  474 </span>-- | Update the user-provided description on a session.
+<span class="lineno">  475 </span>-- Body shape: @{&quot;description&quot;: &quot;...&quot;}@ or @{&quot;description&quot;: null}@ (clears).
+<span class="lineno">  476 </span>-- Trims whitespace; an all-whitespace string clears the field.
+<span class="lineno">  477 </span>handleSetDescription
+<span class="lineno">  478 </span>  :: FrontendEnv
+<span class="lineno">  479 </span>  -&gt; Text
+<span class="lineno">  480 </span>  -&gt; Request
+<span class="lineno">  481 </span>  -&gt; (Response -&gt; IO ResponseReceived)
+<span class="lineno">  482 </span>  -&gt; IO ResponseReceived
+<span class="lineno">  483 </span><span class="decl"><span class="nottickedoff">handleSetDescription env sidText req respond = do</span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="nottickedoff">body &lt;- strictRequestBody req</span>
+<span class="lineno">  485 </span><span class="spaces">  </span><span class="nottickedoff">case Aeson.eitherDecode' body of</span>
+<span class="lineno">  486 </span><span class="spaces">    </span><span class="nottickedoff">Left err -&gt; respond $ jsonResponse status400 (object [&quot;error&quot; .= T.pack err])</span>
+<span class="lineno">  487 </span><span class="spaces">    </span><span class="nottickedoff">Right (DescBody mDesc) -&gt; do</span>
+<span class="lineno">  488 </span><span class="spaces">      </span><span class="nottickedoff">result &lt;- setDescription (_fe_sessionsDir env) (SessionId sidText) mDesc</span>
+<span class="lineno">  489 </span><span class="spaces">      </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  490 </span><span class="spaces">        </span><span class="nottickedoff">Right () -&gt; do</span>
+<span class="lineno">  491 </span><span class="spaces">          </span><span class="nottickedoff">broadcastLists env</span>
+<span class="lineno">  492 </span><span class="spaces">          </span><span class="nottickedoff">respond $ jsonResponse status200 (object [&quot;description&quot; .= mDesc])</span>
+<span class="lineno">  493 </span><span class="spaces">        </span><span class="nottickedoff">Left SetDescriptionSessionMissing -&gt;</span>
+<span class="lineno">  494 </span><span class="spaces">          </span><span class="nottickedoff">respondNotFound respond</span>
+<span class="lineno">  495 </span><span class="spaces">        </span><span class="nottickedoff">Left (SetDescriptionParseFailed msg) -&gt;</span>
+<span class="lineno">  496 </span><span class="spaces">          </span><span class="nottickedoff">respond $ jsonResponse status500 (object [&quot;error&quot; .= msg])</span></span>
+<span class="lineno">  497 </span>
+<span class="lineno">  498 </span>-- | Body parser that accepts @{&quot;description&quot;: &lt;string|null&gt;}@; absent
+<span class="lineno">  499 </span>-- or non-string values normalise to 'Nothing' (which clears the field).
+<span class="lineno">  500 </span>newtype DescBody = DescBody (Maybe Text)
+<span class="lineno">  501 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON DescBody</span></span></span></span> where
+<span class="lineno">  502 </span>  <span class="decl"><span class="nottickedoff">parseJSON = Aeson.withObject &quot;DescBody&quot; $ \o -&gt; DescBody &lt;$&gt; o .:? &quot;description&quot;</span></span>
+<span class="lineno">  503 </span>
+<span class="lineno">  504 </span>-- | Check whether a session has at least one transcript entry.
+<span class="lineno">  505 </span>hasTranscriptEntries :: FilePath -&gt; SessionMeta -&gt; IO Bool
+<span class="lineno">  506 </span><span class="decl"><span class="istickedoff">hasTranscriptEntries baseDir meta = do</span>
+<span class="lineno">  507 </span><span class="spaces">  </span><span class="istickedoff">let path = baseDir &lt;/&gt; T.unpack (unSessionId (_sm_id meta)) &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  508 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- doesFileExist path</span>
+<span class="lineno">  509 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">not exists</span></span>
+<span class="lineno">  510 </span><span class="spaces">    </span><span class="istickedoff">then <span class="nottickedoff">pure False</span></span>
+<span class="lineno">  511 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  512 </span><span class="spaces">      </span><span class="istickedoff">size &lt;- getFileSize path</span>
+<span class="lineno">  513 </span><span class="spaces">      </span><span class="istickedoff">pure (size &gt; 0)</span></span>
+<span class="lineno">  514 </span>
+<span class="lineno">  515 </span>toSessionInfo :: SessionMeta -&gt; Maybe Text -&gt; SessionInfo
+<span class="lineno">  516 </span><span class="decl"><span class="istickedoff">toSessionInfo m snippet = SessionInfo</span>
+<span class="lineno">  517 </span><span class="spaces">  </span><span class="istickedoff">{ _si_id                  = unSessionId (_sm_id m)</span>
+<span class="lineno">  518 </span><span class="spaces">  </span><span class="istickedoff">, _si_agent               = fmap unAgentName (_sm_agent m)</span>
+<span class="lineno">  519 </span><span class="spaces">  </span><span class="istickedoff">, _si_runtime             = sessionKindToText (_sm_kind m)</span>
+<span class="lineno">  520 </span><span class="spaces">  </span><span class="istickedoff">, _si_model               = _sm_model m</span>
+<span class="lineno">  521 </span><span class="spaces">  </span><span class="istickedoff">, _si_lastActive          = _sm_lastActive m</span>
+<span class="lineno">  522 </span><span class="spaces">  </span><span class="istickedoff">, _si_createdAt           = _sm_createdAt m</span>
+<span class="lineno">  523 </span><span class="spaces">  </span><span class="istickedoff">, _si_description         = _sm_description m</span>
+<span class="lineno">  524 </span><span class="spaces">  </span><span class="istickedoff">, _si_autoSummary         = _sm_autoSummary m</span>
+<span class="lineno">  525 </span><span class="spaces">  </span><span class="istickedoff">, _si_firstMessageSnippet = snippet</span>
+<span class="lineno">  526 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  527 </span>
+<span class="lineno">  528 </span>-- | Cheap fallback for display: read just the first line of the
+<span class="lineno">  529 </span>-- session's @transcript.jsonl@, decode it as a 'TranscriptEntry', and
+<span class="lineno">  530 </span>-- extract a short snippet of the first user message. Returns 'Nothing'
+<span class="lineno">  531 </span>-- when there's no transcript, the first entry isn't a request, or any
+<span class="lineno">  532 </span>-- decoding step fails. The returned string is at most
+<span class="lineno">  533 </span>-- 'snippetCharBudget' chars with newlines normalised to spaces.
+<span class="lineno">  534 </span>--
+<span class="lineno">  535 </span>-- Cost is one bounded read per call (we don't load the whole transcript).
+<span class="lineno">  536 </span>firstMessageSnippet :: FilePath -&gt; SessionMeta -&gt; IO (Maybe Text)
+<span class="lineno">  537 </span><span class="decl"><span class="istickedoff">firstMessageSnippet baseDir meta = do</span>
+<span class="lineno">  538 </span><span class="spaces">  </span><span class="istickedoff">let path = baseDir &lt;/&gt; T.unpack (unSessionId (_sm_id meta)) &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  539 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try @IOException $ withFile path ReadMode BSC.hGetLine</span>
+<span class="lineno">  540 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  541 </span><span class="spaces">    </span><span class="istickedoff">Left _    -&gt; <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  542 </span><span class="spaces">    </span><span class="istickedoff">Right line -&gt; case Aeson.eitherDecodeStrict' line :: Either String TranscriptEntry of</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">Left _ -&gt; pure Nothing</span>
+<span class="lineno">  544 </span><span class="spaces">      </span><span class="istickedoff">Right entry</span>
+<span class="lineno">  545 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">_te_direction entry /= Request</span> -&gt; pure Nothing</span>
+<span class="lineno">  546 </span><span class="spaces">        </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> -&gt; <span class="nottickedoff">pure (snippetFromPayload (_te_payload entry))</span></span></span>
+<span class="lineno">  547 </span>
+<span class="lineno">  548 </span>snippetCharBudget :: Int
+<span class="lineno">  549 </span><span class="decl"><span class="nottickedoff">snippetCharBudget = 120</span></span>
+<span class="lineno">  550 </span>
+<span class="lineno">  551 </span>-- | Extract a display snippet from a request payload. Two shapes:
+<span class="lineno">  552 </span>-- (1) JSON object with a &quot;messages&quot; array (provider request) — pull
+<span class="lineno">  553 </span>--     text out of the first message; (2) plain text (harness send) —
+<span class="lineno">  554 </span>--     use the payload directly. Trimmed, newline-normalised, and
+<span class="lineno">  555 </span>--     truncated to 'snippetCharBudget' characters.
+<span class="lineno">  556 </span>snippetFromPayload :: Text -&gt; Maybe Text
+<span class="lineno">  557 </span><span class="decl"><span class="nottickedoff">snippetFromPayload raw = trimAndTruncate &lt;$&gt;</span>
+<span class="lineno">  558 </span><span class="spaces">  </span><span class="nottickedoff">case Aeson.decodeStrict (TE.encodeUtf8 raw) of</span>
+<span class="lineno">  559 </span><span class="spaces">    </span><span class="nottickedoff">Just (Aeson.Object o)</span>
+<span class="lineno">  560 </span><span class="spaces">      </span><span class="nottickedoff">| Just (Aeson.Array msgs) &lt;- KM.lookup &quot;messages&quot; o</span>
+<span class="lineno">  561 </span><span class="spaces">      </span><span class="nottickedoff">, not (V.null msgs)</span>
+<span class="lineno">  562 </span><span class="spaces">      </span><span class="nottickedoff">-&gt; messageText (V.unsafeHead msgs)</span>
+<span class="lineno">  563 </span><span class="spaces">    </span><span class="nottickedoff">_ -&gt; Just raw</span>
+<span class="lineno">  564 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  565 </span><span class="spaces">    </span><span class="nottickedoff">-- Anthropic-style message content: either a plain string or an</span>
+<span class="lineno">  566 </span><span class="spaces">    </span><span class="nottickedoff">-- array of {type:&quot;text&quot;, text:&quot;...&quot;} blocks. We just want a</span>
+<span class="lineno">  567 </span><span class="spaces">    </span><span class="nottickedoff">-- human-readable lead.</span>
+<span class="lineno">  568 </span><span class="spaces">    </span><span class="nottickedoff">messageText :: Aeson.Value -&gt; Maybe Text</span>
+<span class="lineno">  569 </span><span class="spaces">    </span><span class="nottickedoff">messageText (Aeson.Object m) = case KM.lookup &quot;content&quot; m of</span>
+<span class="lineno">  570 </span><span class="spaces">      </span><span class="nottickedoff">Just (Aeson.String s) -&gt; Just s</span>
+<span class="lineno">  571 </span><span class="spaces">      </span><span class="nottickedoff">Just (Aeson.Array bs) -&gt; Just (T.intercalate &quot; &quot; [t | Aeson.Object b &lt;- V.toList bs</span>
+<span class="lineno">  572 </span><span class="spaces">                                                          </span><span class="nottickedoff">, Just (Aeson.String t) &lt;- [KM.lookup &quot;text&quot; b]])</span>
+<span class="lineno">  573 </span><span class="spaces">      </span><span class="nottickedoff">_                     -&gt; Nothing</span>
+<span class="lineno">  574 </span><span class="spaces">    </span><span class="nottickedoff">messageText _ = Nothing</span>
+<span class="lineno">  575 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  576 </span><span class="spaces">    </span><span class="nottickedoff">trimAndTruncate :: Text -&gt; Text</span>
+<span class="lineno">  577 </span><span class="spaces">    </span><span class="nottickedoff">trimAndTruncate t =</span>
+<span class="lineno">  578 </span><span class="spaces">      </span><span class="nottickedoff">let normalized = T.unwords (T.words t)  -- collapse whitespace incl. newlines</span>
+<span class="lineno">  579 </span><span class="spaces">      </span><span class="nottickedoff">in  if T.length normalized &gt; snippetCharBudget</span>
+<span class="lineno">  580 </span><span class="spaces">            </span><span class="nottickedoff">then T.take (snippetCharBudget - 1) normalized &lt;&gt; &quot;\x2026&quot;</span>
+<span class="lineno">  581 </span><span class="spaces">            </span><span class="nottickedoff">else normalized</span></span>
+<span class="lineno">  582 </span>
+<span class="lineno">  583 </span>-- | JSON-serializable transcript entry for the frontend.
+<span class="lineno">  584 </span>data TranscriptEntryInfo = TranscriptEntryInfo
+<span class="lineno">  585 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tei_id</span></span></span>        :: Text
+<span class="lineno">  586 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tei_timestamp</span></span></span> :: UTCTime
+<span class="lineno">  587 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tei_direction</span></span></span> :: Text
+<span class="lineno">  588 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tei_payload</span></span></span>   :: Text
+<span class="lineno">  589 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tei_harness</span></span></span>   :: Maybe Text
+<span class="lineno">  590 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tei_model</span></span></span>     :: Maybe Text
+<span class="lineno">  591 </span>  }
+<span class="lineno">  592 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  593 </span>
+<span class="lineno">  594 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON TranscriptEntryInfo</span></span></span></span></span></span></span></span> where
+<span class="lineno">  595 </span>  <span class="decl"><span class="istickedoff">toJSON e = object</span>
+<span class="lineno">  596 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;id&quot;        .= _tei_id e</span>
+<span class="lineno">  597 </span><span class="spaces">    </span><span class="istickedoff">, &quot;timestamp&quot; .= _tei_timestamp e</span>
+<span class="lineno">  598 </span><span class="spaces">    </span><span class="istickedoff">, &quot;direction&quot; .= _tei_direction e</span>
+<span class="lineno">  599 </span><span class="spaces">    </span><span class="istickedoff">, &quot;payload&quot;   .= _tei_payload e</span>
+<span class="lineno">  600 </span><span class="spaces">    </span><span class="istickedoff">, &quot;harness&quot;   .= _tei_harness e</span>
+<span class="lineno">  601 </span><span class="spaces">    </span><span class="istickedoff">, &quot;model&quot;     .= _tei_model e</span>
+<span class="lineno">  602 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  603 </span>
+<span class="lineno">  604 </span>toTranscriptEntryInfo :: TranscriptEntry -&gt; TranscriptEntryInfo
+<span class="lineno">  605 </span><span class="decl"><span class="nottickedoff">toTranscriptEntryInfo e = TranscriptEntryInfo</span>
+<span class="lineno">  606 </span><span class="spaces">  </span><span class="nottickedoff">{ _tei_id        = _te_id e</span>
+<span class="lineno">  607 </span><span class="spaces">  </span><span class="nottickedoff">, _tei_timestamp = _te_timestamp e</span>
+<span class="lineno">  608 </span><span class="spaces">  </span><span class="nottickedoff">, _tei_direction = case _te_direction e of</span>
+<span class="lineno">  609 </span><span class="spaces">      </span><span class="nottickedoff">Request  -&gt; &quot;request&quot;</span>
+<span class="lineno">  610 </span><span class="spaces">      </span><span class="nottickedoff">Response -&gt; &quot;response&quot;</span>
+<span class="lineno">  611 </span><span class="spaces">  </span><span class="nottickedoff">, _tei_payload   = _te_payload e</span>
+<span class="lineno">  612 </span><span class="spaces">  </span><span class="nottickedoff">, _tei_harness   = _te_harness e</span>
+<span class="lineno">  613 </span><span class="spaces">  </span><span class="nottickedoff">, _tei_model     = _te_model e</span>
+<span class="lineno">  614 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  615 </span>
+<span class="lineno">  616 </span>-- | Read transcript entries from a session's @transcript.jsonl@ file.
+<span class="lineno">  617 </span>handleTranscript :: FrontendEnv -&gt; Text -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  618 </span><span class="decl"><span class="nottickedoff">handleTranscript env sid respond = do</span>
+<span class="lineno">  619 </span><span class="spaces">  </span><span class="nottickedoff">-- Reject path traversal (shared helper — D26)</span>
+<span class="lineno">  620 </span><span class="spaces">  </span><span class="nottickedoff">if not (isValidSessionId sid)</span>
+<span class="lineno">  621 </span><span class="spaces">    </span><span class="nottickedoff">then respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Invalid session ID&quot; :: Text)])</span>
+<span class="lineno">  622 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">  623 </span><span class="spaces">      </span><span class="nottickedoff">let path = _fe_sessionsDir env &lt;/&gt; T.unpack sid &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  624 </span><span class="spaces">      </span><span class="nottickedoff">exists &lt;- doesFileExist path</span>
+<span class="lineno">  625 </span><span class="spaces">      </span><span class="nottickedoff">if not exists</span>
+<span class="lineno">  626 </span><span class="spaces">        </span><span class="nottickedoff">then respond $ jsonResponse status404 (object [&quot;error&quot; .= (&quot;Session not found&quot; :: Text)])</span>
+<span class="lineno">  627 </span><span class="spaces">        </span><span class="nottickedoff">else do</span>
+<span class="lineno">  628 </span><span class="spaces">          </span><span class="nottickedoff">result &lt;- try @SomeException $ readTranscriptFile path</span>
+<span class="lineno">  629 </span><span class="spaces">          </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  630 </span><span class="spaces">            </span><span class="nottickedoff">Left _ -&gt;</span>
+<span class="lineno">  631 </span><span class="spaces">              </span><span class="nottickedoff">respond $ jsonResponse status500 (object [&quot;error&quot; .= (&quot;Failed to read transcript&quot; :: Text)])</span>
+<span class="lineno">  632 </span><span class="spaces">            </span><span class="nottickedoff">Right entries -&gt;</span>
+<span class="lineno">  633 </span><span class="spaces">              </span><span class="nottickedoff">respond $ jsonResponse status200 (map toTranscriptEntryInfo entries)</span></span>
+<span class="lineno">  634 </span>
+<span class="lineno">  635 </span>-- | Read and parse a JSONL transcript file.
+<span class="lineno">  636 </span>readTranscriptFile :: FilePath -&gt; IO [TranscriptEntry]
+<span class="lineno">  637 </span><span class="decl"><span class="nottickedoff">readTranscriptFile path = do</span>
+<span class="lineno">  638 </span><span class="spaces">  </span><span class="nottickedoff">contents &lt;- LBS.readFile path</span>
+<span class="lineno">  639 </span><span class="spaces">  </span><span class="nottickedoff">let linesBS = filter (not . LBS.null) (LBS.split 0x0A contents)</span>
+<span class="lineno">  640 </span><span class="spaces">  </span><span class="nottickedoff">pure [e | l &lt;- linesBS, Just e &lt;- [Aeson.decode l]]</span></span>
+<span class="lineno">  641 </span>
+<span class="lineno">  642 </span>-- | List available agents.
+<span class="lineno">  643 </span>handleAgents :: FrontendEnv -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  644 </span><span class="decl"><span class="nottickedoff">handleAgents env respond = do</span>
+<span class="lineno">  645 </span><span class="spaces">  </span><span class="nottickedoff">defs &lt;- discoverAgents (_fe_logger env) (_fe_agentsDir env)</span>
+<span class="lineno">  646 </span><span class="spaces">  </span><span class="nottickedoff">let infos = map toAgentInfo defs</span>
+<span class="lineno">  647 </span><span class="spaces">  </span><span class="nottickedoff">respond $ jsonResponse status200 infos</span>
+<span class="lineno">  648 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  649 </span><span class="spaces">    </span><span class="nottickedoff">toAgentInfo def =</span>
+<span class="lineno">  650 </span><span class="spaces">      </span><span class="nottickedoff">let name = unAgentName (_ad_name def)</span>
+<span class="lineno">  651 </span><span class="spaces">      </span><span class="nottickedoff">in AgentInfo</span>
+<span class="lineno">  652 </span><span class="spaces">        </span><span class="nottickedoff">{ _ai_name      = name</span>
+<span class="lineno">  653 </span><span class="spaces">        </span><span class="nottickedoff">, _ai_isDefault = _fe_defaultAgent env == Just name</span>
+<span class="lineno">  654 </span><span class="spaces">        </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  655 </span>
+<span class="lineno">  656 </span>-- | List available models for a given provider name. Delegates to the
+<span class="lineno">  657 </span>-- @_fe_listModels@ callback, which makes a live HTTP call to the
+<span class="lineno">  658 </span>-- provider's @\/v1\/models@ endpoint with the configured credentials.
+<span class="lineno">  659 </span>-- Returns @[]@ when the provider is unknown, the call fails, or no
+<span class="lineno">  660 </span>-- credentials are configured — the frontend then offers only the
+<span class="lineno">  661 </span>-- &quot;Custom…&quot; free-text affordance.
+<span class="lineno">  662 </span>handleListProviderModels
+<span class="lineno">  663 </span>  :: FrontendEnv
+<span class="lineno">  664 </span>  -&gt; Text
+<span class="lineno">  665 </span>  -&gt; (Response -&gt; IO ResponseReceived)
+<span class="lineno">  666 </span>  -&gt; IO ResponseReceived
+<span class="lineno">  667 </span><span class="decl"><span class="nottickedoff">handleListProviderModels env name respond = do</span>
+<span class="lineno">  668 </span><span class="spaces">  </span><span class="nottickedoff">ids &lt;- _fe_listModels env name</span>
+<span class="lineno">  669 </span><span class="spaces">  </span><span class="nottickedoff">respond $ jsonResponse status200 ids</span></span>
+<span class="lineno">  670 </span>
+<span class="lineno">  671 </span>-- | List the providers the user has actually configured. Used by the
+<span class="lineno">  672 </span>-- New Tab dialog to filter its provider dropdown so only usable
+<span class="lineno">  673 </span>-- providers appear. See '_fe_listProviders' for what &quot;configured&quot; means.
+<span class="lineno">  674 </span>handleListProviders
+<span class="lineno">  675 </span>  :: FrontendEnv
+<span class="lineno">  676 </span>  -&gt; (Response -&gt; IO ResponseReceived)
+<span class="lineno">  677 </span>  -&gt; IO ResponseReceived
+<span class="lineno">  678 </span><span class="decl"><span class="nottickedoff">handleListProviders env respond = do</span>
+<span class="lineno">  679 </span><span class="spaces">  </span><span class="nottickedoff">names &lt;- _fe_listProviders env</span>
+<span class="lineno">  680 </span><span class="spaces">  </span><span class="nottickedoff">respond $ jsonResponse status200 names</span></span>
+<span class="lineno">  681 </span>
+<span class="lineno">  682 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  683 </span>-- POST /api/tabs/new — unified tab creation endpoint
+<span class="lineno">  684 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  685 </span>
+<span class="lineno">  686 </span>-- | Request body for creating a new tab.
+<span class="lineno">  687 </span>--
+<span class="lineno">  688 </span>-- @
+<span class="lineno">  689 </span>-- { &quot;kind&quot;: { &quot;tag&quot;: &quot;session&quot;,
+<span class="lineno">  690 </span>--             &quot;session_kind&quot;: { &quot;tag&quot;: &quot;provider&quot;,
+<span class="lineno">  691 </span>--                               &quot;provider&quot;: &quot;anthropic&quot;,
+<span class="lineno">  692 </span>--                               &quot;model&quot;: &quot;...&quot; } } }
+<span class="lineno">  693 </span>-- @
+<span class="lineno">  694 </span>--
+<span class="lineno">  695 </span>-- OR:
+<span class="lineno">  696 </span>--
+<span class="lineno">  697 </span>-- @
+<span class="lineno">  698 </span>-- { &quot;kind&quot;: { &quot;tag&quot;: &quot;raw_shell&quot;,
+<span class="lineno">  699 </span>--             &quot;backend&quot;: { &quot;tag&quot;: &quot;local&quot; } } }
+<span class="lineno">  700 </span>-- @
+<span class="lineno">  701 </span>newtype NewTabRequest = NewTabRequest
+<span class="lineno">  702 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ntr_kind</span></span></span> :: TabKind
+<span class="lineno">  703 </span>  }
+<span class="lineno">  704 </span>
+<span class="lineno">  705 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON NewTabRequest</span></span></span></span> where
+<span class="lineno">  706 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;NewTabRequest&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  707 </span><span class="spaces">    </span><span class="istickedoff">kindObj &lt;- o .: &quot;kind&quot;</span>
+<span class="lineno">  708 </span><span class="spaces">    </span><span class="istickedoff">tabKind &lt;- parseTabKind kindObj</span>
+<span class="lineno">  709 </span><span class="spaces">    </span><span class="istickedoff">pure (NewTabRequest tabKind)</span></span>
+<span class="lineno">  710 </span>
+<span class="lineno">  711 </span>-- | Parse a 'TabKind' from the JSON envelope used by POST /api/tabs/new.
+<span class="lineno">  712 </span>--
+<span class="lineno">  713 </span>-- Two top-level tags:
+<span class="lineno">  714 </span>--
+<span class="lineno">  715 </span>--   * @\&quot;session\&quot;@ → expects a @\&quot;session_kind\&quot;@ sub-object whose
+<span class="lineno">  716 </span>--     shape is the existing 'SessionKind' JSON (tag-discriminated:
+<span class="lineno">  717 </span>--     @\&quot;provider\&quot;@ or @\&quot;harness\&quot;@).
+<span class="lineno">  718 </span>--   * @\&quot;raw_shell\&quot;@ → expects a @\&quot;backend\&quot;@ sub-object whose shape
+<span class="lineno">  719 </span>--     is the existing 'TerminalBackend' JSON (tag-discriminated).
+<span class="lineno">  720 </span>parseTabKind :: Aeson.Value -&gt; AesonTypes.Parser TabKind
+<span class="lineno">  721 </span><span class="decl"><span class="istickedoff">parseTabKind = Aeson.withObject <span class="nottickedoff">&quot;TabKind&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  722 </span><span class="spaces">  </span><span class="istickedoff">tag &lt;- o .: &quot;tag&quot; :: AesonTypes.Parser Text</span>
+<span class="lineno">  723 </span><span class="spaces">  </span><span class="istickedoff">case tag of</span>
+<span class="lineno">  724 </span><span class="spaces">    </span><span class="istickedoff">&quot;session&quot; -&gt; do</span>
+<span class="lineno">  725 </span><span class="spaces">      </span><span class="istickedoff">sk &lt;- o .: &quot;session_kind&quot;</span>
+<span class="lineno">  726 </span><span class="spaces">      </span><span class="istickedoff">TkSession &lt;$&gt; Aeson.parseJSON sk</span>
+<span class="lineno">  727 </span><span class="spaces">    </span><span class="istickedoff">&quot;raw_shell&quot; -&gt; do</span>
+<span class="lineno">  728 </span><span class="spaces">      </span><span class="istickedoff">be &lt;- o .: &quot;backend&quot;</span>
+<span class="lineno">  729 </span><span class="spaces">      </span><span class="istickedoff">TkRawShell &lt;$&gt; Aeson.parseJSON be</span>
+<span class="lineno">  730 </span><span class="spaces">    </span><span class="istickedoff">other -&gt; <span class="nottickedoff">fail (&quot;unknown TabKind tag: &quot; ++ T.unpack other)</span></span></span>
+<span class="lineno">  731 </span>
+<span class="lineno">  732 </span>-- | Response body for a successful tab creation.
+<span class="lineno">  733 </span>data NewTabResponse = NewTabResponse
+<span class="lineno">  734 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ntresp_tabIndex</span></span></span>  :: Int
+<span class="lineno">  735 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ntresp_sessionId</span></span></span> :: Maybe Text
+<span class="lineno">  736 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ntresp_kind</span></span></span>      :: Text
+<span class="lineno">  737 </span>  }
+<span class="lineno">  738 </span>
+<span class="lineno">  739 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON NewTabResponse</span></span></span></span></span></span></span></span> where
+<span class="lineno">  740 </span>  <span class="decl"><span class="istickedoff">toJSON r = object</span>
+<span class="lineno">  741 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;tab_index&quot;  .= _ntresp_tabIndex r</span>
+<span class="lineno">  742 </span><span class="spaces">    </span><span class="istickedoff">, &quot;session_id&quot; .= _ntresp_sessionId r</span>
+<span class="lineno">  743 </span><span class="spaces">    </span><span class="istickedoff">, &quot;kind&quot;       .= _ntresp_kind r</span>
+<span class="lineno">  744 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  745 </span>
+<span class="lineno">  746 </span>-- | Handle POST /api/tabs/new.
+<span class="lineno">  747 </span>--
+<span class="lineno">  748 </span>-- Creates a new tab (session-backed or raw shell), enforces the maxTabs
+<span class="lineno">  749 </span>-- limit (A8), and returns a JSON response with the tab index, session
+<span class="lineno">  750 </span>-- ID (if any), and kind description.
+<span class="lineno">  751 </span>handleNewTab :: FrontendEnv -&gt; Request -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  752 </span><span class="decl"><span class="istickedoff">handleNewTab env req respond = do</span>
+<span class="lineno">  753 </span><span class="spaces">  </span><span class="istickedoff">body &lt;- consumeBody req</span>
+<span class="lineno">  754 </span><span class="spaces">  </span><span class="istickedoff">case Aeson.eitherDecode body of</span>
+<span class="lineno">  755 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt;</span>
+<span class="lineno">  756 </span><span class="spaces">      </span><span class="istickedoff">respond $ jsonResponse status400</span>
+<span class="lineno">  757 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">(object [&quot;error&quot; .= (&quot;Invalid JSON: &quot; &lt;&gt; T.pack err)])</span></span>
+<span class="lineno">  758 </span><span class="spaces">    </span><span class="istickedoff">Right (NewTabRequest tabKind) -&gt; do</span>
+<span class="lineno">  759 </span><span class="spaces">      </span><span class="istickedoff">-- A8: enforce maxTabs limit</span>
+<span class="lineno">  760 </span><span class="spaces">      </span><span class="istickedoff">curCount &lt;- readIORef (_fe_tabCount env)</span>
+<span class="lineno">  761 </span><span class="spaces">      </span><span class="istickedoff">if curCount &gt;= _fe_maxTabs env</span>
+<span class="lineno">  762 </span><span class="spaces">        </span><span class="istickedoff">then respond $ jsonResponse status409</span>
+<span class="lineno">  763 </span><span class="spaces">               </span><span class="istickedoff">(object [&quot;error&quot; .= (&quot;maximum tab count reached&quot; :: Text)])</span>
+<span class="lineno">  764 </span><span class="spaces">        </span><span class="istickedoff">else createTab env tabKind respond</span></span>
+<span class="lineno">  765 </span>
+<span class="lineno">  766 </span>-- | Actually create the tab and return a response.
+<span class="lineno">  767 </span>createTab :: FrontendEnv -&gt; TabKind -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  768 </span><span class="decl"><span class="istickedoff">createTab env tabKind respond = do</span>
+<span class="lineno">  769 </span><span class="spaces">  </span><span class="istickedoff">curCount &lt;- readIORef (_fe_tabCount env)</span>
+<span class="lineno">  770 </span><span class="spaces">  </span><span class="istickedoff">-- Bump tab count</span>
+<span class="lineno">  771 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_fe_tabCount env) <span class="nottickedoff">(curCount + 1)</span></span>
+<span class="lineno">  772 </span><span class="spaces">  </span><span class="istickedoff">case tabKind of</span>
+<span class="lineno">  773 </span><span class="spaces">    </span><span class="istickedoff">TkSession sk -&gt; do</span>
+<span class="lineno">  774 </span><span class="spaces">      </span><span class="istickedoff">-- Create a session for session-backed tabs</span>
+<span class="lineno">  775 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  776 </span><span class="spaces">      </span><span class="istickedoff">mModel &lt;- readIORef (_fe_model env)</span>
+<span class="lineno">  777 </span><span class="spaces">      </span><span class="istickedoff">let modelText = maybe &quot;&quot; <span class="nottickedoff">unModelId</span> mModel</span>
+<span class="lineno">  778 </span><span class="spaces">          </span><span class="istickedoff">sid = newSessionId Nothing now</span>
+<span class="lineno">  779 </span><span class="spaces">          </span><span class="istickedoff">-- Carry the agent name through from the request: the</span>
+<span class="lineno">  780 </span><span class="spaces">          </span><span class="istickedoff">-- frontend uses it as the display name for the session</span>
+<span class="lineno">  781 </span><span class="spaces">          </span><span class="istickedoff">-- (e.g. the chat input placeholder), and the agent's</span>
+<span class="lineno">  782 </span><span class="spaces">          </span><span class="istickedoff">-- definition was already used to build the system prompt.</span>
+<span class="lineno">  783 </span><span class="spaces">          </span><span class="istickedoff">-- Without this, the metadata loses the association and</span>
+<span class="lineno">  784 </span><span class="spaces">          </span><span class="istickedoff">-- recent-sessions UI falls back to the session id.</span>
+<span class="lineno">  785 </span><span class="spaces">          </span><span class="istickedoff">agentName = case sk of</span>
+<span class="lineno">  786 </span><span class="spaces">            </span><span class="istickedoff">SkProvider ps -&gt; _ps_agent ps</span>
+<span class="lineno">  787 </span><span class="spaces">            </span><span class="istickedoff">SkHarness  _  -&gt; <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  788 </span><span class="spaces">          </span><span class="istickedoff">meta = SessionMeta</span>
+<span class="lineno">  789 </span><span class="spaces">            </span><span class="istickedoff">{ _sm_id                = sid</span>
+<span class="lineno">  790 </span><span class="spaces">            </span><span class="istickedoff">, _sm_agent             = agentName</span>
+<span class="lineno">  791 </span><span class="spaces">            </span><span class="istickedoff">, _sm_kind              = sk</span>
+<span class="lineno">  792 </span><span class="spaces">            </span><span class="istickedoff">, _sm_model             = modelText</span>
+<span class="lineno">  793 </span><span class="spaces">            </span><span class="istickedoff">, _sm_channel           = &quot;web&quot;</span>
+<span class="lineno">  794 </span><span class="spaces">            </span><span class="istickedoff">, _sm_createdAt         = now</span>
+<span class="lineno">  795 </span><span class="spaces">            </span><span class="istickedoff">, _sm_lastActive        = now</span>
+<span class="lineno">  796 </span><span class="spaces">            </span><span class="istickedoff">, _sm_bootstrapConsumed = True</span>
+<span class="lineno">  797 </span><span class="spaces">            </span><span class="istickedoff">, _sm_archived          = False</span>
+<span class="lineno">  798 </span><span class="spaces">            </span><span class="istickedoff">, _sm_description       = Nothing</span>
+<span class="lineno">  799 </span><span class="spaces">            </span><span class="istickedoff">, _sm_autoSummary       = Nothing</span>
+<span class="lineno">  800 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  801 </span><span class="spaces">      </span><span class="istickedoff">sh &lt;- mkSessionHandle (_fe_broker env) <span class="nottickedoff">(_fe_logger env)</span> (_fe_sessionsDir env) meta</span>
+<span class="lineno">  802 </span><span class="spaces">      </span><span class="istickedoff">_sh_save sh</span>
+<span class="lineno">  803 </span><span class="spaces">      </span><span class="istickedoff">-- Publish the new-session signal to the live stream broker (D18). The</span>
+<span class="lineno">  804 </span><span class="spaces">      </span><span class="istickedoff">-- sidebar uses this to render the session row without polling. The</span>
+<span class="lineno">  805 </span><span class="spaces">      </span><span class="istickedoff">-- no-broker path is intentional ('Nothing' preserves the legacy</span>
+<span class="lineno">  806 </span><span class="spaces">      </span><span class="istickedoff">-- behaviour for one-off scripts and tests). Previously this lived in</span>
+<span class="lineno">  807 </span><span class="spaces">      </span><span class="istickedoff">-- the now-410'd POST /api/sessions/new handler; it moved here when</span>
+<span class="lineno">  808 </span><span class="spaces">      </span><span class="istickedoff">-- the session-tab unification merged on main.</span>
+<span class="lineno">  809 </span><span class="spaces">      </span><span class="istickedoff">case _fe_broker env of</span>
+<span class="lineno">  810 </span><span class="spaces">        </span><span class="istickedoff">Just broker -&gt;</span>
+<span class="lineno">  811 </span><span class="spaces">          </span><span class="istickedoff">_streamBroker_publish broker</span>
+<span class="lineno">  812 </span><span class="spaces">            </span><span class="istickedoff">(ActivityChanged (_sm_id meta) (SaSessionCreated meta))</span>
+<span class="lineno">  813 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  814 </span><span class="spaces">      </span><span class="istickedoff">broadcastLists env</span>
+<span class="lineno">  815 </span><span class="spaces">      </span><span class="istickedoff">respond $ jsonResponse status200 NewTabResponse</span>
+<span class="lineno">  816 </span><span class="spaces">        </span><span class="istickedoff">{ _ntresp_tabIndex  = curCount</span>
+<span class="lineno">  817 </span><span class="spaces">        </span><span class="istickedoff">, _ntresp_sessionId = Just (unSessionId sid)</span>
+<span class="lineno">  818 </span><span class="spaces">        </span><span class="istickedoff">, _ntresp_kind      = tabKindLabel tabKind</span>
+<span class="lineno">  819 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  820 </span><span class="spaces">    </span><span class="istickedoff">TkRawShell _backend -&gt; do</span>
+<span class="lineno">  821 </span><span class="spaces">      </span><span class="istickedoff">respond $ jsonResponse status200 NewTabResponse</span>
+<span class="lineno">  822 </span><span class="spaces">        </span><span class="istickedoff">{ _ntresp_tabIndex  = curCount</span>
+<span class="lineno">  823 </span><span class="spaces">        </span><span class="istickedoff">, _ntresp_sessionId = Nothing</span>
+<span class="lineno">  824 </span><span class="spaces">        </span><span class="istickedoff">, _ntresp_kind      = tabKindLabel tabKind</span>
+<span class="lineno">  825 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  826 </span>
+<span class="lineno">  827 </span>-- | User-facing kind label for the response JSON.
+<span class="lineno">  828 </span>tabKindLabel :: TabKind -&gt; Text
+<span class="lineno">  829 </span><span class="decl"><span class="istickedoff">tabKindLabel (TkSession (SkProvider _)) = &quot;provider&quot;</span>
+<span class="lineno">  830 </span><span class="spaces"></span><span class="istickedoff">tabKindLabel (TkSession (SkHarness _))  = <span class="nottickedoff">&quot;harness&quot;</span></span>
+<span class="lineno">  831 </span><span class="spaces"></span><span class="istickedoff">tabKindLabel (TkRawShell _)             = &quot;raw_shell&quot;</span></span>
+<span class="lineno">  832 </span>
+<span class="lineno">  833 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  834 </span>-- POST /api/sessions/new — 410 Gone stub (A7)
+<span class="lineno">  835 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  836 </span>
+<span class="lineno">  837 </span>-- | The legacy session-creation endpoint returns 410 Gone with a
+<span class="lineno">  838 </span>-- @Location@ header pointing to the new unified endpoint.
+<span class="lineno">  839 </span>handleNewSessionGone :: (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  840 </span><span class="decl"><span class="istickedoff">handleNewSessionGone respond =</span>
+<span class="lineno">  841 </span><span class="spaces">  </span><span class="istickedoff">respond $ responseLBS status410</span>
+<span class="lineno">  842 </span><span class="spaces">    </span><span class="istickedoff">[ (hContentType, <span class="nottickedoff">&quot;application/json&quot;</span>)</span>
+<span class="lineno">  843 </span><span class="spaces">    </span><span class="istickedoff">, (&quot;Access-Control-Allow-Origin&quot;, <span class="nottickedoff">&quot;*&quot;</span>)</span>
+<span class="lineno">  844 </span><span class="spaces">    </span><span class="istickedoff">, (&quot;Location&quot;, &quot;/api/tabs/new&quot;)</span>
+<span class="lineno">  845 </span><span class="spaces">    </span><span class="istickedoff">]</span>
+<span class="lineno">  846 </span><span class="spaces">    </span><span class="istickedoff">(Aeson.encode (object</span>
+<span class="lineno">  847 </span><span class="spaces">      </span><span class="istickedoff">[ &quot;error&quot; .= (&quot;deprecated&quot; :: Text)</span>
+<span class="lineno">  848 </span><span class="spaces">      </span><span class="istickedoff">, &quot;use&quot;   .= (&quot;/api/tabs/new&quot; :: Text)</span>
+<span class="lineno">  849 </span><span class="spaces">      </span><span class="istickedoff">]))</span></span>
+<span class="lineno">  850 </span>
+<span class="lineno">  851 </span>-- | Set or replace the custom prompt for a session, optionally updating
+<span class="lineno">  852 </span>-- the agent name in @session.json@.
+<span class="lineno">  853 </span>handleSetPrompt :: FrontendEnv -&gt; Text -&gt; Request -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  854 </span><span class="decl"><span class="nottickedoff">handleSetPrompt env sid req respond = do</span>
+<span class="lineno">  855 </span><span class="spaces">  </span><span class="nottickedoff">if not (isValidSessionId sid)</span>
+<span class="lineno">  856 </span><span class="spaces">    </span><span class="nottickedoff">then respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Invalid session ID&quot; :: Text)])</span>
+<span class="lineno">  857 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">  858 </span><span class="spaces">      </span><span class="nottickedoff">let sessionDir = _fe_sessionsDir env &lt;/&gt; T.unpack sid</span>
+<span class="lineno">  859 </span><span class="spaces">          </span><span class="nottickedoff">promptPath = sessionDir &lt;/&gt; &quot;custom-prompt.md&quot;</span>
+<span class="lineno">  860 </span><span class="spaces">          </span><span class="nottickedoff">metaPath   = sessionDir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  861 </span><span class="spaces">      </span><span class="nottickedoff">body &lt;- consumeBody req</span>
+<span class="lineno">  862 </span><span class="spaces">      </span><span class="nottickedoff">case Aeson.eitherDecode body of</span>
+<span class="lineno">  863 </span><span class="spaces">        </span><span class="nottickedoff">Left _ -&gt;</span>
+<span class="lineno">  864 </span><span class="spaces">          </span><span class="nottickedoff">respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Invalid JSON: expected {\&quot;prompt\&quot;: \&quot;...\&quot;}&quot; :: Text)])</span>
+<span class="lineno">  865 </span><span class="spaces">        </span><span class="nottickedoff">Right obj -&gt; case Map.lookup (&quot;prompt&quot; :: Text) (obj :: Map.Map Text Text) of</span>
+<span class="lineno">  866 </span><span class="spaces">          </span><span class="nottickedoff">Nothing -&gt;</span>
+<span class="lineno">  867 </span><span class="spaces">            </span><span class="nottickedoff">respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Missing 'prompt' field&quot; :: Text)])</span>
+<span class="lineno">  868 </span><span class="spaces">          </span><span class="nottickedoff">Just prompt -&gt; do</span>
+<span class="lineno">  869 </span><span class="spaces">            </span><span class="nottickedoff">TIO.writeFile promptPath prompt</span>
+<span class="lineno">  870 </span><span class="spaces">            </span><span class="nottickedoff">-- Update agent name in session metadata if a name was provided</span>
+<span class="lineno">  871 </span><span class="spaces">            </span><span class="nottickedoff">let mName = Map.lookup &quot;name&quot; obj</span>
+<span class="lineno">  872 </span><span class="spaces">            </span><span class="nottickedoff">case mName of</span>
+<span class="lineno">  873 </span><span class="spaces">              </span><span class="nottickedoff">Just name | not (T.null name) -&gt; do</span>
+<span class="lineno">  874 </span><span class="spaces">                </span><span class="nottickedoff">raw &lt;- LBS.readFile metaPath</span>
+<span class="lineno">  875 </span><span class="spaces">                </span><span class="nottickedoff">case Aeson.eitherDecode' raw of</span>
+<span class="lineno">  876 </span><span class="spaces">                  </span><span class="nottickedoff">Right meta -&gt; do</span>
+<span class="lineno">  877 </span><span class="spaces">                    </span><span class="nottickedoff">let agentName = either (const Nothing) Just (mkAgentName name)</span>
+<span class="lineno">  878 </span><span class="spaces">                        </span><span class="nottickedoff">updated = (meta :: SessionMeta) { _sm_agent = agentName }</span>
+<span class="lineno">  879 </span><span class="spaces">                        </span><span class="nottickedoff">tmpP = metaPath &lt;&gt; &quot;.tmp&quot;</span>
+<span class="lineno">  880 </span><span class="spaces">                    </span><span class="nottickedoff">LBS.writeFile tmpP (Aeson.encode updated)</span>
+<span class="lineno">  881 </span><span class="spaces">                    </span><span class="nottickedoff">renameFile tmpP metaPath</span>
+<span class="lineno">  882 </span><span class="spaces">                  </span><span class="nottickedoff">Left _ -&gt; pure ()</span>
+<span class="lineno">  883 </span><span class="spaces">              </span><span class="nottickedoff">_ -&gt; pure ()</span>
+<span class="lineno">  884 </span><span class="spaces">            </span><span class="nottickedoff">respond $ jsonResponse status200 (object [&quot;ok&quot; .= True])</span></span>
+<span class="lineno">  885 </span>
+<span class="lineno">  886 </span>-- | Request body for sending a message.
+<span class="lineno">  887 </span>newtype SendRequest = SendRequest { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_sr_message</span></span></span> :: Text }
+<span class="lineno">  888 </span>
+<span class="lineno">  889 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON SendRequest</span></span></span></span> where
+<span class="lineno">  890 </span>  <span class="decl"><span class="nottickedoff">parseJSON = Aeson.withObject &quot;SendRequest&quot; $ \o -&gt;</span>
+<span class="lineno">  891 </span><span class="spaces">    </span><span class="nottickedoff">SendRequest &lt;$&gt; o .: &quot;message&quot;</span></span>
+<span class="lineno">  892 </span>
+<span class="lineno">  893 </span>-- | Send a user message to a session and get a completion.
+<span class="lineno">  894 </span>handleSend :: FrontendEnv -&gt; Text -&gt; Request -&gt; (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  895 </span><span class="decl"><span class="nottickedoff">handleSend env sid req respond = do</span>
+<span class="lineno">  896 </span><span class="spaces">  </span><span class="nottickedoff">-- Validate session ID (shared helper — D26)</span>
+<span class="lineno">  897 </span><span class="spaces">  </span><span class="nottickedoff">if not (isValidSessionId sid)</span>
+<span class="lineno">  898 </span><span class="spaces">    </span><span class="nottickedoff">then respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Invalid session ID&quot; :: Text)])</span>
+<span class="lineno">  899 </span><span class="spaces">    </span><span class="nottickedoff">else do</span>
+<span class="lineno">  900 </span><span class="spaces">      </span><span class="nottickedoff">let sessionDir = _fe_sessionsDir env &lt;/&gt; T.unpack sid</span>
+<span class="lineno">  901 </span><span class="spaces">          </span><span class="nottickedoff">transcriptPath = sessionDir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  902 </span><span class="spaces">      </span><span class="nottickedoff">exists &lt;- doesFileExist transcriptPath</span>
+<span class="lineno">  903 </span><span class="spaces">      </span><span class="nottickedoff">if not exists</span>
+<span class="lineno">  904 </span><span class="spaces">        </span><span class="nottickedoff">then respond $ jsonResponse status404 (object [&quot;error&quot; .= (&quot;Session not found&quot; :: Text)])</span>
+<span class="lineno">  905 </span><span class="spaces">        </span><span class="nottickedoff">else do</span>
+<span class="lineno">  906 </span><span class="spaces">          </span><span class="nottickedoff">-- Parse request body</span>
+<span class="lineno">  907 </span><span class="spaces">          </span><span class="nottickedoff">body &lt;- consumeBody req</span>
+<span class="lineno">  908 </span><span class="spaces">          </span><span class="nottickedoff">case Aeson.eitherDecode body of</span>
+<span class="lineno">  909 </span><span class="spaces">            </span><span class="nottickedoff">Left _ -&gt;</span>
+<span class="lineno">  910 </span><span class="spaces">              </span><span class="nottickedoff">respond $ jsonResponse status400 (object [&quot;error&quot; .= (&quot;Invalid JSON: expected {\&quot;message\&quot;: \&quot;...\&quot;}&quot; :: Text)])</span>
+<span class="lineno">  911 </span><span class="spaces">            </span><span class="nottickedoff">Right (SendRequest userText) -&gt; do</span>
+<span class="lineno">  912 </span><span class="spaces">              </span><span class="nottickedoff">mProvider &lt;- readIORef (_fe_provider env)</span>
+<span class="lineno">  913 </span><span class="spaces">              </span><span class="nottickedoff">mModel &lt;- readIORef (_fe_model env)</span>
+<span class="lineno">  914 </span><span class="spaces">              </span><span class="nottickedoff">case (mProvider, mModel) of</span>
+<span class="lineno">  915 </span><span class="spaces">                </span><span class="nottickedoff">(Nothing, _) -&gt;</span>
+<span class="lineno">  916 </span><span class="spaces">                  </span><span class="nottickedoff">respond $ jsonResponse status503 (object [&quot;error&quot; .= (&quot;No provider configured&quot; :: Text)])</span>
+<span class="lineno">  917 </span><span class="spaces">                </span><span class="nottickedoff">(_, Nothing) -&gt;</span>
+<span class="lineno">  918 </span><span class="spaces">                  </span><span class="nottickedoff">respond $ jsonResponse status503 (object [&quot;error&quot; .= (&quot;No model configured&quot; :: Text)])</span>
+<span class="lineno">  919 </span><span class="spaces">                </span><span class="nottickedoff">(Just provider, Just model) -&gt; do</span>
+<span class="lineno">  920 </span><span class="spaces">                  </span><span class="nottickedoff">result &lt;- try @SomeException $</span>
+<span class="lineno">  921 </span><span class="spaces">                    </span><span class="nottickedoff">doCompletion env (SessionId sid) provider model userText transcriptPath</span>
+<span class="lineno">  922 </span><span class="spaces">                  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  923 </span><span class="spaces">                    </span><span class="nottickedoff">Left e -&gt; do</span>
+<span class="lineno">  924 </span><span class="spaces">                      </span><span class="nottickedoff">_lh_logError (_fe_logger env) $ &quot;Send error: &quot; &lt;&gt; T.pack (show e)</span>
+<span class="lineno">  925 </span><span class="spaces">                      </span><span class="nottickedoff">respond $ jsonResponse status500 (object [&quot;error&quot; .= (&quot;Completion failed&quot; :: Text)])</span>
+<span class="lineno">  926 </span><span class="spaces">                    </span><span class="nottickedoff">Right respText -&gt;</span>
+<span class="lineno">  927 </span><span class="spaces">                      </span><span class="nottickedoff">respond $ jsonResponse status200 (object [&quot;response&quot; .= respText])</span></span>
+<span class="lineno">  928 </span>
+<span class="lineno">  929 </span>-- | Run a completion: load context, send to provider, record to transcript.
+<span class="lineno">  930 </span>-- The transcript handle is opened via 'mkBroadcastingFileTranscriptHandle'
+<span class="lineno">  931 </span>-- so the provider-wrapper Request\/Response entries reach the broker (D25)
+<span class="lineno">  932 </span>-- when one is configured on the 'FrontendEnv'.
+<span class="lineno">  933 </span>doCompletion
+<span class="lineno">  934 </span>  :: FrontendEnv
+<span class="lineno">  935 </span>  -&gt; SessionId
+<span class="lineno">  936 </span>  -&gt; SomeProvider
+<span class="lineno">  937 </span>  -&gt; ModelId
+<span class="lineno">  938 </span>  -&gt; Text
+<span class="lineno">  939 </span>  -&gt; FilePath
+<span class="lineno">  940 </span>  -&gt; IO Text
+<span class="lineno">  941 </span><span class="decl"><span class="nottickedoff">doCompletion env sid provider model userText transcriptPath = do</span>
+<span class="lineno">  942 </span><span class="spaces">  </span><span class="nottickedoff">-- Open a (possibly broadcasting) transcript handle for recording.</span>
+<span class="lineno">  943 </span><span class="spaces">  </span><span class="nottickedoff">th &lt;- mkBroadcastingFileTranscriptHandle</span>
+<span class="lineno">  944 </span><span class="spaces">          </span><span class="nottickedoff">(_fe_broker env) sid (_fe_logger env) transcriptPath</span>
+<span class="lineno">  945 </span><span class="spaces">  </span><span class="nottickedoff">-- Load recent messages for context</span>
+<span class="lineno">  946 </span><span class="spaces">  </span><span class="nottickedoff">history &lt;- loadRecentMessages th 50 100000</span>
+<span class="lineno">  947 </span><span class="spaces">  </span><span class="nottickedoff">-- Check for per-session custom prompt, falling back to global</span>
+<span class="lineno">  948 </span><span class="spaces">  </span><span class="nottickedoff">let sessionDir = takeDirectory transcriptPath</span>
+<span class="lineno">  949 </span><span class="spaces">      </span><span class="nottickedoff">customPromptPath = sessionDir &lt;/&gt; &quot;custom-prompt.md&quot;</span>
+<span class="lineno">  950 </span><span class="spaces">  </span><span class="nottickedoff">customExists &lt;- doesFileExist customPromptPath</span>
+<span class="lineno">  951 </span><span class="spaces">  </span><span class="nottickedoff">systemPrompt &lt;- if customExists</span>
+<span class="lineno">  952 </span><span class="spaces">    </span><span class="nottickedoff">then Just &lt;$&gt; TIO.readFile customPromptPath</span>
+<span class="lineno">  953 </span><span class="spaces">    </span><span class="nottickedoff">else pure (_fe_systemPrompt env)</span>
+<span class="lineno">  954 </span><span class="spaces">  </span><span class="nottickedoff">-- Build context with system prompt and history</span>
+<span class="lineno">  955 </span><span class="spaces">  </span><span class="nottickedoff">let ctx0 = foldl (flip addMessage) (emptyContext systemPrompt) history</span>
+<span class="lineno">  956 </span><span class="spaces">      </span><span class="nottickedoff">userMsg = textMessage User userText</span>
+<span class="lineno">  957 </span><span class="spaces">      </span><span class="nottickedoff">ctx = addMessage userMsg ctx0</span>
+<span class="lineno">  958 </span><span class="spaces">      </span><span class="nottickedoff">-- Wrap provider with transcript logging</span>
+<span class="lineno">  959 </span><span class="spaces">      </span><span class="nottickedoff">provider' = mkTranscriptProvider th (unModelId model) provider</span>
+<span class="lineno">  960 </span><span class="spaces">      </span><span class="nottickedoff">req = CompletionRequest</span>
+<span class="lineno">  961 </span><span class="spaces">        </span><span class="nottickedoff">{ _cr_model        = model</span>
+<span class="lineno">  962 </span><span class="spaces">        </span><span class="nottickedoff">, _cr_messages     = contextMessages ctx</span>
+<span class="lineno">  963 </span><span class="spaces">        </span><span class="nottickedoff">, _cr_systemPrompt = contextSystemPrompt ctx</span>
+<span class="lineno">  964 </span><span class="spaces">        </span><span class="nottickedoff">, _cr_maxTokens    = Just 4096</span>
+<span class="lineno">  965 </span><span class="spaces">        </span><span class="nottickedoff">, _cr_tools        = []</span>
+<span class="lineno">  966 </span><span class="spaces">        </span><span class="nottickedoff">, _cr_toolChoice   = Nothing</span>
+<span class="lineno">  967 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  968 </span><span class="spaces">  </span><span class="nottickedoff">-- Publish session-thinking activity events so the FE sidebar / chat</span>
+<span class="lineno">  969 </span><span class="spaces">  </span><span class="nottickedoff">-- area can show a live indicator while the provider call is in flight.</span>
+<span class="lineno">  970 </span><span class="spaces">  </span><span class="nottickedoff">-- For harness-backed sessions, the equivalent signal comes from the</span>
+<span class="lineno">  971 </span><span class="spaces">  </span><span class="nottickedoff">-- 2s tmux probe loop in 'PureClaw.Frontend.ActivityProbe'; provider</span>
+<span class="lineno">  972 </span><span class="spaces">  </span><span class="nottickedoff">-- sessions don't go through the harness map, so the only place we</span>
+<span class="lineno">  973 </span><span class="spaces">  </span><span class="nottickedoff">-- can hook this is at the request boundary in 'doCompletion'.</span>
+<span class="lineno">  974 </span><span class="spaces">  </span><span class="nottickedoff">-- 'bracket_' guarantees the Idle event fires even if 'complete' throws.</span>
+<span class="lineno">  975 </span><span class="spaces">  </span><span class="nottickedoff">let publishStatus s = case _fe_broker env of</span>
+<span class="lineno">  976 </span><span class="spaces">        </span><span class="nottickedoff">Just broker -&gt; _streamBroker_publish broker</span>
+<span class="lineno">  977 </span><span class="spaces">          </span><span class="nottickedoff">(ActivityChanged sid (SaHarnessStatus s))</span>
+<span class="lineno">  978 </span><span class="spaces">        </span><span class="nottickedoff">Nothing -&gt; pure ()</span>
+<span class="lineno">  979 </span><span class="spaces">  </span><span class="nottickedoff">resp &lt;- bracket_</span>
+<span class="lineno">  980 </span><span class="spaces">            </span><span class="nottickedoff">(publishStatus HarnessThinking)</span>
+<span class="lineno">  981 </span><span class="spaces">            </span><span class="nottickedoff">(publishStatus HarnessIdle)</span>
+<span class="lineno">  982 </span><span class="spaces">            </span><span class="nottickedoff">(complete provider' req)</span>
+<span class="lineno">  983 </span><span class="spaces">  </span><span class="nottickedoff">_th_flush th</span>
+<span class="lineno">  984 </span><span class="spaces">  </span><span class="nottickedoff">_th_close th</span>
+<span class="lineno">  985 </span><span class="spaces">  </span><span class="nottickedoff">pure (responseText resp)</span></span>
+<span class="lineno">  986 </span>
+<span class="lineno">  987 </span>-- | Consume the full request body.
+<span class="lineno">  988 </span>consumeBody :: Request -&gt; IO LBS.ByteString
+<span class="lineno">  989 </span><span class="decl"><span class="istickedoff">consumeBody req = LBS.fromChunks &lt;$&gt; go</span>
+<span class="lineno">  990 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  991 </span><span class="spaces">    </span><span class="istickedoff">go = do</span>
+<span class="lineno">  992 </span><span class="spaces">      </span><span class="istickedoff">chunk &lt;- getRequestBodyChunk req</span>
+<span class="lineno">  993 </span><span class="spaces">      </span><span class="istickedoff">if BS.null chunk then pure [] else (chunk :) &lt;$&gt; go</span></span>
+<span class="lineno">  994 </span>
+<span class="lineno">  995 </span>-- | JSON 404 response.
+<span class="lineno">  996 </span>respondNotFound :: (Response -&gt; IO ResponseReceived) -&gt; IO ResponseReceived
+<span class="lineno">  997 </span><span class="decl"><span class="istickedoff">respondNotFound respond =</span>
+<span class="lineno">  998 </span><span class="spaces">  </span><span class="istickedoff">respond $ jsonResponse status404 <span class="nottickedoff">(object [&quot;error&quot; .= (&quot;Not found&quot; :: Text)])</span></span></span>
+<span class="lineno">  999 </span>
+<span class="lineno"> 1000 </span>-- | Build a JSON response.
+<span class="lineno"> 1001 </span>jsonResponse :: ToJSON a =&gt; Status -&gt; a -&gt; Response
+<span class="lineno"> 1002 </span><span class="decl"><span class="istickedoff">jsonResponse st body =</span>
+<span class="lineno"> 1003 </span><span class="spaces">  </span><span class="istickedoff">responseLBS st</span>
+<span class="lineno"> 1004 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">[ (hContentType, &quot;application/json&quot;)</span></span>
+<span class="lineno"> 1005 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">, (&quot;Access-Control-Allow-Origin&quot;, &quot;*&quot;)</span></span>
+<span class="lineno"> 1006 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno"> 1007 </span><span class="spaces">    </span><span class="istickedoff">(Aeson.encode body)</span></span>
+
+</pre>
+</body>
+</html>

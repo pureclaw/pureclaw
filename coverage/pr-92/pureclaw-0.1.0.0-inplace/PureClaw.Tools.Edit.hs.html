@@ -1,0 +1,318 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Edit
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    editTool
+<span class="lineno">    4 </span>    -- * Internals (exported for testing)
+<span class="lineno">    5 </span>  , countOccurrences
+<span class="lineno">    6 </span>  , replaceFirst
+<span class="lineno">    7 </span>  , replaceAll
+<span class="lineno">    8 </span>  , fuzzyFind
+<span class="lineno">    9 </span>  , FuzzyMatch (..)
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Exception
+<span class="lineno">   13 </span>import Data.Aeson
+<span class="lineno">   14 </span>import Data.Aeson.Types
+<span class="lineno">   15 </span>import Data.Text (Text)
+<span class="lineno">   16 </span>import Data.Text qualified as T
+<span class="lineno">   17 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>import PureClaw.Core.Types
+<span class="lineno">   20 </span>import PureClaw.Handles.File
+<span class="lineno">   21 </span>import PureClaw.Providers.Class
+<span class="lineno">   22 </span>import PureClaw.Security.Path
+<span class="lineno">   23 </span>import PureClaw.Tools.Registry
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>-- | Create an edit tool that performs string replacement in files.
+<span class="lineno">   26 </span>-- Supports exact matching (default), fuzzy matching (fallback when exact
+<span class="lineno">   27 </span>-- match fails), and replace_all mode.
+<span class="lineno">   28 </span>editTool :: WorkspaceRoot -&gt; FileHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   29 </span><span class="decl"><span class="istickedoff">editTool root fh = (def, handler)</span>
+<span class="lineno">   30 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   31 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   32 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;edit&quot;</span>
+<span class="lineno">   33 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">   34 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Replace a string in a file. By default, old_string must appear&quot;</span></span>
+<span class="lineno">   35 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;exactly once (unique match). Set replace_all to true to replace&quot;</span></span>
+<span class="lineno">   36 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;every occurrence. If an exact match fails, fuzzy matching is&quot;</span></span>
+<span class="lineno">   37 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;attempted (normalizing whitespace and line endings).&quot;</span></span>
+<span class="lineno">   38 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   39 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   40 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   41 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   42 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;path&quot; .= object</span></span>
+<span class="lineno">   43 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   44 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The file path relative to the workspace root&quot; :: Text)</span></span>
+<span class="lineno">   45 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   46 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;old_string&quot; .= object</span></span>
+<span class="lineno">   47 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   48 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The string to find and replace&quot; :: Text)</span></span>
+<span class="lineno">   49 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   50 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;new_string&quot; .= object</span></span>
+<span class="lineno">   51 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   52 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The replacement string&quot; :: Text)</span></span>
+<span class="lineno">   53 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   54 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;replace_all&quot; .= object</span></span>
+<span class="lineno">   55 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;boolean&quot; :: Text)</span></span>
+<span class="lineno">   56 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Replace all occurrences instead of requiring a unique match (default: false)&quot; :: Text)</span></span>
+<span class="lineno">   57 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   58 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   59 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;path&quot;, &quot;old_string&quot;, &quot;new_string&quot;] :: [Text])</span></span>
+<span class="lineno">   60 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   61 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   62 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   63 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseInput input of</span>
+<span class="lineno">   65 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">T.pack err</span>, True)</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="istickedoff">Right ei -&gt; do</span>
+<span class="lineno">   67 </span><span class="spaces">          </span><span class="istickedoff">pathResult &lt;- mkSafePath root (T.unpack (_ei_path ei))</span>
+<span class="lineno">   68 </span><span class="spaces">          </span><span class="istickedoff">case pathResult of</span>
+<span class="lineno">   69 </span><span class="spaces">            </span><span class="istickedoff">Left pe -&gt; pure (<span class="nottickedoff">T.pack (show pe)</span>, True)</span>
+<span class="lineno">   70 </span><span class="spaces">            </span><span class="istickedoff">Right sp -&gt; do</span>
+<span class="lineno">   71 </span><span class="spaces">              </span><span class="istickedoff">readResult &lt;- try @SomeException (_fh_readFile fh sp)</span>
+<span class="lineno">   72 </span><span class="spaces">              </span><span class="istickedoff">case readResult of</span>
+<span class="lineno">   73 </span><span class="spaces">                </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">   74 </span><span class="spaces">                </span><span class="istickedoff">Right bs -&gt; case TE.decodeUtf8' bs of</span>
+<span class="lineno">   75 </span><span class="spaces">                  </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">pure (&quot;Cannot edit binary file&quot;, True)</span></span>
+<span class="lineno">   76 </span><span class="spaces">                  </span><span class="istickedoff">Right content -&gt; applyEdit ei sp content</span>
+<span class="lineno">   77 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   78 </span><span class="spaces">    </span><span class="istickedoff">applyEdit :: EditInput -&gt; SafePath -&gt; Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">   79 </span><span class="spaces">    </span><span class="istickedoff">applyEdit ei sp content</span>
+<span class="lineno">   80 </span><span class="spaces">      </span><span class="istickedoff">| _ei_replaceAll ei = doReplaceAll ei sp content</span>
+<span class="lineno">   81 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>         = doUnique ei sp content</span>
+<span class="lineno">   82 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   83 </span><span class="spaces">    </span><span class="istickedoff">doReplaceAll :: EditInput -&gt; SafePath -&gt; Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">   84 </span><span class="spaces">    </span><span class="istickedoff">doReplaceAll ei sp content = do</span>
+<span class="lineno">   85 </span><span class="spaces">      </span><span class="istickedoff">let count = countOccurrences (_ei_oldString ei) content</span>
+<span class="lineno">   86 </span><span class="spaces">      </span><span class="istickedoff">if count == 0</span>
+<span class="lineno">   87 </span><span class="spaces">        </span><span class="istickedoff">then tryFuzzyReplaceAll ei <span class="nottickedoff">sp</span> content</span>
+<span class="lineno">   88 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">   89 </span><span class="spaces">          </span><span class="istickedoff">let newContent = replaceAll (_ei_oldString ei) (_ei_newString ei) content</span>
+<span class="lineno">   90 </span><span class="spaces">          </span><span class="istickedoff">writeResult &lt;- try @SomeException</span>
+<span class="lineno">   91 </span><span class="spaces">            </span><span class="istickedoff">(_fh_writeFile fh sp (TE.encodeUtf8 newContent))</span>
+<span class="lineno">   92 </span><span class="spaces">          </span><span class="istickedoff">case writeResult of</span>
+<span class="lineno">   93 </span><span class="spaces">            </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">   94 </span><span class="spaces">            </span><span class="istickedoff">Right () -&gt; pure (&quot;Replaced &quot; &lt;&gt; T.pack (show count) &lt;&gt; &quot; occurrence(s) in &quot; &lt;&gt; _ei_path ei, False)</span>
+<span class="lineno">   95 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   96 </span><span class="spaces">    </span><span class="istickedoff">doUnique :: EditInput -&gt; SafePath -&gt; Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">doUnique ei sp content = do</span>
+<span class="lineno">   98 </span><span class="spaces">      </span><span class="istickedoff">let count = countOccurrences (_ei_oldString ei) content</span>
+<span class="lineno">   99 </span><span class="spaces">      </span><span class="istickedoff">case count of</span>
+<span class="lineno">  100 </span><span class="spaces">        </span><span class="istickedoff">0 -&gt; tryFuzzy ei sp content</span>
+<span class="lineno">  101 </span><span class="spaces">        </span><span class="istickedoff">1 -&gt; do</span>
+<span class="lineno">  102 </span><span class="spaces">          </span><span class="istickedoff">let newContent = replaceFirst (_ei_oldString ei) (_ei_newString ei) content</span>
+<span class="lineno">  103 </span><span class="spaces">          </span><span class="istickedoff">writeResult &lt;- try @SomeException</span>
+<span class="lineno">  104 </span><span class="spaces">            </span><span class="istickedoff">(_fh_writeFile fh sp (TE.encodeUtf8 newContent))</span>
+<span class="lineno">  105 </span><span class="spaces">          </span><span class="istickedoff">case writeResult of</span>
+<span class="lineno">  106 </span><span class="spaces">            </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">  107 </span><span class="spaces">            </span><span class="istickedoff">Right () -&gt; pure (&quot;Edited &quot; &lt;&gt; _ei_path ei, False)</span>
+<span class="lineno">  108 </span><span class="spaces">        </span><span class="istickedoff">n -&gt; pure (&quot;old_string not unique in &quot; &lt;&gt; _ei_path ei</span>
+<span class="lineno">  109 </span><span class="spaces">                   </span><span class="istickedoff">&lt;&gt; &quot; (&quot; &lt;&gt; T.pack (show n) &lt;&gt; &quot; occurrences). Use replace_all: true to replace all.&quot;, True)</span>
+<span class="lineno">  110 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  111 </span><span class="spaces">    </span><span class="istickedoff">tryFuzzy :: EditInput -&gt; SafePath -&gt; Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">  112 </span><span class="spaces">    </span><span class="istickedoff">tryFuzzy ei sp content =</span>
+<span class="lineno">  113 </span><span class="spaces">      </span><span class="istickedoff">case fuzzyFind (_ei_oldString ei) content of</span>
+<span class="lineno">  114 </span><span class="spaces">        </span><span class="istickedoff">NoFuzzyMatch -&gt;</span>
+<span class="lineno">  115 </span><span class="spaces">          </span><span class="istickedoff">pure (&quot;old_string not found in &quot; &lt;&gt; _ei_path ei, True)</span>
+<span class="lineno">  116 </span><span class="spaces">        </span><span class="istickedoff">AmbiguousFuzzy n strategy -&gt;</span>
+<span class="lineno">  117 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure (&quot;old_string not unique via &quot; &lt;&gt; strategy &lt;&gt; &quot; matching in &quot; &lt;&gt; _ei_path ei</span></span>
+<span class="lineno">  118 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; (&quot; &lt;&gt; T.pack (show n) &lt;&gt; &quot; occurrences)&quot;, True)</span></span>
+<span class="lineno">  119 </span><span class="spaces">        </span><span class="istickedoff">UniqueFuzzy matched strategy -&gt; do</span>
+<span class="lineno">  120 </span><span class="spaces">          </span><span class="istickedoff">let newContent = replaceFirst matched (_ei_newString ei) content</span>
+<span class="lineno">  121 </span><span class="spaces">          </span><span class="istickedoff">writeResult &lt;- try @SomeException</span>
+<span class="lineno">  122 </span><span class="spaces">            </span><span class="istickedoff">(_fh_writeFile fh sp (TE.encodeUtf8 newContent))</span>
+<span class="lineno">  123 </span><span class="spaces">          </span><span class="istickedoff">case writeResult of</span>
+<span class="lineno">  124 </span><span class="spaces">            </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">  125 </span><span class="spaces">            </span><span class="istickedoff">Right () -&gt; pure (&quot;Edited &quot; &lt;&gt; _ei_path ei &lt;&gt; &quot; (matched via &quot; &lt;&gt; strategy &lt;&gt; &quot;)&quot;, False)</span>
+<span class="lineno">  126 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  127 </span><span class="spaces">    </span><span class="istickedoff">tryFuzzyReplaceAll :: EditInput -&gt; SafePath -&gt; Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="istickedoff">tryFuzzyReplaceAll ei sp content =</span>
+<span class="lineno">  129 </span><span class="spaces">      </span><span class="istickedoff">case fuzzyFind (_ei_oldString ei) content of</span>
+<span class="lineno">  130 </span><span class="spaces">        </span><span class="istickedoff">NoFuzzyMatch -&gt;</span>
+<span class="lineno">  131 </span><span class="spaces">          </span><span class="istickedoff">pure (&quot;old_string not found in &quot; &lt;&gt; _ei_path ei, True)</span>
+<span class="lineno">  132 </span><span class="spaces">        </span><span class="istickedoff">AmbiguousFuzzy n strategy -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  133 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">-- For replace_all with fuzzy, ambiguous is fine — replace them all</span></span>
+<span class="lineno">  134 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">let matched = fuzzyFindPattern (_ei_oldString ei) strategy</span></span>
+<span class="lineno">  135 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">case matched of</span></span>
+<span class="lineno">  136 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Nothing -&gt; pure (&quot;old_string not found in &quot; &lt;&gt; _ei_path ei, True)</span></span>
+<span class="lineno">  137 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Just pat -&gt; do</span></span>
+<span class="lineno">  138 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">let newContent = replaceAll pat (_ei_newString ei) content</span></span>
+<span class="lineno">  139 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">writeResult &lt;- try @SomeException</span></span>
+<span class="lineno">  140 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">(_fh_writeFile fh sp (TE.encodeUtf8 newContent))</span></span>
+<span class="lineno">  141 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">case writeResult of</span></span>
+<span class="lineno">  142 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">Left e -&gt; pure (T.pack (show e), True)</span></span>
+<span class="lineno">  143 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">Right () -&gt; pure (&quot;Replaced &quot; &lt;&gt; T.pack (show n)</span></span>
+<span class="lineno">  144 </span><span class="spaces">                                  </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; occurrence(s) in &quot; &lt;&gt; _ei_path ei</span></span>
+<span class="lineno">  145 </span><span class="spaces">                                  </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; (matched via &quot; &lt;&gt; strategy &lt;&gt; &quot;)&quot;, False)</span></span>
+<span class="lineno">  146 </span><span class="spaces">        </span><span class="istickedoff">UniqueFuzzy matched strategy -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  147 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">let newContent = replaceFirst matched (_ei_newString ei) content</span></span>
+<span class="lineno">  148 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">writeResult &lt;- try @SomeException</span></span>
+<span class="lineno">  149 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">(_fh_writeFile fh sp (TE.encodeUtf8 newContent))</span></span>
+<span class="lineno">  150 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">case writeResult of</span></span>
+<span class="lineno">  151 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Left e -&gt; pure (T.pack (show e), True)</span></span>
+<span class="lineno">  152 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Right () -&gt; pure (&quot;Replaced 1 occurrence(s) in &quot; &lt;&gt; _ei_path ei</span></span>
+<span class="lineno">  153 </span><span class="spaces">                              </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; (matched via &quot; &lt;&gt; strategy &lt;&gt; &quot;)&quot;, False)</span></span>
+<span class="lineno">  154 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  155 </span><span class="spaces">    </span><span class="istickedoff">parseInput :: Value -&gt; Parser EditInput</span>
+<span class="lineno">  156 </span><span class="spaces">    </span><span class="istickedoff">parseInput = withObject <span class="nottickedoff">&quot;EditInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  157 </span><span class="spaces">      </span><span class="istickedoff">EditInput</span>
+<span class="lineno">  158 </span><span class="spaces">        </span><span class="istickedoff">&lt;$&gt; o .:  &quot;path&quot;</span>
+<span class="lineno">  159 </span><span class="spaces">        </span><span class="istickedoff">&lt;*&gt; o .:  &quot;old_string&quot;</span>
+<span class="lineno">  160 </span><span class="spaces">        </span><span class="istickedoff">&lt;*&gt; o .:  &quot;new_string&quot;</span>
+<span class="lineno">  161 </span><span class="spaces">        </span><span class="istickedoff">&lt;*&gt; o .:? &quot;replace_all&quot; .!= False</span></span>
+<span class="lineno">  162 </span>
+<span class="lineno">  163 </span>data EditInput = EditInput
+<span class="lineno">  164 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ei_path</span></span></span>       :: Text
+<span class="lineno">  165 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ei_oldString</span></span></span>  :: Text
+<span class="lineno">  166 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ei_newString</span></span></span>  :: Text
+<span class="lineno">  167 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ei_replaceAll</span></span></span> :: Bool
+<span class="lineno">  168 </span>  }
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Result of a fuzzy search.
+<span class="lineno">  171 </span>data FuzzyMatch
+<span class="lineno">  172 </span>  = NoFuzzyMatch
+<span class="lineno">  173 </span>    -- ^ No match found by any strategy.
+<span class="lineno">  174 </span>  | UniqueFuzzy Text Text
+<span class="lineno">  175 </span>    -- ^ Unique match found. Fields: matched text, strategy name.
+<span class="lineno">  176 </span>  | AmbiguousFuzzy Int Text
+<span class="lineno">  177 </span>    -- ^ Multiple matches found. Fields: count, strategy name.
+<span class="lineno">  178 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>-- | Try fuzzy matching strategies in priority order.
+<span class="lineno">  181 </span>-- Each strategy normalizes the needle and haystack differently,
+<span class="lineno">  182 </span>-- then searches for the normalized needle in the normalized haystack.
+<span class="lineno">  183 </span>fuzzyFind :: Text -&gt; Text -&gt; FuzzyMatch
+<span class="lineno">  184 </span><span class="decl"><span class="istickedoff">fuzzyFind needle haystack = tryStrategies strategies</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  186 </span><span class="spaces">    </span><span class="istickedoff">strategies =</span>
+<span class="lineno">  187 </span><span class="spaces">      </span><span class="istickedoff">[ (&quot;whitespace-normalized&quot;, normalizeWhitespace)</span>
+<span class="lineno">  188 </span><span class="spaces">      </span><span class="istickedoff">, (<span class="nottickedoff">&quot;trimmed-lines&quot;</span>, trimLines)</span>
+<span class="lineno">  189 </span><span class="spaces">      </span><span class="istickedoff">, (<span class="nottickedoff">&quot;line-ending-normalized&quot;</span>, normalizeLineEndings)</span>
+<span class="lineno">  190 </span><span class="spaces">      </span><span class="istickedoff">, (<span class="nottickedoff">&quot;indentation-normalized&quot;</span>, normalizeIndentation)</span>
+<span class="lineno">  191 </span><span class="spaces">      </span><span class="istickedoff">, (<span class="nottickedoff">&quot;case-insensitive&quot;</span>, T.toLower)</span>
+<span class="lineno">  192 </span><span class="spaces">      </span><span class="istickedoff">]</span>
+<span class="lineno">  193 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  194 </span><span class="spaces">    </span><span class="istickedoff">tryStrategies :: [(Text, Text -&gt; Text)] -&gt; FuzzyMatch</span>
+<span class="lineno">  195 </span><span class="spaces">    </span><span class="istickedoff">tryStrategies [] = NoFuzzyMatch</span>
+<span class="lineno">  196 </span><span class="spaces">    </span><span class="istickedoff">tryStrategies ((name, normalize):rest) =</span>
+<span class="lineno">  197 </span><span class="spaces">      </span><span class="istickedoff">let normNeedle   = normalize needle</span>
+<span class="lineno">  198 </span><span class="spaces">          </span><span class="istickedoff">normHaystack = normalize haystack</span>
+<span class="lineno">  199 </span><span class="spaces">          </span><span class="istickedoff">count = countOccurrences normNeedle normHaystack</span>
+<span class="lineno">  200 </span><span class="spaces">      </span><span class="istickedoff">in case count of</span>
+<span class="lineno">  201 </span><span class="spaces">        </span><span class="istickedoff">0 -&gt; tryStrategies rest</span>
+<span class="lineno">  202 </span><span class="spaces">        </span><span class="istickedoff">1 -&gt; case findOriginal normalize needle haystack of</span>
+<span class="lineno">  203 </span><span class="spaces">          </span><span class="istickedoff">Nothing   -&gt; <span class="nottickedoff">tryStrategies rest</span></span>
+<span class="lineno">  204 </span><span class="spaces">          </span><span class="istickedoff">Just orig -&gt; UniqueFuzzy orig name</span>
+<span class="lineno">  205 </span><span class="spaces">        </span><span class="istickedoff">n -&gt; <span class="nottickedoff">AmbiguousFuzzy n name</span></span></span>
+<span class="lineno">  206 </span>
+<span class="lineno">  207 </span>-- | Given a normalization function and the original needle and haystack,
+<span class="lineno">  208 </span>-- find the original text in the haystack that corresponds to the
+<span class="lineno">  209 </span>-- normalized match.
+<span class="lineno">  210 </span>findOriginal :: (Text -&gt; Text) -&gt; Text -&gt; Text -&gt; Maybe Text
+<span class="lineno">  211 </span><span class="decl"><span class="istickedoff">findOriginal normalize needle haystack =</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">let normNeedle = normalize needle</span>
+<span class="lineno">  213 </span><span class="spaces">      </span><span class="istickedoff">normLen = T.length normNeedle</span>
+<span class="lineno">  214 </span><span class="spaces">      </span><span class="istickedoff">normH = normalize haystack</span>
+<span class="lineno">  215 </span><span class="spaces">      </span><span class="istickedoff">-- Find the position in the normalized haystack</span>
+<span class="lineno">  216 </span><span class="spaces">      </span><span class="istickedoff">(before, _) = T.breakOn normNeedle normH</span>
+<span class="lineno">  217 </span><span class="spaces">      </span><span class="istickedoff">normPos = T.length before</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">-- Map back to original: scan original haystack, tracking</span>
+<span class="lineno">  219 </span><span class="spaces">      </span><span class="istickedoff">-- normalized character count to find the start position</span>
+<span class="lineno">  220 </span><span class="spaces">  </span><span class="istickedoff">in mapBackToOriginal normalize normPos normLen haystack</span></span>
+<span class="lineno">  221 </span>
+<span class="lineno">  222 </span>-- | Map a position in the normalized text back to the original text.
+<span class="lineno">  223 </span>-- Returns the original substring that normalizes to the match.
+<span class="lineno">  224 </span>mapBackToOriginal :: (Text -&gt; Text) -&gt; Int -&gt; Int -&gt; Text -&gt; Maybe Text
+<span class="lineno">  225 </span><span class="decl"><span class="istickedoff">mapBackToOriginal normalize normPos normLen original =</span>
+<span class="lineno">  226 </span><span class="spaces">  </span><span class="istickedoff">-- Strategy: try progressively longer substrings at each starting</span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="istickedoff">-- position until we find one whose normalization contains our match.</span>
+<span class="lineno">  228 </span><span class="spaces">  </span><span class="istickedoff">-- This is O(n²) in the worst case but files are bounded in practice.</span>
+<span class="lineno">  229 </span><span class="spaces">  </span><span class="istickedoff">let origLen = T.length original</span>
+<span class="lineno">  230 </span><span class="spaces">      </span><span class="istickedoff">candidates =</span>
+<span class="lineno">  231 </span><span class="spaces">        </span><span class="istickedoff">[ T.take len (T.drop start original)</span>
+<span class="lineno">  232 </span><span class="spaces">        </span><span class="istickedoff">| start &lt;- [0..origLen - 1]</span>
+<span class="lineno">  233 </span><span class="spaces">        </span><span class="istickedoff">, len   &lt;- [1..origLen - start]</span>
+<span class="lineno">  234 </span><span class="spaces">        </span><span class="istickedoff">, let normed = normalize (T.take len (T.drop start original))</span>
+<span class="lineno">  235 </span><span class="spaces">        </span><span class="istickedoff">, T.length normed &gt;= normLen</span>
+<span class="lineno">  236 </span><span class="spaces">        </span><span class="istickedoff">, let normBefore = normalize (T.take start original)</span>
+<span class="lineno">  237 </span><span class="spaces">        </span><span class="istickedoff">, <span class="tickonlytrue">T.length normBefore == normPos</span></span>
+<span class="lineno">  238 </span><span class="spaces">        </span><span class="istickedoff">, <span class="tickonlytrue">normed == T.take normLen (T.drop normPos (normalize original))</span></span>
+<span class="lineno">  239 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="istickedoff">in case candidates of</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">(c:_) -&gt; Just c</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">[]    -&gt; <span class="nottickedoff">Nothing</span></span></span>
+<span class="lineno">  243 </span>
+<span class="lineno">  244 </span>-- | Get the fuzzy pattern text for a strategy (used by replace_all).
+<span class="lineno">  245 </span>fuzzyFindPattern :: Text -&gt; Text -&gt; Maybe Text
+<span class="lineno">  246 </span><span class="decl"><span class="nottickedoff">fuzzyFindPattern needle strategy =</span>
+<span class="lineno">  247 </span><span class="spaces">  </span><span class="nottickedoff">let normalize = case strategy of</span>
+<span class="lineno">  248 </span><span class="spaces">        </span><span class="nottickedoff">&quot;whitespace-normalized&quot;   -&gt; normalizeWhitespace</span>
+<span class="lineno">  249 </span><span class="spaces">        </span><span class="nottickedoff">&quot;trimmed-lines&quot;           -&gt; trimLines</span>
+<span class="lineno">  250 </span><span class="spaces">        </span><span class="nottickedoff">&quot;line-ending-normalized&quot;  -&gt; normalizeLineEndings</span>
+<span class="lineno">  251 </span><span class="spaces">        </span><span class="nottickedoff">&quot;indentation-normalized&quot;  -&gt; normalizeIndentation</span>
+<span class="lineno">  252 </span><span class="spaces">        </span><span class="nottickedoff">&quot;case-insensitive&quot;        -&gt; T.toLower</span>
+<span class="lineno">  253 </span><span class="spaces">        </span><span class="nottickedoff">_                         -&gt; id</span>
+<span class="lineno">  254 </span><span class="spaces">  </span><span class="nottickedoff">in Just (normalize needle)</span></span>
+<span class="lineno">  255 </span>
+<span class="lineno">  256 </span>-- | Normalize all whitespace runs to single spaces, trim.
+<span class="lineno">  257 </span>normalizeWhitespace :: Text -&gt; Text
+<span class="lineno">  258 </span><span class="decl"><span class="istickedoff">normalizeWhitespace = T.unwords . T.words</span></span>
+<span class="lineno">  259 </span>
+<span class="lineno">  260 </span>-- | Trim leading/trailing whitespace from each line.
+<span class="lineno">  261 </span>trimLines :: Text -&gt; Text
+<span class="lineno">  262 </span><span class="decl"><span class="istickedoff">trimLines = T.unlines . map T.strip . T.lines</span></span>
+<span class="lineno">  263 </span>
+<span class="lineno">  264 </span>-- | Normalize line endings: \r\n → \n
+<span class="lineno">  265 </span>normalizeLineEndings :: Text -&gt; Text
+<span class="lineno">  266 </span><span class="decl"><span class="istickedoff">normalizeLineEndings = T.replace &quot;\r\n&quot; &quot;\n&quot;</span></span>
+<span class="lineno">  267 </span>
+<span class="lineno">  268 </span>-- | Normalize indentation: strip all leading whitespace from each line.
+<span class="lineno">  269 </span>-- This handles mismatched tabs-vs-spaces and indent-level differences.
+<span class="lineno">  270 </span>normalizeIndentation :: Text -&gt; Text
+<span class="lineno">  271 </span><span class="decl"><span class="istickedoff">normalizeIndentation = T.unlines . map T.stripStart . T.lines</span></span>
+<span class="lineno">  272 </span>
+<span class="lineno">  273 </span>-- | Count non-overlapping occurrences of a needle in a haystack.
+<span class="lineno">  274 </span>countOccurrences :: Text -&gt; Text -&gt; Int
+<span class="lineno">  275 </span><span class="decl"><span class="istickedoff">countOccurrences needle haystack</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">| T.null needle = 0</span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>     = go 0 haystack</span>
+<span class="lineno">  278 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  279 </span><span class="spaces">    </span><span class="istickedoff">go !n remaining =</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">case T.breakOn needle remaining of</span>
+<span class="lineno">  281 </span><span class="spaces">        </span><span class="istickedoff">(_, after)</span>
+<span class="lineno">  282 </span><span class="spaces">          </span><span class="istickedoff">| T.null after -&gt; n</span>
+<span class="lineno">  283 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>    -&gt; go (n + 1) (T.drop (T.length needle) after)</span></span>
+<span class="lineno">  284 </span>
+<span class="lineno">  285 </span>-- | Replace the first occurrence of needle with replacement.
+<span class="lineno">  286 </span>replaceFirst :: Text -&gt; Text -&gt; Text -&gt; Text
+<span class="lineno">  287 </span><span class="decl"><span class="istickedoff">replaceFirst needle replacement haystack =</span>
+<span class="lineno">  288 </span><span class="spaces">  </span><span class="istickedoff">let (before, after) = T.breakOn needle haystack</span>
+<span class="lineno">  289 </span><span class="spaces">  </span><span class="istickedoff">in before &lt;&gt; replacement &lt;&gt; T.drop (T.length needle) after</span></span>
+<span class="lineno">  290 </span>
+<span class="lineno">  291 </span>-- | Replace all non-overlapping occurrences of needle with replacement.
+<span class="lineno">  292 </span>replaceAll :: Text -&gt; Text -&gt; Text -&gt; Text
+<span class="lineno">  293 </span><span class="decl"><span class="istickedoff">replaceAll needle replacement haystack</span>
+<span class="lineno">  294 </span><span class="spaces">  </span><span class="istickedoff">| T.null needle = haystack</span>
+<span class="lineno">  295 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>     = T.intercalate replacement (T.splitOn needle haystack)</span></span>
+
+</pre>
+</body>
+</html>

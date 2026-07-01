@@ -1,0 +1,186 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | A validated, canonical UUID used to correlate a spawned @claude-code@
+<span class="lineno">    2 </span>-- harness with its on-disk JSONL session-log file.
+<span class="lineno">    3 </span>--
+<span class="lineno">    4 </span>-- The value constructor is intentionally NOT exported. The only ways to
+<span class="lineno">    5 </span>-- obtain a 'ClaudeSessionUuid' are:
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>--   * 'mkClaudeSessionUuid' — the smart constructor, which accepts ONLY a
+<span class="lineno">    8 </span>--     canonical lowercase UUID (8-4-4-4-12, 36 chars).
+<span class="lineno">    9 </span>--   * 'mintClaudeSessionUuid' — generates a fresh UUIDv4 from a
+<span class="lineno">   10 </span>--     cryptographic source.
+<span class="lineno">   11 </span>--   * the 'Aeson.FromJSON' instance, which routes through
+<span class="lineno">   12 </span>--     'mkClaudeSessionUuid' so corrupted on-disk JSON cannot bypass
+<span class="lineno">   13 </span>--     validation.
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- This mirrors the 'PureClaw.Session.Types.SessionPrefix' smart-constructor
+<span class="lineno">   16 </span>-- pattern (newtype + typed error sum + validated 'FromJSON').
+<span class="lineno">   17 </span>module PureClaw.Harness.ClaudeSession
+<span class="lineno">   18 </span>  ( -- * Validated UUID (smart constructor)
+<span class="lineno">   19 </span>    -- The data constructor is intentionally NOT exported.
+<span class="lineno">   20 </span>    ClaudeSessionUuid
+<span class="lineno">   21 </span>  , unClaudeSessionUuid
+<span class="lineno">   22 </span>  , mkClaudeSessionUuid
+<span class="lineno">   23 </span>  , ClaudeSessionUuidError (..)
+<span class="lineno">   24 </span>    -- * Cryptographic generation
+<span class="lineno">   25 </span>  , mintClaudeSessionUuid
+<span class="lineno">   26 </span>  ) where
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>import Crypto.Random qualified as CR
+<span class="lineno">   29 </span>import Data.Aeson (FromJSON (..), ToJSON (..))
+<span class="lineno">   30 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   31 </span>import Data.Bits ((.&amp;.), (.|.))
+<span class="lineno">   32 </span>import Data.ByteString (ByteString)
+<span class="lineno">   33 </span>import Data.ByteString qualified as BS
+<span class="lineno">   34 </span>import Data.ByteString.Base16 qualified as B16
+<span class="lineno">   35 </span>import Data.Char qualified as Char
+<span class="lineno">   36 </span>import Data.Text (Text)
+<span class="lineno">   37 </span>import Data.Text qualified as T
+<span class="lineno">   38 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   39 </span>import Data.Word (Word8)
+<span class="lineno">   40 </span>
+<span class="lineno">   41 </span>-- | A validated canonical UUID correlating a @claude-code@ harness with its
+<span class="lineno">   42 </span>-- JSONL session log. Always holds a canonical lowercase 36-character UUID.
+<span class="lineno">   43 </span>--
+<span class="lineno">   44 </span>-- The 'Show' instance is deliberately REDACTED: it never prints the raw uuid
+<span class="lineno">   45 </span>-- into general logs. Use 'unClaudeSessionUuid' for the raw value when a caller
+<span class="lineno">   46 </span>-- legitimately needs it (e.g. to build the log path).
+<span class="lineno">   47 </span>newtype ClaudeSessionUuid = ClaudeSessionUuid Text
+<span class="lineno">   48 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>-- | Redacted 'Show'. Never leaks the raw uuid into general logs. (D1.4)
+<span class="lineno">   51 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show ClaudeSessionUuid</span></span></span></span> where
+<span class="lineno">   52 </span>  <span class="decl"><span class="istickedoff">show _ = &quot;ClaudeSessionUuid &lt;redacted&gt;&quot;</span></span>
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>-- | Explicit accessor for the raw canonical uuid text. Use only where the
+<span class="lineno">   55 </span>-- raw value is genuinely required (e.g. constructing the JSONL log path).
+<span class="lineno">   56 </span>unClaudeSessionUuid :: ClaudeSessionUuid -&gt; Text
+<span class="lineno">   57 </span><span class="decl"><span class="istickedoff">unClaudeSessionUuid (ClaudeSessionUuid t) = t</span></span>
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>-- | Reasons a raw 'Text' cannot be promoted to a 'ClaudeSessionUuid'.
+<span class="lineno">   60 </span>-- Mirrors 'PureClaw.Session.Types.SessionPrefixError'.
+<span class="lineno">   61 </span>data ClaudeSessionUuidError
+<span class="lineno">   62 </span>  = -- | The input was empty.
+<span class="lineno">   63 </span>    UuidEmpty
+<span class="lineno">   64 </span>  | -- | The input was not exactly 36 characters.
+<span class="lineno">   65 </span>    UuidWrongLength
+<span class="lineno">   66 </span>  | -- | The input was 36 characters but not a canonical lowercase UUID
+<span class="lineno">   67 </span>    -- (wrong charset, uppercase hex, wrong hyphen positions, contains
+<span class="lineno">   68 </span>    -- @\'\/\'@, @\&quot;..\&quot;@, NUL, etc.). Carries the offending input.
+<span class="lineno">   69 </span>    UuidNotCanonical Text
+<span class="lineno">   70 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | Canonical UUID length: 8-4-4-4-12 plus four hyphens = 36 characters.
+<span class="lineno">   73 </span>uuidLength :: Int
+<span class="lineno">   74 </span><span class="decl"><span class="istickedoff">uuidLength = 36</span></span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | Zero-based positions of the four hyphens in a canonical UUID.
+<span class="lineno">   77 </span>hyphenPositions :: [Int]
+<span class="lineno">   78 </span><span class="decl"><span class="istickedoff">hyphenPositions = [8, 13, 18, 23]</span></span>
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- | True iff the character is a lowercase hex digit (@0-9@, @a-f@).
+<span class="lineno">   81 </span>-- Uppercase is intentionally rejected (reject-unless-already-canonical).
+<span class="lineno">   82 </span>isLowerHexDigit :: Char -&gt; Bool
+<span class="lineno">   83 </span><span class="decl"><span class="istickedoff">isLowerHexDigit c = Char.isDigit c || (c &gt;= 'a' &amp;&amp; c &lt;= 'f')</span></span>
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>-- | True iff the character at the given zero-based position is valid for a
+<span class="lineno">   86 </span>-- canonical UUID: a hyphen at a hyphen position, a lowercase hex digit
+<span class="lineno">   87 </span>-- everywhere else.
+<span class="lineno">   88 </span>isValidAtPos :: Int -&gt; Char -&gt; Bool
+<span class="lineno">   89 </span><span class="decl"><span class="istickedoff">isValidAtPos pos c =</span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="istickedoff">if pos `elem` hyphenPositions</span>
+<span class="lineno">   91 </span><span class="spaces">    </span><span class="istickedoff">then c == '-'</span>
+<span class="lineno">   92 </span><span class="spaces">    </span><span class="istickedoff">else isLowerHexDigit c</span></span>
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>-- | Smart constructor. Accepts ONLY a canonical lowercase UUID in the
+<span class="lineno">   95 </span>-- @8-4-4-4-12@ (36-character) form. Rejects uppercase, wrong length, wrong
+<span class="lineno">   96 </span>-- charset, wrong hyphen positions, and — by construction — any input
+<span class="lineno">   97 </span>-- containing @\'\/\'@, @\&quot;..\&quot;@, or NUL bytes (none of those are valid
+<span class="lineno">   98 </span>-- lowercase-hex-or-hyphen characters in the right positions).
+<span class="lineno">   99 </span>--
+<span class="lineno">  100 </span>-- The policy is reject-unless-already-canonical: an uppercase or otherwise
+<span class="lineno">  101 </span>-- non-canonical UUID is REJECTED, not normalized, so the stored value is a
+<span class="lineno">  102 </span>-- single canonical form that is safe to use directly in a filesystem path.
+<span class="lineno">  103 </span>mkClaudeSessionUuid :: Text -&gt; Either ClaudeSessionUuidError ClaudeSessionUuid
+<span class="lineno">  104 </span><span class="decl"><span class="istickedoff">mkClaudeSessionUuid raw</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">| T.null raw = Left UuidEmpty</span>
+<span class="lineno">  106 </span><span class="spaces">  </span><span class="istickedoff">| T.length raw /= uuidLength = Left UuidWrongLength</span>
+<span class="lineno">  107 </span><span class="spaces">  </span><span class="istickedoff">| not isCanonical = Left (UuidNotCanonical raw)</span>
+<span class="lineno">  108 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Right (ClaudeSessionUuid raw)</span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  110 </span><span class="spaces">    </span><span class="istickedoff">isCanonical = all (uncurry isValidAtPos) (zip [0 ..] (T.unpack raw))</span></span>
+<span class="lineno">  111 </span>
+<span class="lineno">  112 </span>-- | Custom 'FromJSON' routes through 'mkClaudeSessionUuid' so corrupted
+<span class="lineno">  113 </span>-- on-disk JSON cannot bypass the smart constructor. (D1.3)
+<span class="lineno">  114 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON ClaudeSessionUuid</span></span></span></span> where
+<span class="lineno">  115 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;ClaudeSessionUuid&quot;</span> $ \t -&gt;</span>
+<span class="lineno">  116 </span><span class="spaces">    </span><span class="istickedoff">case mkClaudeSessionUuid t of</span>
+<span class="lineno">  117 </span><span class="spaces">      </span><span class="istickedoff">Right u -&gt; pure u</span>
+<span class="lineno">  118 </span><span class="spaces">      </span><span class="istickedoff">Left e -&gt; fail (&quot;invalid ClaudeSessionUuid: &quot; &lt;&gt; <span class="nottickedoff">show e</span>)</span></span>
+<span class="lineno">  119 </span>
+<span class="lineno">  120 </span>-- | 'ToJSON' renders the canonical uuid text. Round-trips with 'FromJSON'.
+<span class="lineno">  121 </span>-- (D1.3)
+<span class="lineno">  122 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON ClaudeSessionUuid</span></span></span></span></span></span></span></span> where
+<span class="lineno">  123 </span>  <span class="decl"><span class="istickedoff">toJSON = toJSON . unClaudeSessionUuid</span></span>
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>-- | Generate a fresh canonical UUIDv4 from a CRYPTOGRAPHIC source. (D1.2)
+<span class="lineno">  126 </span>--
+<span class="lineno">  127 </span>-- We draw 16 random bytes from 'Crypto.Random.getRandomBytes' (the @crypton@
+<span class="lineno">  128 </span>-- CSPRNG, the same system-entropy source used elsewhere in this codebase for
+<span class="lineno">  129 </span>-- key/IV/pairing-token generation — see &quot;PureClaw.Security.Crypto&quot;). We set
+<span class="lineno">  130 </span>-- the RFC 4122 version (4) and variant (10xx) bits, then render the bytes
+<span class="lineno">  131 </span>-- directly as canonical lowercase hex with hyphens at the 8-4-4-4-12
+<span class="lineno">  132 </span>-- boundaries. We deliberately do NOT use @System.Random@'s default 'StdGen',
+<span class="lineno">  133 </span>-- which is not a CSPRNG.
+<span class="lineno">  134 </span>--
+<span class="lineno">  135 </span>-- Construction is total and branch-free: 16 bytes always render to exactly
+<span class="lineno">  136 </span>-- 36 canonical characters, so no error path is possible.
+<span class="lineno">  137 </span>mintClaudeSessionUuid :: IO ClaudeSessionUuid
+<span class="lineno">  138 </span><span class="decl"><span class="istickedoff">mintClaudeSessionUuid = do</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">raw &lt;- CR.getRandomBytes 16 :: IO ByteString</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="istickedoff">let bytes = BS.pack (setVersionVariant (BS.unpack raw))</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="istickedoff">pure (ClaudeSessionUuid (renderCanonical bytes))</span></span>
+<span class="lineno">  142 </span>
+<span class="lineno">  143 </span>-- | Force the RFC 4122 version (4) and variant (10xx) bits on the 16-byte
+<span class="lineno">  144 </span>-- UUID payload so the result is a well-formed version-4 UUID.
+<span class="lineno">  145 </span>setVersionVariant :: [Word8] -&gt; [Word8]
+<span class="lineno">  146 </span><span class="decl"><span class="istickedoff">setVersionVariant = zipWith adjust [0 :: Int ..]</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  148 </span><span class="spaces">    </span><span class="istickedoff">adjust 6 b = (b .&amp;. 0x0f) .|. 0x40 -- version 4 in the high nibble</span>
+<span class="lineno">  149 </span><span class="spaces">    </span><span class="istickedoff">adjust 8 b = (b .&amp;. 0x3f) .|. 0x80 -- variant 10xx in the high bits</span>
+<span class="lineno">  150 </span><span class="spaces">    </span><span class="istickedoff">adjust _ b = b</span></span>
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | Render exactly 16 bytes as a canonical lowercase UUID: 32 lowercase hex
+<span class="lineno">  153 </span>-- digits (via @base16-bytestring@) with hyphens inserted at the 8-4-4-4-12
+<span class="lineno">  154 </span>-- boundaries. Total: 16 bytes always produce 32 hex chars, which split into
+<span class="lineno">  155 </span>-- the canonical groups.
+<span class="lineno">  156 </span>renderCanonical :: ByteString -&gt; Text
+<span class="lineno">  157 </span><span class="decl"><span class="istickedoff">renderCanonical bytes =</span>
+<span class="lineno">  158 </span><span class="spaces">  </span><span class="istickedoff">let hex = TE.decodeLatin1 (B16.encode bytes) -- 32 lowercase hex chars</span>
+<span class="lineno">  159 </span><span class="spaces">      </span><span class="istickedoff">(g1, r1) = T.splitAt 8 hex</span>
+<span class="lineno">  160 </span><span class="spaces">      </span><span class="istickedoff">(g2, r2) = T.splitAt 4 r1</span>
+<span class="lineno">  161 </span><span class="spaces">      </span><span class="istickedoff">(g3, r3) = T.splitAt 4 r2</span>
+<span class="lineno">  162 </span><span class="spaces">      </span><span class="istickedoff">(g4, g5) = T.splitAt 4 r3</span>
+<span class="lineno">  163 </span><span class="spaces">   </span><span class="istickedoff">in T.intercalate &quot;-&quot; [g1, g2, g3, g4, g5]</span></span>
+
+</pre>
+</body>
+</html>

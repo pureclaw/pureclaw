@@ -1,0 +1,223 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | Activity probe loop — WU4 of the live-transcript-streaming feature.
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- The loop walks the process-wide @IORef (Map Text HarnessHandle)@ every
+<span class="lineno">    4 </span>-- two seconds, derives each harness's current 'HarnessActivity' via the
+<span class="lineno">    5 </span>-- same 'probeHarness' logic the HTTP API uses, and publishes one
+<span class="lineno">    6 </span>-- 'ActivityChanged' event per state /transition/ (not per probe tick) to
+<span class="lineno">    7 </span>-- the 'StreamBroker'.
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- /First-tick semantics./ The very first probe establishes the baseline;
+<span class="lineno">   10 </span>-- zero events are emitted on that tick. From the second tick onward only
+<span class="lineno">   11 </span>-- harnesses whose state differs from the previous snapshot produce events.
+<span class="lineno">   12 </span>-- This is the v1 source of truth for 'SaHarnessStatus' events — see
+<span class="lineno">   13 </span>-- @docs\/transcript-streaming.md@ §&quot;Activity event source&quot; and DoD D17.
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- /Lifecycle./ The loop is forked under 'Async.withAsync' alongside the WAI
+<span class="lineno">   16 </span>-- server in @startWithChannel@ (&quot;PureClaw.CLI.Commands&quot;). When the
+<span class="lineno">   17 </span>-- enclosing 'Async' scope exits, 'AsyncCancelled' is delivered; the
+<span class="lineno">   18 </span>-- exception handler /re-raises/ it (per project memory) so bracket-style
+<span class="lineno">   19 </span>-- cleanup runs. Any other 'SomeException' is logged via '_lh_logError' and
+<span class="lineno">   20 </span>-- the loop terminates — v1 prefers &quot;loud failure&quot; to silent restart (D24,
+<span class="lineno">   21 </span>-- @docs\/transcript-streaming.md@ §&quot;Lifecycle and Shutdown&quot;).
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- /Test seam./ 'runActivityProbeLoopWith' exposes the tick interval and the
+<span class="lineno">   24 </span>-- probe action so unit tests can drive the loop deterministically. The
+<span class="lineno">   25 </span>-- production entry point 'runActivityProbeLoop' supplies the standard wiring
+<span class="lineno">   26 </span>-- — a 2-second tick and the harness-map snapshot via 'probeHarness'.
+<span class="lineno">   27 </span>module PureClaw.Frontend.ActivityProbe
+<span class="lineno">   28 </span>  ( runActivityProbeLoop
+<span class="lineno">   29 </span>  , runActivityProbeLoopWith
+<span class="lineno">   30 </span>  ) where
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>import Control.Concurrent (threadDelay)
+<span class="lineno">   33 </span>import Control.Concurrent.Async (AsyncCancelled (..))
+<span class="lineno">   34 </span>import Control.Exception (SomeException, fromException, handle, throwIO, try)
+<span class="lineno">   35 </span>import Control.Monad (forM_, forever)
+<span class="lineno">   36 </span>import Data.IORef
+<span class="lineno">   37 </span>import Data.Map.Strict (Map)
+<span class="lineno">   38 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   39 </span>import Data.Text (Text)
+<span class="lineno">   40 </span>import Data.Text qualified as T
+<span class="lineno">   41 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>import PureClaw.Core.Types (SessionId (..))
+<span class="lineno">   44 </span>import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+<span class="lineno">   45 </span>import PureClaw.Frontend.StreamBroker
+<span class="lineno">   46 </span>  ( BrokerEvent (..)
+<span class="lineno">   47 </span>  , SessionActivity (..)
+<span class="lineno">   48 </span>  , StreamBroker (..)
+<span class="lineno">   49 </span>  )
+<span class="lineno">   50 </span>import PureClaw.Handles.Harness (HarnessHandle (..), HarnessStatus (..))
+<span class="lineno">   51 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   52 </span>import PureClaw.Harness.ClaudeCode (isIdle)
+<span class="lineno">   53 </span>import PureClaw.Harness.Tmux (captureWindow)
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   56 </span>-- Production entry point
+<span class="lineno">   57 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>-- | Run the activity probe loop with the production tick interval (2 s) and
+<span class="lineno">   60 </span>-- the standard harness-snapshot action. The harness snapshot mirrors the
+<span class="lineno">   61 </span>-- semantics of 'PureClaw.Frontend.API.probeHarness': for each harness in
+<span class="lineno">   62 </span>-- the map, it derives 'HarnessActivity' from process status + a tmux
+<span class="lineno">   63 </span>-- capture. See 'runActivityProbeLoopWith' for the test seam.
+<span class="lineno">   64 </span>runActivityProbeLoop
+<span class="lineno">   65 </span>  :: StreamBroker
+<span class="lineno">   66 </span>  -&gt; IORef (Map Text HarnessHandle)
+<span class="lineno">   67 </span>  -&gt; LogHandle
+<span class="lineno">   68 </span>  -&gt; IO ()
+<span class="lineno">   69 </span><span class="decl"><span class="nottickedoff">runActivityProbeLoop broker harnessesRef =</span>
+<span class="lineno">   70 </span><span class="spaces">  </span><span class="nottickedoff">runActivityProbeLoopWith</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="nottickedoff">defaultTickMicros</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="nottickedoff">(snapshotHarnesses harnessesRef)</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="nottickedoff">broker</span></span>
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>-- | Production tick interval: 2 seconds, matching @docs\/transcript-streaming.md@
+<span class="lineno">   76 </span>-- §&quot;Activity event source&quot; (sole source of 'SaHarnessStatus' events; the
+<span class="lineno">   77 </span>-- 2 s lag is the documented v1 tradeoff).
+<span class="lineno">   78 </span>defaultTickMicros :: Int
+<span class="lineno">   79 </span><span class="decl"><span class="nottickedoff">defaultTickMicros = 2_000_000</span></span>
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   82 </span>-- Test-friendly entry point
+<span class="lineno">   83 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>-- | The probe loop with explicit tick interval and a caller-supplied probe
+<span class="lineno">   86 </span>-- action. Unit tests pass a controllable probe (e.g. reading a mutable
+<span class="lineno">   87 </span>-- 'IORef') so the loop is deterministic without forking tmux. The
+<span class="lineno">   88 </span>-- @probe@ action MUST be exception-safe; the loop catches any
+<span class="lineno">   89 </span>-- 'SomeException' except 'AsyncCancelled', logs it, and terminates (no
+<span class="lineno">   90 </span>-- restart in v1).
+<span class="lineno">   91 </span>runActivityProbeLoopWith
+<span class="lineno">   92 </span>  :: Int
+<span class="lineno">   93 </span>  -- ^ Tick interval in microseconds.
+<span class="lineno">   94 </span>  -&gt; IO (Map Text HarnessActivity)
+<span class="lineno">   95 </span>  -- ^ Probe action: returns the current per-harness activity snapshot.
+<span class="lineno">   96 </span>  -&gt; StreamBroker
+<span class="lineno">   97 </span>  -&gt; LogHandle
+<span class="lineno">   98 </span>  -&gt; IO ()
+<span class="lineno">   99 </span><span class="decl"><span class="istickedoff">runActivityProbeLoopWith tickMicros probe broker logger = handle outer $ do</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">-- First tick: establish the baseline, emit nothing. The sleep happens</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">-- BEFORE the probe so a test that cancels immediately doesn't race the</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">-- first probe (and so D17's &quot;no events on the first tick&quot; holds even if</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">-- the harness map is changing concurrently).</span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">threadDelay tickMicros</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">initial &lt;- probe</span>
+<span class="lineno">  106 </span><span class="spaces">  </span><span class="istickedoff">lastStatesRef &lt;- newIORef initial</span>
+<span class="lineno">  107 </span><span class="spaces">  </span><span class="istickedoff">forever $ do</span>
+<span class="lineno">  108 </span><span class="spaces">    </span><span class="istickedoff">threadDelay tickMicros</span>
+<span class="lineno">  109 </span><span class="spaces">    </span><span class="istickedoff">next &lt;- probe</span>
+<span class="lineno">  110 </span><span class="spaces">    </span><span class="istickedoff">prev &lt;- readIORef lastStatesRef</span>
+<span class="lineno">  111 </span><span class="spaces">    </span><span class="istickedoff">-- Emit one event per harness whose state changed since the previous</span>
+<span class="lineno">  112 </span><span class="spaces">    </span><span class="istickedoff">-- snapshot. @Map.differenceWith f m1 m2@ keeps every key of @m1@: if</span>
+<span class="lineno">  113 </span><span class="spaces">    </span><span class="istickedoff">-- @m2@ also has the key, @f new old@ decides whether to keep</span>
+<span class="lineno">  114 </span><span class="spaces">    </span><span class="istickedoff">-- (@Just new@) or drop (@Nothing@); if @m2@ does not, the entry is</span>
+<span class="lineno">  115 </span><span class="spaces">    </span><span class="istickedoff">-- kept as-is. So this single call captures both &quot;transitioned&quot;</span>
+<span class="lineno">  116 </span><span class="spaces">    </span><span class="istickedoff">-- harnesses and newly-appeared harnesses (first-observed state).</span>
+<span class="lineno">  117 </span><span class="spaces">    </span><span class="istickedoff">-- Harnesses that /disappear/ between ticks emit no event — their</span>
+<span class="lineno">  118 </span><span class="spaces">    </span><span class="istickedoff">-- absence is a separable v1.5 concern.</span>
+<span class="lineno">  119 </span><span class="spaces">    </span><span class="istickedoff">let transitions :: Map Text HarnessActivity</span>
+<span class="lineno">  120 </span><span class="spaces">        </span><span class="istickedoff">transitions =</span>
+<span class="lineno">  121 </span><span class="spaces">          </span><span class="istickedoff">Map.differenceWith</span>
+<span class="lineno">  122 </span><span class="spaces">            </span><span class="istickedoff">(\new old -&gt; if new == old then Nothing else Just new)</span>
+<span class="lineno">  123 </span><span class="spaces">            </span><span class="istickedoff">next</span>
+<span class="lineno">  124 </span><span class="spaces">            </span><span class="istickedoff">prev</span>
+<span class="lineno">  125 </span><span class="spaces">    </span><span class="istickedoff">forM_ (Map.toList transitions) $ \(name, status) -&gt;</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">_streamBroker_publish broker</span>
+<span class="lineno">  127 </span><span class="spaces">        </span><span class="istickedoff">(ActivityChanged (sessionIdFromHarnessName name) (SaHarnessStatus status))</span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="istickedoff">writeIORef lastStatesRef next</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  130 </span><span class="spaces">    </span><span class="istickedoff">-- AsyncCancelled MUST be re-raised so 'Async.withAsync' / 'Async.cancel'</span>
+<span class="lineno">  131 </span><span class="spaces">    </span><span class="istickedoff">-- can complete cleanly (project-wide invariant; see</span>
+<span class="lineno">  132 </span><span class="spaces">    </span><span class="istickedoff">-- 'PureClaw.Frontend.BroadcastingTranscript' for the same pattern).</span>
+<span class="lineno">  133 </span><span class="spaces">    </span><span class="istickedoff">outer :: SomeException -&gt; IO ()</span>
+<span class="lineno">  134 </span><span class="spaces">    </span><span class="istickedoff">outer e</span>
+<span class="lineno">  135 </span><span class="spaces">      </span><span class="istickedoff">| Just AsyncCancelled &lt;- fromException e = throwIO e</span>
+<span class="lineno">  136 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = _lh_logError logger</span>
+<span class="lineno">  137 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">(&quot;activity-probe crashed: &quot; &lt;&gt; T.pack (show e))</span></span></span>
+<span class="lineno">  138 </span>
+<span class="lineno">  139 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  140 </span>-- Harness → SessionId mapping
+<span class="lineno">  141 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  142 </span>
+<span class="lineno">  143 </span>-- | Convert a harness-map key (the harness &quot;name&quot;, e.g. @claude-code-0@) to
+<span class="lineno">  144 </span>-- a 'SessionId'. The activity events flow over the wire keyed by
+<span class="lineno">  145 </span>-- 'SessionId'; the harness map is keyed by 'Text'. v1 uses the harness
+<span class="lineno">  146 </span>-- name as the session id verbatim — frontends that need to map &quot;harness
+<span class="lineno">  147 </span>-- name&quot; back to &quot;session id&quot; can do so client-side. A richer mapping (e.g.
+<span class="lineno">  148 </span>-- looking up '_hh_session' on the handle) is a follow-up if real session
+<span class="lineno">  149 </span>-- ids ever diverge from harness names.
+<span class="lineno">  150 </span>sessionIdFromHarnessName :: Text -&gt; SessionId
+<span class="lineno">  151 </span><span class="decl"><span class="istickedoff">sessionIdFromHarnessName = SessionId</span></span>
+<span class="lineno">  152 </span>
+<span class="lineno">  153 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  154 </span>-- Production probe (mirrors Frontend.API.probeHarness, sans HarnessInfo wrapper)
+<span class="lineno">  155 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  156 </span>
+<span class="lineno">  157 </span>-- | Snapshot the current per-harness 'HarnessActivity'. Exception-safe per
+<span class="lineno">  158 </span>-- harness: a probe failure on one entry yields 'HarnessIdle' rather than
+<span class="lineno">  159 </span>-- propagating, matching the HTTP @\/harnesses@ probe's behaviour and
+<span class="lineno">  160 </span>-- preserving the loop's &quot;best-effort&quot; contract.
+<span class="lineno">  161 </span>snapshotHarnesses
+<span class="lineno">  162 </span>  :: IORef (Map Text HarnessHandle)
+<span class="lineno">  163 </span>  -&gt; IO (Map Text HarnessActivity)
+<span class="lineno">  164 </span><span class="decl"><span class="nottickedoff">snapshotHarnesses ref = do</span>
+<span class="lineno">  165 </span><span class="spaces">  </span><span class="nottickedoff">harnesses &lt;- readIORef ref</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="nottickedoff">pairs &lt;- traverse probeOne (Map.toList harnesses)</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="nottickedoff">pure (Map.fromList pairs)</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  169 </span><span class="spaces">    </span><span class="nottickedoff">probeOne :: (Text, HarnessHandle) -&gt; IO (Text, HarnessActivity)</span>
+<span class="lineno">  170 </span><span class="spaces">    </span><span class="nottickedoff">probeOne (name, hh) = do</span>
+<span class="lineno">  171 </span><span class="spaces">      </span><span class="nottickedoff">st &lt;- _hh_status hh</span>
+<span class="lineno">  172 </span><span class="spaces">      </span><span class="nottickedoff">activity &lt;- case st of</span>
+<span class="lineno">  173 </span><span class="spaces">        </span><span class="nottickedoff">HarnessExited _ -&gt; pure HarnessStopped</span>
+<span class="lineno">  174 </span><span class="spaces">        </span><span class="nottickedoff">HarnessRunning  -&gt; probeRunning (_hh_session hh) name</span>
+<span class="lineno">  175 </span><span class="spaces">      </span><span class="nottickedoff">pure (name, activity)</span></span>
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>-- | Same shape as 'PureClaw.Frontend.API.probeActivity': tmux capture
+<span class="lineno">  178 </span>-- distinguishes idle vs thinking; capture failures degrade to idle so the
+<span class="lineno">  179 </span>-- loop never crashes on a transient tmux hiccup.
+<span class="lineno">  180 </span>probeRunning :: Text -&gt; Text -&gt; IO HarnessActivity
+<span class="lineno">  181 </span><span class="decl"><span class="nottickedoff">probeRunning tmuxSession windowName = do</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="nottickedoff">let target = tmuxSession &lt;&gt; &quot;:&quot; &lt;&gt; extractWindowIdx windowName</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- try @SomeException (captureWindow target 50)</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  185 </span><span class="spaces">    </span><span class="nottickedoff">Left _        -&gt; pure HarnessIdle</span>
+<span class="lineno">  186 </span><span class="spaces">    </span><span class="nottickedoff">Right capture -&gt;</span>
+<span class="lineno">  187 </span><span class="spaces">      </span><span class="nottickedoff">pure $</span>
+<span class="lineno">  188 </span><span class="spaces">        </span><span class="nottickedoff">if isIdle (TE.decodeUtf8Lenient capture)</span>
+<span class="lineno">  189 </span><span class="spaces">          </span><span class="nottickedoff">then HarnessIdle</span>
+<span class="lineno">  190 </span><span class="spaces">          </span><span class="nottickedoff">else HarnessThinking</span></span>
+<span class="lineno">  191 </span>
+<span class="lineno">  192 </span>-- | Extract the window-index suffix from a harness name like
+<span class="lineno">  193 </span>-- @&quot;claude-code-0&quot;@. Mirrors 'PureClaw.Frontend.API.extractWindowIdx' so
+<span class="lineno">  194 </span>-- the probe loop produces the same captures the HTTP @\/harnesses@
+<span class="lineno">  195 </span>-- endpoint does.
+<span class="lineno">  196 </span>extractWindowIdx :: Text -&gt; Text
+<span class="lineno">  197 </span><span class="decl"><span class="nottickedoff">extractWindowIdx name =</span>
+<span class="lineno">  198 </span><span class="spaces">  </span><span class="nottickedoff">case T.splitOn &quot;-&quot; name of</span>
+<span class="lineno">  199 </span><span class="spaces">    </span><span class="nottickedoff">parts | length parts &gt;= 2 -&gt; last parts</span>
+<span class="lineno">  200 </span><span class="spaces">    </span><span class="nottickedoff">_                         -&gt; &quot;0&quot;</span></span>
+
+</pre>
+</body>
+</html>

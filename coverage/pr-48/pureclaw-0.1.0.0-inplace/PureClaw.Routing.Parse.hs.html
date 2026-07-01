@@ -1,0 +1,594 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.Parse
+<span class="lineno">    3 </span>-- Description : Slash-input parser + shared sanitizers (Tabbed Chat WU2).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- This module owns the slash-input grammar for Tabbed Chat (#51):
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>--   * @parseInput :: RoutingConfig -&gt; Text -&gt; Either ParseError ParsedInput@
+<span class="lineno">    8 </span>--     classifies a single user message into 'Switch' \/ 'Inject' \/
+<span class="lineno">    9 </span>--     'Default' \/ 'ParsedSlashCmd' per the grammar at
+<span class="lineno">   10 </span>--     @docs\/tabbed-chat.md@ §&quot;Routing Grammar (v1)&quot;.
+<span class="lineno">   11 </span>--   * @parseSlashCommand :: Text -&gt; Maybe SlashCommand@ is the
+<span class="lineno">   12 </span>--     re-exported in-tab-loop entry-point used by AI tab loops (WU6, I2
+<span class="lineno">   13 </span>--     contract) when an inbound 'UserText' starts with @\/@.
+<span class="lineno">   14 </span>--   * @mkSessionId :: Text -&gt; Either ParseError SessionId@ enforces the
+<span class="lineno">   15 </span>--     S3 \/ P15a corpus: rejects @\/@, @\\@, @..@, @NUL@, and any
+<span class="lineno">   16 </span>--     character outside @[a-zA-Z0-9_-]@.
+<span class="lineno">   17 </span>--   * @sanitizeTabName :: Text -&gt; Either NameError Text@ is the shared
+<span class="lineno">   18 </span>--     sanitization function used by every code path that sets
+<span class="lineno">   19 </span>--     @_tabHandle_name@ (H11) AND the @\/tab rename@ handler (S10).
+<span class="lineno">   20 </span>--
+<span class="lineno">   21 </span>-- == Grammar (single-char index, [0-9a-z])
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- @
+<span class="lineno">   24 </span>-- input        ::= switch | inject | default | slash-cmd
+<span class="lineno">   25 </span>-- switch       ::= \'\/\' IDX
+<span class="lineno">   26 </span>-- inject       ::= \'\/\' IDX WS payload
+<span class="lineno">   27 </span>-- default      ::= payload
+<span class="lineno">   28 </span>-- slash-cmd    ::= \'\/\' WORD ...
+<span class="lineno">   29 </span>--              |   \'\/tab\' WS action [WS args]
+<span class="lineno">   30 </span>--              |   \'\/tabs\'
+<span class="lineno">   31 </span>-- IDX          ::= [0-9a-z]        -- exactly one character
+<span class="lineno">   32 </span>-- WS           ::= one or more spaces\/tabs
+<span class="lineno">   33 </span>-- @
+<span class="lineno">   34 </span>--
+<span class="lineno">   35 </span>-- The index is exactly one character; digits @0-9@ map to tab indices
+<span class="lineno">   36 </span>-- @0..9@ and lowercase letters @a-z@ map to tab indices @10..35@. This
+<span class="lineno">   37 </span>-- gives a 36-tab maximum (matching @_rc_maxTabs@ default). Multi-char
+<span class="lineno">   38 </span>-- indices like @\/10@, @\/12@, @\/aa@, or @\/1a@ are rejected as
+<span class="lineno">   39 </span>-- 'ParseErrorMalformed' — there is no greedy digit run any more.
+<span class="lineno">   40 </span>--
+<span class="lineno">   41 </span>-- @\/0 0 run@ parses as @Inject 0 \&quot;0 run\&quot;@ — the payload character
+<span class="lineno">   42 </span>-- after the WS separator is preserved verbatim per P4.
+<span class="lineno">   43 </span>--
+<span class="lineno">   44 </span>-- The @\/0@ vs @\/0 \&lt;text\&gt;@ disambiguation is whitespace-driven:
+<span class="lineno">   45 </span>-- @\/0@ alone (or with trailing whitespace only) is a 'Switch';
+<span class="lineno">   46 </span>-- @\/0 \&lt;anything-non-blank\&gt;@ is an 'Inject'. The @\&lt;text\&gt;@ side of
+<span class="lineno">   47 </span>-- 'Inject' preserves all characters after the first whitespace
+<span class="lineno">   48 </span>-- separator, including embedded newlines (the channel layer is
+<span class="lineno">   49 </span>-- responsible for splitting incoming messages at newlines if it wants
+<span class="lineno">   50 </span>-- per-line semantics; we treat the message as a single input).
+<span class="lineno">   51 </span>--
+<span class="lineno">   52 </span>-- == Notes
+<span class="lineno">   53 </span>--
+<span class="lineno">   54 </span>--   * Index bounds-checking uses 'RoutingConfig._rc_maxTabs'. WU1's
+<span class="lineno">   55 </span>--     'mkTabIndex' enforces the floor only; the parser enforces the
+<span class="lineno">   56 </span>--     ceiling and emits 'ParseErrorIndexOutOfRange' on failure.
+<span class="lineno">   57 </span>--   * @\/0@ with a non-whitespace tail (e.g. @\/01@) is rejected as
+<span class="lineno">   58 </span>--     'ParseErrorMalformed' — the single-char grammar admits no
+<span class="lineno">   59 </span>--     multi-char numeric or alphanumeric indices.
+<span class="lineno">   60 </span>--   * @\/tab resume \&lt;id\&gt;@ runs the id through 'mkSessionId' at parse
+<span class="lineno">   61 </span>--     time per P15a (so the dispatcher never sees an unvalidated id);
+<span class="lineno">   62 </span>--     rejection surfaces as 'ParseErrorInvalidSessionId'.
+<span class="lineno">   63 </span>module PureClaw.Routing.Parse
+<span class="lineno">   64 </span>  ( -- * Slash-input parser
+<span class="lineno">   65 </span>    parseInput
+<span class="lineno">   66 </span>  , parseSlashCommand
+<span class="lineno">   67 </span>    -- * Smart constructors
+<span class="lineno">   68 </span>  , mkSessionId
+<span class="lineno">   69 </span>  , sanitizeTabName
+<span class="lineno">   70 </span>  , sanitizeTabNameWith
+<span class="lineno">   71 </span>    -- * Defaults used by the bare 'sanitizeTabName'
+<span class="lineno">   72 </span>  , defaultMaxNameLen
+<span class="lineno">   73 </span>  ) where
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>import Data.Char qualified as Char
+<span class="lineno">   76 </span>import Data.Maybe qualified as Maybe
+<span class="lineno">   77 </span>import Data.Text (Text)
+<span class="lineno">   78 </span>import Data.Text qualified as T
+<span class="lineno">   79 </span>import Data.Text.Read qualified as TR
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>import PureClaw.Agent.SlashCommands qualified as Slash
+<span class="lineno">   82 </span>import PureClaw.Core.Types qualified as Core
+<span class="lineno">   83 </span>import PureClaw.Handles.Tab qualified as Tab
+<span class="lineno">   84 </span>import PureClaw.Internal.Redact qualified as Redact
+<span class="lineno">   85 </span>import PureClaw.Routing.Types qualified as RT
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>
+<span class="lineno">   88 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   89 </span>-- parseInput
+<span class="lineno">   90 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>-- | Parse a single incoming message into the high-level routing
+<span class="lineno">   93 </span>-- classification.
+<span class="lineno">   94 </span>--
+<span class="lineno">   95 </span>-- See module haddock for the grammar; see @docs\/tabbed-chat.md@
+<span class="lineno">   96 </span>-- §&quot;Parser invariants&quot; for the per-form contract.
+<span class="lineno">   97 </span>parseInput :: RT.RoutingConfig -&gt; Text -&gt; Either RT.ParseError RT.ParsedInput
+<span class="lineno">   98 </span><span class="decl"><span class="istickedoff">parseInput rc raw</span>
+<span class="lineno">   99 </span><span class="spaces">  </span><span class="istickedoff">| T.null trimmedLeft = Left RT.ParseErrorEmptyInput</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">| not slashy        = Right (RT.Default raw)</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>         = classifySlashy rc trimmedLeft raw</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">-- We only drop leading whitespace; trailing whitespace is part of</span>
+<span class="lineno">  104 </span><span class="spaces">    </span><span class="istickedoff">-- the payload semantics ('/0 ' alone collapses to a Switch per the</span>
+<span class="lineno">  105 </span><span class="spaces">    </span><span class="istickedoff">-- &quot;trailing-whitespace-only payload&quot; rule).</span>
+<span class="lineno">  106 </span><span class="spaces">    </span><span class="istickedoff">trimmedLeft = T.dropWhile isHSpace raw</span>
+<span class="lineno">  107 </span><span class="spaces">    </span><span class="istickedoff">slashy      = case T.uncons trimmedLeft of</span>
+<span class="lineno">  108 </span><span class="spaces">      </span><span class="istickedoff">Just ('/', _) -&gt; True</span>
+<span class="lineno">  109 </span><span class="spaces">      </span><span class="istickedoff">_             -&gt; False</span></span>
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>-- | Dispatch on the shape after the leading @\/@.
+<span class="lineno">  112 </span>--
+<span class="lineno">  113 </span>--   * If the body is a single index char @c \in [0-9a-z]@ followed
+<span class="lineno">  114 </span>--     by end-of-input or whitespace, we have a 'Switch' (no payload)
+<span class="lineno">  115 </span>--     or 'Inject' (with payload).
+<span class="lineno">  116 </span>--   * Anything longer that starts with a digit (e.g. @\/12@,
+<span class="lineno">  117 </span>--     @\/1a@) is malformed — there is no greedy index any more.
+<span class="lineno">  118 </span>--     Bonus: @\/01@ \/ @\/02@ also fall here.
+<span class="lineno">  119 </span>--   * Anything longer that starts with a letter (e.g. @\/help@,
+<span class="lineno">  120 </span>--     @\/session new@) is routed through the slash-command parser.
+<span class="lineno">  121 </span>--
+<span class="lineno">  122 </span>-- The whitespace-or-EOI lookahead on the second character is what
+<span class="lineno">  123 </span>-- disambiguates @\/s@ (Switch to tab 28) from @\/session new@
+<span class="lineno">  124 </span>-- (slash command). The lookahead is a single 'T.uncons' on the
+<span class="lineno">  125 </span>-- tail; no second pass over the input.
+<span class="lineno">  126 </span>classifySlashy
+<span class="lineno">  127 </span>  :: RT.RoutingConfig
+<span class="lineno">  128 </span>  -&gt; Text   -- ^ leading-whitespace-stripped input (starts with @\/@)
+<span class="lineno">  129 </span>  -&gt; Text   -- ^ original input (preserved for the slash-cmd fallback)
+<span class="lineno">  130 </span>  -&gt; Either RT.ParseError RT.ParsedInput
+<span class="lineno">  131 </span><span class="decl"><span class="istickedoff">classifySlashy rc t orig =</span>
+<span class="lineno">  132 </span><span class="spaces">  </span><span class="istickedoff">let body = T.drop 1 t   -- drop the leading '/'</span>
+<span class="lineno">  133 </span><span class="spaces">  </span><span class="istickedoff">in case T.uncons body of</span>
+<span class="lineno">  134 </span><span class="spaces">       </span><span class="istickedoff">Nothing -&gt; Left RT.ParseErrorMalformed</span>
+<span class="lineno">  135 </span><span class="spaces">       </span><span class="istickedoff">Just (c, rest)</span>
+<span class="lineno">  136 </span><span class="spaces">         </span><span class="istickedoff">| Just n  &lt;- parseTabIndexChar c</span>
+<span class="lineno">  137 </span><span class="spaces">         </span><span class="istickedoff">, isIndexBoundary rest         -&gt; parseIndexCharForm rc n rest</span>
+<span class="lineno">  138 </span><span class="spaces">         </span><span class="istickedoff">| Char.isDigit c               -&gt;</span>
+<span class="lineno">  139 </span><span class="spaces">             </span><span class="istickedoff">-- Digit followed by more (non-WS) characters: legacy</span>
+<span class="lineno">  140 </span><span class="spaces">             </span><span class="istickedoff">-- multi-digit shapes (@\/12@, @\/01@, @\/1a@) are no</span>
+<span class="lineno">  141 </span><span class="spaces">             </span><span class="istickedoff">-- longer in the grammar. They cannot be slash commands</span>
+<span class="lineno">  142 </span><span class="spaces">             </span><span class="istickedoff">-- either (commands start with a letter), so reject.</span>
+<span class="lineno">  143 </span><span class="spaces">             </span><span class="istickedoff">Left RT.ParseErrorMalformed</span>
+<span class="lineno">  144 </span><span class="spaces">         </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>                    -&gt; parseSlashCommandForm orig</span></span>
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>-- | True when the byte following the single index char is end-of-input
+<span class="lineno">  147 </span>-- or whitespace (space, tab, newline, carriage return). Anything else
+<span class="lineno">  148 </span>-- means the index char was the first letter of a word — punt to the
+<span class="lineno">  149 </span>-- slash-command parser.
+<span class="lineno">  150 </span>isIndexBoundary :: Text -&gt; Bool
+<span class="lineno">  151 </span><span class="decl"><span class="istickedoff">isIndexBoundary rest = case T.uncons rest of</span>
+<span class="lineno">  152 </span><span class="spaces">  </span><span class="istickedoff">Nothing     -&gt; True</span>
+<span class="lineno">  153 </span><span class="spaces">  </span><span class="istickedoff">Just (c, _) -&gt; isHSpace c || c == '\n' || c == '\r'</span></span>
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>-- | Map a single ASCII character to its tab index.
+<span class="lineno">  156 </span>--
+<span class="lineno">  157 </span>--   * @\'0\'-\'9\'@ → @0..9@
+<span class="lineno">  158 </span>--   * @\'a\'-\'z\'@ → @10..35@
+<span class="lineno">  159 </span>--   * anything else → 'Nothing'
+<span class="lineno">  160 </span>--
+<span class="lineno">  161 </span>-- This is the only place the single-char index alphabet is encoded;
+<span class="lineno">  162 </span>-- the parser, dashboard, and any future readers should reuse this
+<span class="lineno">  163 </span>-- function rather than re-implementing the mapping.
+<span class="lineno">  164 </span>parseTabIndexChar :: Char -&gt; Maybe Int
+<span class="lineno">  165 </span><span class="decl"><span class="istickedoff">parseTabIndexChar c</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">| Char.isDigit c        = Just (Char.ord c - Char.ord '0')</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">| Char.isAsciiLower c   = Just (10 + Char.ord c - Char.ord 'a')</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>             = Nothing</span></span>
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Parse the @\/IDX [WS payload]@ form. The caller has already
+<span class="lineno">  171 </span>-- (a) decoded the index char to an 'Int' and (b) confirmed via
+<span class="lineno">  172 </span>-- 'isIndexBoundary' that @rest@ is empty or starts with whitespace.
+<span class="lineno">  173 </span>-- We bounds-check the index against @_rc_maxTabs@ and hand off to
+<span class="lineno">  174 </span>-- 'classifyAfterIndex' to decide Switch vs Inject.
+<span class="lineno">  175 </span>parseIndexCharForm
+<span class="lineno">  176 </span>  :: RT.RoutingConfig
+<span class="lineno">  177 </span>  -&gt; Int    -- ^ decoded index from the single index character
+<span class="lineno">  178 </span>  -&gt; Text   -- ^ everything after the index character (WS or empty by caller invariant)
+<span class="lineno">  179 </span>  -&gt; Either RT.ParseError RT.ParsedInput
+<span class="lineno">  180 </span><span class="decl"><span class="istickedoff">parseIndexCharForm rc n rest = do</span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="istickedoff">ti &lt;- boundedTabIndex rc n</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="istickedoff">classifyAfterIndex ti rest</span></span>
+<span class="lineno">  183 </span>
+<span class="lineno">  184 </span>-- | Bounds-check an 'Int' against @_rc_maxTabs@ and build a
+<span class="lineno">  185 </span>-- 'Tab.TabIndex' on success.
+<span class="lineno">  186 </span>--
+<span class="lineno">  187 </span>-- WU1's 'Tab.mkTabIndex' enforces only the floor (@n &gt;= 0@); we
+<span class="lineno">  188 </span>-- enforce the ceiling here. Caller invariant: @n &gt;= 0@ — the single
+<span class="lineno">  189 </span>-- index character produced by 'parseTabIndexChar' is always in
+<span class="lineno">  190 </span>-- @[0..35]@, so 'Tab.mkTabIndex' always returns 'Just'. We collapse
+<span class="lineno">  191 </span>-- the structurally-unreachable 'Nothing' branch into a single 'error'
+<span class="lineno">  192 </span>-- call via 'Maybe.fromMaybe' so the HPC report has no defensive dead
+<span class="lineno">  193 </span>-- arm to flag.
+<span class="lineno">  194 </span>boundedTabIndex
+<span class="lineno">  195 </span>  :: RT.RoutingConfig
+<span class="lineno">  196 </span>  -&gt; Int
+<span class="lineno">  197 </span>  -&gt; Either RT.ParseError Tab.TabIndex
+<span class="lineno">  198 </span><span class="decl"><span class="istickedoff">boundedTabIndex rc n</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">| n &gt;= RT._rc_maxTabs rc = Left (RT.ParseErrorIndexOutOfRange n)</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  201 </span><span class="spaces">      </span><span class="istickedoff">Right (Maybe.fromMaybe</span>
+<span class="lineno">  202 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">(error &quot;PureClaw.Routing.Parse.boundedTabIndex: \</span></span>
+<span class="lineno">  203 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">\mkTabIndex returned Nothing for n &gt;= 0 — \</span></span>
+<span class="lineno">  204 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">\caller invariant violated&quot;)</span></span>
+<span class="lineno">  205 </span><span class="spaces">               </span><span class="istickedoff">(Tab.mkTabIndex n))</span></span>
+<span class="lineno">  206 </span>
+<span class="lineno">  207 </span>-- | After consuming the digit run, decide between 'Switch' (no payload)
+<span class="lineno">  208 </span>-- and 'Inject' (payload preserved verbatim after the separator).
+<span class="lineno">  209 </span>--
+<span class="lineno">  210 </span>-- Newline handling per the design's multi-line rule: a newline
+<span class="lineno">  211 </span>-- immediately after the digit run counts as a separator, but the
+<span class="lineno">  212 </span>-- payload includes the newline (so @\/0\\nfoo@ → @Inject 0 \&quot;\\nfoo\&quot;@).
+<span class="lineno">  213 </span>-- Horizontal whitespace (space \/ tab) is consumed and the payload
+<span class="lineno">  214 </span>-- starts at the first non-blank byte (so @\/0 run tests@ →
+<span class="lineno">  215 </span>-- @Inject 0 \&quot;run tests\&quot;@).
+<span class="lineno">  216 </span>--
+<span class="lineno">  217 </span>-- 'shapeCheckRest' has already rejected the malformed @\/12abc@ case
+<span class="lineno">  218 </span>-- before this function is called, so the first char of @rest@ here is
+<span class="lineno">  219 </span>-- guaranteed to be a horizontal-WS, newline, or carriage return when
+<span class="lineno">  220 </span>-- @rest@ is non-empty.
+<span class="lineno">  221 </span>classifyAfterIndex :: Tab.TabIndex -&gt; Text -&gt; Either RT.ParseError RT.ParsedInput
+<span class="lineno">  222 </span><span class="decl"><span class="istickedoff">classifyAfterIndex ti rest</span>
+<span class="lineno">  223 </span><span class="spaces">  </span><span class="istickedoff">| T.null rest = Right (RT.Switch ti)</span>
+<span class="lineno">  224 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>   =</span>
+<span class="lineno">  225 </span><span class="spaces">      </span><span class="istickedoff">let (_hSep, afterHSep)  = T.span isHSpace rest</span>
+<span class="lineno">  226 </span><span class="spaces">          </span><span class="istickedoff">startsWithNewline   = case T.uncons afterHSep of</span>
+<span class="lineno">  227 </span><span class="spaces">                                  </span><span class="istickedoff">Just (c, _) -&gt; c == '\n' || c == '\r'</span>
+<span class="lineno">  228 </span><span class="spaces">                                  </span><span class="istickedoff">Nothing     -&gt; False</span>
+<span class="lineno">  229 </span><span class="spaces">      </span><span class="istickedoff">in if startsWithNewline</span>
+<span class="lineno">  230 </span><span class="spaces">           </span><span class="istickedoff">then</span>
+<span class="lineno">  231 </span><span class="spaces">             </span><span class="istickedoff">-- The newline (and everything after it, including any</span>
+<span class="lineno">  232 </span><span class="spaces">             </span><span class="istickedoff">-- trailing hSpace) IS the payload: a multi-line input</span>
+<span class="lineno">  233 </span><span class="spaces">             </span><span class="istickedoff">-- like @\/0\\nfoo@ produces @Inject 0 \&quot;\\nfoo\&quot;@; an</span>
+<span class="lineno">  234 </span><span class="spaces">             </span><span class="istickedoff">-- input ending right at the newline like @\/0\\n@</span>
+<span class="lineno">  235 </span><span class="spaces">             </span><span class="istickedoff">-- produces @Inject 0 \&quot;\\n\&quot;@.</span>
+<span class="lineno">  236 </span><span class="spaces">             </span><span class="istickedoff">Right (RT.Inject ti afterHSep)</span>
+<span class="lineno">  237 </span><span class="spaces">           </span><span class="istickedoff">else</span>
+<span class="lineno">  238 </span><span class="spaces">             </span><span class="istickedoff">-- Horizontal-WS-only separator. Drop the leading hSpace</span>
+<span class="lineno">  239 </span><span class="spaces">             </span><span class="istickedoff">-- from the payload; if nothing meaningful remains, treat</span>
+<span class="lineno">  240 </span><span class="spaces">             </span><span class="istickedoff">-- the trailing whitespace as belonging to the bare switch</span>
+<span class="lineno">  241 </span><span class="spaces">             </span><span class="istickedoff">-- (&quot;/0 &quot; rule).</span>
+<span class="lineno">  242 </span><span class="spaces">             </span><span class="istickedoff">let payload = T.dropWhile isHSpace afterHSep</span>
+<span class="lineno">  243 </span><span class="spaces">             </span><span class="istickedoff">in if T.null payload</span>
+<span class="lineno">  244 </span><span class="spaces">                  </span><span class="istickedoff">then Right (RT.Switch ti)</span>
+<span class="lineno">  245 </span><span class="spaces">                  </span><span class="istickedoff">else Right (RT.Inject ti payload)</span></span>
+<span class="lineno">  246 </span>
+<span class="lineno">  247 </span>-- | Whitespace-class used by the parser. Excludes newlines so that a
+<span class="lineno">  248 </span>-- newline embedded in @\/0\\nfoo@ is treated as payload (per the
+<span class="lineno">  249 </span>-- design's multi-line guidance), not as a separator that strips
+<span class="lineno">  250 </span>-- preceding whitespace.
+<span class="lineno">  251 </span>isHSpace :: Char -&gt; Bool
+<span class="lineno">  252 </span><span class="decl"><span class="istickedoff">isHSpace c = c == ' ' || c == '\t'</span></span>
+<span class="lineno">  253 </span>
+<span class="lineno">  254 </span>
+<span class="lineno">  255 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  256 </span>-- parseSlashCommand bridge
+<span class="lineno">  257 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  258 </span>
+<span class="lineno">  259 </span>-- | The slash-cmd branch of 'parseInput' (e.g. @\/help@, @\/vault add foo@,
+<span class="lineno">  260 </span>-- @\/tab new 3 shell@, @\/tabs@).
+<span class="lineno">  261 </span>--
+<span class="lineno">  262 </span>-- Re-uses the existing 'PureClaw.Agent.SlashCommands.parseSlashCommand'
+<span class="lineno">  263 </span>-- so there is no parser divergence between Tabbed Chat's preprocessor
+<span class="lineno">  264 </span>-- and the in-tab-loop I2 re-parse path (AI tab loop receives
+<span class="lineno">  265 </span>-- @UserText t@ starting with @\/@ and calls 'parseSlashCommand'
+<span class="lineno">  266 </span>-- directly).
+<span class="lineno">  267 </span>--
+<span class="lineno">  268 </span>-- Special-case for P15a: @\/tab resume \&lt;bad-id\&gt;@ is surfaced as the
+<span class="lineno">  269 </span>-- dedicated 'RT.ParseErrorInvalidSessionId' (not the generic
+<span class="lineno">  270 </span>-- 'RT.ParseErrorMalformed') so the user sees a useful rejection
+<span class="lineno">  271 </span>-- reason. Other slash-cmd shapes fall through to the generic parser.
+<span class="lineno">  272 </span>--
+<span class="lineno">  273 </span>-- Otherwise: success becomes 'RT.ParsedSlashCmd'; failure becomes
+<span class="lineno">  274 </span>-- 'RT.ParseErrorMalformed' (a @\/@-prefixed input that matches no
+<span class="lineno">  275 </span>-- known command is an error, not a 'Default').
+<span class="lineno">  276 </span>parseSlashCommandForm :: Text -&gt; Either RT.ParseError RT.ParsedInput
+<span class="lineno">  277 </span><span class="decl"><span class="istickedoff">parseSlashCommandForm orig</span>
+<span class="lineno">  278 </span><span class="spaces">  </span><span class="istickedoff">-- Detect a /tab resume &lt;id&gt; shape with an invalid id so we can</span>
+<span class="lineno">  279 </span><span class="spaces">  </span><span class="istickedoff">-- emit the specific ParseErrorInvalidSessionId code (P15a).</span>
+<span class="lineno">  280 </span><span class="spaces">  </span><span class="istickedoff">| isTabResumeShape orig</span>
+<span class="lineno">  281 </span><span class="spaces">  </span><span class="istickedoff">, Left e &lt;- mkSessionId (extractTabResumeArg orig)</span>
+<span class="lineno">  282 </span><span class="spaces">  </span><span class="istickedoff">= Left e</span>
+<span class="lineno">  283 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = case parseSlashCommand orig of</span>
+<span class="lineno">  284 </span><span class="spaces">      </span><span class="istickedoff">Just cmd -&gt; Right (RT.ParsedSlashCmd cmd)</span>
+<span class="lineno">  285 </span><span class="spaces">      </span><span class="istickedoff">Nothing  -&gt; Left RT.ParseErrorMalformed</span></span>
+<span class="lineno">  286 </span>
+<span class="lineno">  287 </span>-- | True if the input begins with @\/tab resume @ followed by at least
+<span class="lineno">  288 </span>-- one non-blank character (case-insensitive on the keywords).
+<span class="lineno">  289 </span>--
+<span class="lineno">  290 </span>-- Intentionally permissive on what follows the prefix — including
+<span class="lineno">  291 </span>-- inputs that contain spaces, control bytes, or path separators —
+<span class="lineno">  292 </span>-- because the dedicated 'ParseErrorInvalidSessionId' code path needs
+<span class="lineno">  293 </span>-- to fire for ANY ill-formed id, not just well-shaped-but-rejected
+<span class="lineno">  294 </span>-- ones.
+<span class="lineno">  295 </span>isTabResumeShape :: Text -&gt; Bool
+<span class="lineno">  296 </span><span class="decl"><span class="istickedoff">isTabResumeShape t =</span>
+<span class="lineno">  297 </span><span class="spaces">  </span><span class="istickedoff">let stripped = T.strip t</span>
+<span class="lineno">  298 </span><span class="spaces">      </span><span class="istickedoff">lower    = T.toLower stripped</span>
+<span class="lineno">  299 </span><span class="spaces">      </span><span class="istickedoff">pfx      = &quot;/tab resume &quot;</span>
+<span class="lineno">  300 </span><span class="spaces">  </span><span class="istickedoff">in pfx `T.isPrefixOf` lower</span>
+<span class="lineno">  301 </span><span class="spaces">       </span><span class="istickedoff">&amp;&amp; not (T.null (T.strip (T.drop (T.length pfx) stripped)))</span></span>
+<span class="lineno">  302 </span>
+<span class="lineno">  303 </span>-- | Extract the everything-after-@\/tab resume @ argument blob.
+<span class="lineno">  304 </span>-- Caller ensures shape via 'isTabResumeShape'.
+<span class="lineno">  305 </span>extractTabResumeArg :: Text -&gt; Text
+<span class="lineno">  306 </span><span class="decl"><span class="istickedoff">extractTabResumeArg t =</span>
+<span class="lineno">  307 </span><span class="spaces">  </span><span class="istickedoff">let stripped = T.strip t</span>
+<span class="lineno">  308 </span><span class="spaces">      </span><span class="istickedoff">pfx      = &quot;/tab resume &quot;</span>
+<span class="lineno">  309 </span><span class="spaces">  </span><span class="istickedoff">in T.strip (T.drop (T.length pfx) stripped)</span></span>
+<span class="lineno">  310 </span>
+<span class="lineno">  311 </span>-- | The in-tab-loop I2 re-parser. Includes the Tabbed Chat
+<span class="lineno">  312 </span>-- @\/tab*@ / @\/tabs@ family in addition to the existing slash
+<span class="lineno">  313 </span>-- commands.
+<span class="lineno">  314 </span>--
+<span class="lineno">  315 </span>-- A plain @parseSlashCommand &quot;/foo&quot;@ returns 'Nothing' for unknown
+<span class="lineno">  316 </span>-- commands; this wrapper preserves that contract while folding in the
+<span class="lineno">  317 </span>-- new @\/tab@ command family before delegating to
+<span class="lineno">  318 </span>-- 'Slash.parseSlashCommand'.
+<span class="lineno">  319 </span>parseSlashCommand :: Text -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  320 </span><span class="decl"><span class="istickedoff">parseSlashCommand input =</span>
+<span class="lineno">  321 </span><span class="spaces">  </span><span class="istickedoff">let stripped = T.strip input</span>
+<span class="lineno">  322 </span><span class="spaces">  </span><span class="istickedoff">in case parseTabFamily stripped of</span>
+<span class="lineno">  323 </span><span class="spaces">       </span><span class="istickedoff">Just cmd -&gt; Just cmd</span>
+<span class="lineno">  324 </span><span class="spaces">       </span><span class="istickedoff">Nothing  -&gt; Slash.parseSlashCommand stripped</span></span>
+<span class="lineno">  325 </span>
+<span class="lineno">  326 </span>
+<span class="lineno">  327 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  328 </span>-- /tab* family parsers
+<span class="lineno">  329 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  330 </span>
+<span class="lineno">  331 </span>-- | Recognise the @\/tab@ / @\/tabs@ command family. Returns 'Nothing'
+<span class="lineno">  332 </span>-- for inputs outside this family so the caller can fall back to the
+<span class="lineno">  333 </span>-- existing slash-command parsers without parser divergence.
+<span class="lineno">  334 </span>parseTabFamily :: Text -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  335 </span><span class="decl"><span class="istickedoff">parseTabFamily t</span>
+<span class="lineno">  336 </span><span class="spaces">  </span><span class="istickedoff">-- /tabs is the bare alias for /tab list.</span>
+<span class="lineno">  337 </span><span class="spaces">  </span><span class="istickedoff">| lower == &quot;/tabs&quot; = Just (Slash.CmdTab Slash.TabListCmd)</span>
+<span class="lineno">  338 </span><span class="spaces">  </span><span class="istickedoff">| lower == &quot;/tab&quot;  = Nothing   -- bare /tab is not a command (would need a sub)</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="istickedoff">| &quot;/tab &quot; `T.isPrefixOf` lower =</span>
+<span class="lineno">  340 </span><span class="spaces">      </span><span class="istickedoff">let rest = T.strip (T.drop (T.length &quot;/tab &quot;) t)</span>
+<span class="lineno">  341 </span><span class="spaces">      </span><span class="istickedoff">in parseTabAction rest</span>
+<span class="lineno">  342 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Nothing</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  344 </span><span class="spaces">    </span><span class="istickedoff">lower = T.toLower t</span></span>
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>-- | Dispatch on the @\&lt;action\&gt;@ word: @list@ \/ @new\&lt;N\&gt;@ \/
+<span class="lineno">  347 </span>-- @close\&lt;N\&gt;@ \/ @focus\&lt;N\&gt;@ \/ @resume\&lt;id\&gt;@ \/ @rename\&lt;N\&gt;@.
+<span class="lineno">  348 </span>--
+<span class="lineno">  349 </span>-- The caller in 'parseTabFamily' has already stripped surrounding
+<span class="lineno">  350 </span>-- whitespace and ensured the @\/tab @ prefix is followed by at least
+<span class="lineno">  351 </span>-- one non-blank character; so @T.words rest@ here always produces a
+<span class="lineno">  352 </span>-- non-empty list.
+<span class="lineno">  353 </span>parseTabAction :: Text -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  354 </span><span class="decl"><span class="istickedoff">parseTabAction rest = case T.words rest of</span>
+<span class="lineno">  355 </span><span class="spaces">  </span><span class="istickedoff">[]         -&gt; <span class="nottickedoff">Nothing</span>  -- defensive; caller ensures non-empty</span>
+<span class="lineno">  356 </span><span class="spaces">  </span><span class="istickedoff">(act:args) -&gt; case T.toLower act of</span>
+<span class="lineno">  357 </span><span class="spaces">    </span><span class="istickedoff">&quot;list&quot;   -&gt; if null args then Just (Slash.CmdTab Slash.TabListCmd) else Nothing</span>
+<span class="lineno">  358 </span><span class="spaces">    </span><span class="istickedoff">&quot;new&quot;    -&gt; parseTabNew args</span>
+<span class="lineno">  359 </span><span class="spaces">    </span><span class="istickedoff">&quot;close&quot;  -&gt; parseTabClose args</span>
+<span class="lineno">  360 </span><span class="spaces">    </span><span class="istickedoff">&quot;focus&quot;  -&gt; parseTabFocus args</span>
+<span class="lineno">  361 </span><span class="spaces">    </span><span class="istickedoff">&quot;resume&quot; -&gt; parseTabResume args</span>
+<span class="lineno">  362 </span><span class="spaces">    </span><span class="istickedoff">&quot;rename&quot; -&gt; parseTabRename args rest</span>
+<span class="lineno">  363 </span><span class="spaces">    </span><span class="istickedoff">_        -&gt; Nothing</span></span>
+<span class="lineno">  364 </span>
+<span class="lineno">  365 </span>-- | @\/tab new [\&lt;kind\&gt; [\&lt;arg-text\&gt;]]@.
+<span class="lineno">  366 </span>--
+<span class="lineno">  367 </span>-- The grammar deliberately omits a user-specified index: new tabs are
+<span class="lineno">  368 </span>-- always allocated at the lowest free slot by the handler (tmux-style
+<span class="lineno">  369 </span>-- packing). @\/tab new@ with no kind force-prompts the user; with a
+<span class="lineno">  370 </span>-- kind it spawns directly.
+<span class="lineno">  371 </span>parseTabNew :: [Text] -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  372 </span><span class="decl"><span class="istickedoff">parseTabNew []        = Just (Slash.CmdTab (Slash.TabNewCmd Nothing Nothing))</span>
+<span class="lineno">  373 </span><span class="spaces"></span><span class="istickedoff">parseTabNew (k:argTs) = do</span>
+<span class="lineno">  374 </span><span class="spaces">  </span><span class="istickedoff">kind &lt;- parseTabKindArg k</span>
+<span class="lineno">  375 </span><span class="spaces">  </span><span class="istickedoff">let argText = if null argTs</span>
+<span class="lineno">  376 </span><span class="spaces">                  </span><span class="istickedoff">then Nothing</span>
+<span class="lineno">  377 </span><span class="spaces">                  </span><span class="istickedoff">else Just (T.unwords argTs)</span>
+<span class="lineno">  378 </span><span class="spaces">  </span><span class="istickedoff">Just (Slash.CmdTab (Slash.TabNewCmd (Just kind) argText))</span></span>
+<span class="lineno">  379 </span>
+<span class="lineno">  380 </span>-- | @\/tab close \&lt;N\&gt; [--force]@.
+<span class="lineno">  381 </span>parseTabClose :: [Text] -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  382 </span><span class="decl"><span class="istickedoff">parseTabClose []     = Nothing</span>
+<span class="lineno">  383 </span><span class="spaces"></span><span class="istickedoff">parseTabClose (n:fs) = do</span>
+<span class="lineno">  384 </span><span class="spaces">  </span><span class="istickedoff">idx &lt;- parseDecimalIndex n</span>
+<span class="lineno">  385 </span><span class="spaces">  </span><span class="istickedoff">force &lt;- case fs of</span>
+<span class="lineno">  386 </span><span class="spaces">             </span><span class="istickedoff">[]           -&gt; Just Slash.ForceNo</span>
+<span class="lineno">  387 </span><span class="spaces">             </span><span class="istickedoff">[&quot;--force&quot;]  -&gt; Just Slash.ForceYes</span>
+<span class="lineno">  388 </span><span class="spaces">             </span><span class="istickedoff">_            -&gt; Nothing</span>
+<span class="lineno">  389 </span><span class="spaces">  </span><span class="istickedoff">Just (Slash.CmdTab (Slash.TabCloseCmd idx force))</span></span>
+<span class="lineno">  390 </span>
+<span class="lineno">  391 </span>-- | @\/tab focus \&lt;N\&gt;@.
+<span class="lineno">  392 </span>parseTabFocus :: [Text] -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  393 </span><span class="decl"><span class="istickedoff">parseTabFocus [n] = do</span>
+<span class="lineno">  394 </span><span class="spaces">  </span><span class="istickedoff">idx &lt;- parseDecimalIndex n</span>
+<span class="lineno">  395 </span><span class="spaces">  </span><span class="istickedoff">Just (Slash.CmdTab (Slash.TabFocusCmd idx))</span>
+<span class="lineno">  396 </span><span class="spaces"></span><span class="istickedoff">parseTabFocus _   = Nothing</span></span>
+<span class="lineno">  397 </span>
+<span class="lineno">  398 </span>-- | @\/tab resume \&lt;session-id\&gt;@. The id is run through 'mkSessionId'
+<span class="lineno">  399 </span>-- so that S3 \/ P15a rejection (path traversal, NUL, non-alnum)
+<span class="lineno">  400 </span>-- happens at parser time. We return 'Nothing' on rejection here and
+<span class="lineno">  401 </span>-- rely on the @\/@-prefixed-must-parse policy in
+<span class="lineno">  402 </span>-- 'parseSlashCommandForm' to surface this as 'ParseErrorMalformed'.
+<span class="lineno">  403 </span>-- The dedicated 'ParseErrorInvalidSessionId' code is emitted by
+<span class="lineno">  404 </span>-- 'parseInput' below when it recognises a @\/tab resume@ shape with
+<span class="lineno">  405 </span>-- a bad id.
+<span class="lineno">  406 </span>parseTabResume :: [Text] -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  407 </span><span class="decl"><span class="istickedoff">parseTabResume [idText] = case mkSessionId idText of</span>
+<span class="lineno">  408 </span><span class="spaces">  </span><span class="istickedoff">Right sid -&gt; Just (Slash.CmdTab (Slash.TabResumeCmd sid))</span>
+<span class="lineno">  409 </span><span class="spaces">  </span><span class="istickedoff">Left _    -&gt; Nothing</span>
+<span class="lineno">  410 </span><span class="spaces"></span><span class="istickedoff">parseTabResume _        = Nothing</span></span>
+<span class="lineno">  411 </span>
+<span class="lineno">  412 </span>-- | @\/tab rename \&lt;N\&gt; \&lt;name\&gt;@. The original rest-of-line is taken
+<span class="lineno">  413 </span>-- so that names with embedded whitespace (e.g. @&quot;my shell&quot;@) survive
+<span class="lineno">  414 </span>-- intact.
+<span class="lineno">  415 </span>--
+<span class="lineno">  416 </span>-- Caller invariant: when @args@ has &gt;= 2 elements, the rest-of-line
+<span class="lineno">  417 </span>-- 'line' contains at least @&quot;rename N &quot;@ plus a non-blank tail; so
+<span class="lineno">  418 </span>-- the recovered @name@ here is never empty.
+<span class="lineno">  419 </span>parseTabRename :: [Text] -&gt; Text -&gt; Maybe Slash.SlashCommand
+<span class="lineno">  420 </span><span class="decl"><span class="istickedoff">parseTabRename []        _    = Nothing</span>
+<span class="lineno">  421 </span><span class="spaces"></span><span class="istickedoff">parseTabRename [_]       _    = Nothing</span>
+<span class="lineno">  422 </span><span class="spaces"></span><span class="istickedoff">parseTabRename (n:_rest) line = do</span>
+<span class="lineno">  423 </span><span class="spaces">  </span><span class="istickedoff">idx &lt;- parseDecimalIndex n</span>
+<span class="lineno">  424 </span><span class="spaces">  </span><span class="istickedoff">let afterRenameKw = stripLeadingWord &quot;rename&quot; line</span>
+<span class="lineno">  425 </span><span class="spaces">      </span><span class="istickedoff">afterN        = stripLeadingWord n        afterRenameKw</span>
+<span class="lineno">  426 </span><span class="spaces">      </span><span class="istickedoff">name          = T.strip afterN</span>
+<span class="lineno">  427 </span><span class="spaces">  </span><span class="istickedoff">-- 'name' is non-empty by caller's invariant; guard preserved</span>
+<span class="lineno">  428 </span><span class="spaces">  </span><span class="istickedoff">-- defensively.</span>
+<span class="lineno">  429 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">T.null name</span></span>
+<span class="lineno">  430 </span><span class="spaces">     </span><span class="istickedoff">then <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  431 </span><span class="spaces">     </span><span class="istickedoff">else Just (Slash.CmdTab (Slash.TabRenameCmd idx name))</span></span>
+<span class="lineno">  432 </span>
+<span class="lineno">  433 </span>-- | Drop a leading word (case-insensitive on alpha keywords; literal
+<span class="lineno">  434 </span>-- match for non-alpha) plus its trailing whitespace from a 'Text'.
+<span class="lineno">  435 </span>-- Returns the original 'Text' unchanged if the prefix is absent.
+<span class="lineno">  436 </span>stripLeadingWord :: Text -&gt; Text -&gt; Text
+<span class="lineno">  437 </span><span class="decl"><span class="istickedoff">stripLeadingWord w t =</span>
+<span class="lineno">  438 </span><span class="spaces">  </span><span class="istickedoff">let lt   = T.toLower t</span>
+<span class="lineno">  439 </span><span class="spaces">      </span><span class="istickedoff">lw   = T.toLower w</span>
+<span class="lineno">  440 </span><span class="spaces">      </span><span class="istickedoff">lead = T.dropWhile isHSpace lt</span>
+<span class="lineno">  441 </span><span class="spaces">      </span><span class="istickedoff">ofs  = T.length t - T.length lead</span>
+<span class="lineno">  442 </span><span class="spaces">  </span><span class="istickedoff">in if <span class="tickonlytrue">lw `T.isPrefixOf` lead</span></span>
+<span class="lineno">  443 </span><span class="spaces">       </span><span class="istickedoff">then T.dropWhile isHSpace (T.drop (ofs + T.length lw) t)</span>
+<span class="lineno">  444 </span><span class="spaces">       </span><span class="istickedoff">else <span class="nottickedoff">t</span></span></span>
+<span class="lineno">  445 </span>
+<span class="lineno">  446 </span>-- | Parse a strictly-decimal index, rejecting leading-zero forms per
+<span class="lineno">  447 </span>-- the same disambiguation rule that 'parseDigitsForm' applies.
+<span class="lineno">  448 </span>parseDecimalIndex :: Text -&gt; Maybe Int
+<span class="lineno">  449 </span><span class="decl"><span class="istickedoff">parseDecimalIndex t</span>
+<span class="lineno">  450 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">T.null t</span>                                  = <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  451 </span><span class="spaces">  </span><span class="istickedoff">| not (T.all Char.isDigit t)                = Nothing</span>
+<span class="lineno">  452 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">T.length t &gt; 1 &amp;&amp; <span class="nottickedoff">T.head t == '0'</span></span>         = <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  453 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = case TR.decimal t of</span>
+<span class="lineno">  454 </span><span class="spaces">      </span><span class="istickedoff">Right (n, leftover) | <span class="tickonlytrue">T.null leftover</span> -&gt; Just n</span>
+<span class="lineno">  455 </span><span class="spaces">      </span><span class="istickedoff">_                                     -&gt; <span class="nottickedoff">Nothing</span></span></span>
+<span class="lineno">  456 </span>
+<span class="lineno">  457 </span>-- | Recognise the short tab-kind keywords (case-insensitive).
+<span class="lineno">  458 </span>parseTabKindArg :: Text -&gt; Maybe Slash.TabKindArg
+<span class="lineno">  459 </span><span class="decl"><span class="istickedoff">parseTabKindArg t = case T.toLower t of</span>
+<span class="lineno">  460 </span><span class="spaces">  </span><span class="istickedoff">&quot;ai&quot;      -&gt; Just Slash.TkaAi</span>
+<span class="lineno">  461 </span><span class="spaces">  </span><span class="istickedoff">&quot;harness&quot; -&gt; Just Slash.TkaHarness</span>
+<span class="lineno">  462 </span><span class="spaces">  </span><span class="istickedoff">&quot;shell&quot;   -&gt; Just Slash.TkaShell</span>
+<span class="lineno">  463 </span><span class="spaces">  </span><span class="istickedoff">&quot;ssh&quot;     -&gt; Just Slash.TkaSsh</span>
+<span class="lineno">  464 </span><span class="spaces">  </span><span class="istickedoff">&quot;tmux&quot;    -&gt; Just Slash.TkaTmux</span>
+<span class="lineno">  465 </span><span class="spaces">  </span><span class="istickedoff">_         -&gt; Nothing</span></span>
+<span class="lineno">  466 </span>
+<span class="lineno">  467 </span>
+<span class="lineno">  468 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  469 </span>-- mkSessionId
+<span class="lineno">  470 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  471 </span>
+<span class="lineno">  472 </span>-- | Smart constructor for 'Core.SessionId' used by the @\/tab resume@
+<span class="lineno">  473 </span>-- and @\/session resume@ parsers per S3 \/ P15a \/ L7.
+<span class="lineno">  474 </span>--
+<span class="lineno">  475 </span>-- Rejects:
+<span class="lineno">  476 </span>--
+<span class="lineno">  477 </span>--   * the empty string;
+<span class="lineno">  478 </span>--   * any occurrence of @\/@ or @\\@ (path traversal);
+<span class="lineno">  479 </span>--   * the substring @..@ (parent-dir reference);
+<span class="lineno">  480 </span>--   * any NUL byte (@\\0@);
+<span class="lineno">  481 </span>--   * any character outside the @[a-zA-Z0-9_-]@ corpus.
+<span class="lineno">  482 </span>mkSessionId :: Text -&gt; Either RT.ParseError Core.SessionId
+<span class="lineno">  483 </span><span class="decl"><span class="istickedoff">mkSessionId t</span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="istickedoff">| T.null t                              = Left RT.ParseErrorInvalidSessionId</span>
+<span class="lineno">  485 </span><span class="spaces">  </span><span class="istickedoff">| T.any (== '/')  t                     = Left RT.ParseErrorInvalidSessionId</span>
+<span class="lineno">  486 </span><span class="spaces">  </span><span class="istickedoff">| T.any (== '\\') t                     = Left RT.ParseErrorInvalidSessionId</span>
+<span class="lineno">  487 </span><span class="spaces">  </span><span class="istickedoff">| T.any (== '\0') t                     = Left RT.ParseErrorInvalidSessionId</span>
+<span class="lineno">  488 </span><span class="spaces">  </span><span class="istickedoff">| &quot;..&quot; `T.isInfixOf` t                  = Left RT.ParseErrorInvalidSessionId</span>
+<span class="lineno">  489 </span><span class="spaces">  </span><span class="istickedoff">| not (T.all isSessionIdChar t)         = Left RT.ParseErrorInvalidSessionId</span>
+<span class="lineno">  490 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Right (Core.SessionId t)</span></span>
+<span class="lineno">  491 </span>
+<span class="lineno">  492 </span>-- | The @[a-zA-Z0-9_-]@ predicate used by 'mkSessionId'.
+<span class="lineno">  493 </span>isSessionIdChar :: Char -&gt; Bool
+<span class="lineno">  494 </span><span class="decl"><span class="istickedoff">isSessionIdChar c =</span>
+<span class="lineno">  495 </span><span class="spaces">     </span><span class="istickedoff">Char.isAsciiLower c</span>
+<span class="lineno">  496 </span><span class="spaces">  </span><span class="istickedoff">|| Char.isAsciiUpper c</span>
+<span class="lineno">  497 </span><span class="spaces">  </span><span class="istickedoff">|| Char.isDigit      c</span>
+<span class="lineno">  498 </span><span class="spaces">  </span><span class="istickedoff">|| c == '_'</span>
+<span class="lineno">  499 </span><span class="spaces">  </span><span class="istickedoff">|| c == '-'</span></span>
+<span class="lineno">  500 </span>
+<span class="lineno">  501 </span>
+<span class="lineno">  502 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  503 </span>-- sanitizeTabName
+<span class="lineno">  504 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  505 </span>
+<span class="lineno">  506 </span>-- | Default length cap used by the bare 'sanitizeTabName'. Matches
+<span class="lineno">  507 </span>-- 'RT.RoutingConfig._rc_maxNameLen' default. Exposed so test fixtures
+<span class="lineno">  508 </span>-- can reference it directly.
+<span class="lineno">  509 </span>defaultMaxNameLen :: Int
+<span class="lineno">  510 </span><span class="decl"><span class="istickedoff">defaultMaxNameLen = 32</span></span>
+<span class="lineno">  511 </span>
+<span class="lineno">  512 </span>-- | Sanitize a user-supplied tab name per H11 / S10.
+<span class="lineno">  513 </span>--
+<span class="lineno">  514 </span>-- Equivalent to @'sanitizeTabNameWith' 'defaultMaxNameLen'@.
+<span class="lineno">  515 </span>sanitizeTabName :: Text -&gt; Either Tab.NameError Text
+<span class="lineno">  516 </span><span class="decl"><span class="istickedoff">sanitizeTabName = sanitizeTabNameWith defaultMaxNameLen</span></span>
+<span class="lineno">  517 </span>
+<span class="lineno">  518 </span>-- | Sanitize a user-supplied tab name against an explicit length cap.
+<span class="lineno">  519 </span>--
+<span class="lineno">  520 </span>-- Pipeline (in order):
+<span class="lineno">  521 </span>--
+<span class="lineno">  522 </span>--   1. Reject inputs that contain ANSI escape sequences
+<span class="lineno">  523 </span>--      (@\\x1b[@ \/ CSI @\\x9b@) — 'Tab.NameContainsAnsi'.
+<span class="lineno">  524 </span>--   2. Reject inputs that contain control bytes (@\&lt;0x20@ except
+<span class="lineno">  525 </span>--      ordinary space) — 'Tab.NameContainsControlBytes'.
+<span class="lineno">  526 </span>--   3. Reject inputs whose UTF-16 length exceeds the cap —
+<span class="lineno">  527 </span>--      'Tab.NameTooLong'.
+<span class="lineno">  528 </span>--   4. Run the redaction pipeline (paths → hostnames → IPv4 → ssh
+<span class="lineno">  529 </span>--      stderr) from 'PureClaw.Internal.Redact'. If the result is empty
+<span class="lineno">  530 </span>--      after trimming, surface 'Tab.NameRedactedToEmpty'.
+<span class="lineno">  531 </span>--
+<span class="lineno">  532 </span>-- The output is always a non-empty 'Text' satisfying the four
+<span class="lineno">  533 </span>-- invariants asserted by the H11 property test.
+<span class="lineno">  534 </span>sanitizeTabNameWith :: Int -&gt; Text -&gt; Either Tab.NameError Text
+<span class="lineno">  535 </span><span class="decl"><span class="istickedoff">sanitizeTabNameWith cap raw</span>
+<span class="lineno">  536 </span><span class="spaces">  </span><span class="istickedoff">| containsAnsi raw         = Left Tab.NameContainsAnsi</span>
+<span class="lineno">  537 </span><span class="spaces">  </span><span class="istickedoff">| containsControlByte raw  = Left Tab.NameContainsControlBytes</span>
+<span class="lineno">  538 </span><span class="spaces">  </span><span class="istickedoff">| T.length raw &gt; cap       = Left Tab.NameTooLong</span>
+<span class="lineno">  539 </span><span class="spaces">  </span><span class="istickedoff">| T.null trimmed           = Left Tab.NameRedactedToEmpty</span>
+<span class="lineno">  540 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>                = Right trimmed</span>
+<span class="lineno">  541 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  542 </span><span class="spaces">    </span><span class="istickedoff">redacted = redactPipeline raw</span>
+<span class="lineno">  543 </span><span class="spaces">    </span><span class="istickedoff">trimmed  = T.strip redacted</span></span>
+<span class="lineno">  544 </span>
+<span class="lineno">  545 </span>-- | The redaction pipeline; mirrors 'Redact.redactText' which is not
+<span class="lineno">  546 </span>-- exported (only individual stage functions are). Order matches the
+<span class="lineno">  547 </span>-- canonical pipeline: paths first, hostnames second, IPv4 third, ssh
+<span class="lineno">  548 </span>-- stderr last.
+<span class="lineno">  549 </span>redactPipeline :: Text -&gt; Text
+<span class="lineno">  550 </span><span class="decl"><span class="istickedoff">redactPipeline =</span>
+<span class="lineno">  551 </span><span class="spaces">    </span><span class="istickedoff">Redact.redactSshStderr</span>
+<span class="lineno">  552 </span><span class="spaces">  </span><span class="istickedoff">. Redact.redactIPv4</span>
+<span class="lineno">  553 </span><span class="spaces">  </span><span class="istickedoff">. Redact.redactHostname</span>
+<span class="lineno">  554 </span><span class="spaces">  </span><span class="istickedoff">. Redact.redactPath . T.unpack</span></span>
+<span class="lineno">  555 </span>
+<span class="lineno">  556 </span>-- | True if the input contains an ANSI \/ CSI escape introducer
+<span class="lineno">  557 </span>-- (@ESC [@ or the 8-bit CSI byte @0x9B@).
+<span class="lineno">  558 </span>containsAnsi :: Text -&gt; Bool
+<span class="lineno">  559 </span><span class="decl"><span class="istickedoff">containsAnsi t = &quot;\ESC[&quot; `T.isInfixOf` t || T.any (== '\x9B') t</span></span>
+<span class="lineno">  560 </span>
+<span class="lineno">  561 </span>-- | True if the input contains any byte below @0x20@ other than a
+<span class="lineno">  562 </span>-- tab (@\\t@) or newline. We treat ordinary spaces (@0x20@) as
+<span class="lineno">  563 </span>-- permitted; the H11 spec says &quot;control bytes \&lt; 0x20 except space&quot;
+<span class="lineno">  564 </span>-- which we read as: control bytes are forbidden whether or not the
+<span class="lineno">  565 </span>-- containing whitespace-class is allowed. Tabs and newlines (the
+<span class="lineno">  566 </span>-- two most common embedded controls) are rejected — a tab name is a
+<span class="lineno">  567 </span>-- single-line label.
+<span class="lineno">  568 </span>containsControlByte :: Text -&gt; Bool
+<span class="lineno">  569 </span><span class="decl"><span class="istickedoff">containsControlByte = T.any isReject</span>
+<span class="lineno">  570 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  571 </span><span class="spaces">    </span><span class="istickedoff">isReject c = c &lt; ' ' &amp;&amp; c /= ' '</span></span>
+
+</pre>
+</body>
+</html>

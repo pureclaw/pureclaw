@@ -1,0 +1,668 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.CLI.Import
+<span class="lineno">    2 </span>  ( -- * JSON5 preprocessing
+<span class="lineno">    3 </span>    stripJson5
+<span class="lineno">    4 </span>    -- * OpenClaw config parsing
+<span class="lineno">    5 </span>  , OpenClawConfig (..)
+<span class="lineno">    6 </span>  , OpenClawAgent (..)
+<span class="lineno">    7 </span>  , OpenClawSignal (..)
+<span class="lineno">    8 </span>  , OpenClawTelegram (..)
+<span class="lineno">    9 </span>  , parseOpenClawConfig
+<span class="lineno">   10 </span>    -- * $include resolution
+<span class="lineno">   11 </span>  , resolveIncludes
+<span class="lineno">   12 </span>    -- * Import execution
+<span class="lineno">   13 </span>  , importOpenClawConfig
+<span class="lineno">   14 </span>  , importOpenClawDir
+<span class="lineno">   15 </span>  , ImportResult (..)
+<span class="lineno">   16 </span>  , DirImportResult (..)
+<span class="lineno">   17 </span>    -- * CLI options
+<span class="lineno">   18 </span>  , ImportOptions (..)
+<span class="lineno">   19 </span>  , resolveImportOptions
+<span class="lineno">   20 </span>    -- * Utilities (exported for testing)
+<span class="lineno">   21 </span>  , camelToSnake
+<span class="lineno">   22 </span>  , mapThinkingDefault
+<span class="lineno">   23 </span>  , computeMaxTurns
+<span class="lineno">   24 </span>  ) where
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>import Control.Exception (IOException, try)
+<span class="lineno">   27 </span>import Control.Monad ((&gt;=&gt;), when)
+<span class="lineno">   28 </span>import Data.Aeson
+<span class="lineno">   29 </span>import Data.Aeson.Key qualified as Key
+<span class="lineno">   30 </span>import Data.Aeson.KeyMap qualified as KM
+<span class="lineno">   31 </span>import Data.Aeson.Types (Parser, parseEither, parseMaybe)
+<span class="lineno">   32 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   33 </span>import Data.Char qualified as Char
+<span class="lineno">   34 </span>import Data.IORef
+<span class="lineno">   35 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   36 </span>import Data.Text (Text)
+<span class="lineno">   37 </span>import Data.Text qualified as T
+<span class="lineno">   38 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   39 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   40 </span>import Data.Vector qualified as V
+<span class="lineno">   41 </span>import System.Directory qualified as Dir
+<span class="lineno">   42 </span>import System.FilePath ((&lt;/&gt;), takeDirectory, takeExtension)
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   45 </span>-- JSON5 preprocessor
+<span class="lineno">   46 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Strip JSON5 features (// comments, trailing commas) to produce valid JSON.
+<span class="lineno">   49 </span>-- Handles comments inside strings correctly (does not strip them).
+<span class="lineno">   50 </span>-- Does NOT handle: block comments, hex literals, multiline strings,
+<span class="lineno">   51 </span>-- unquoted keys, or other advanced JSON5 features.
+<span class="lineno">   52 </span>stripJson5 :: Text -&gt; Text
+<span class="lineno">   53 </span><span class="decl"><span class="istickedoff">stripJson5 = T.pack . go False . T.unpack</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   55 </span><span class="spaces">    </span><span class="istickedoff">go :: Bool -&gt; String -&gt; String</span>
+<span class="lineno">   56 </span><span class="spaces">    </span><span class="istickedoff">go _ [] = []</span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">go True ('\\' : c : rest) = '\\' : c : go True rest</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">go True ('&quot;' : rest) = '&quot;' : go False rest</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="istickedoff">go True (c : rest) = c : go True rest</span>
+<span class="lineno">   60 </span><span class="spaces">    </span><span class="istickedoff">go False ('&quot;' : rest) = '&quot;' : go True rest</span>
+<span class="lineno">   61 </span><span class="spaces">    </span><span class="istickedoff">go False ('/' : '/' : rest) = go False (dropWhile (/= '\n') rest)</span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">go False (',' : rest)</span>
+<span class="lineno">   63 </span><span class="spaces">      </span><span class="istickedoff">| Just rest' &lt;- skipTrailingComma rest = go False rest'</span>
+<span class="lineno">   64 </span><span class="spaces">    </span><span class="istickedoff">go False (c : rest) = c : go False rest</span>
+<span class="lineno">   65 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   66 </span><span class="spaces">    </span><span class="istickedoff">-- | If this comma is trailing (only whitespace/comments before ] or }),</span>
+<span class="lineno">   67 </span><span class="spaces">    </span><span class="istickedoff">-- return the remaining string starting at the closing bracket.</span>
+<span class="lineno">   68 </span><span class="spaces">    </span><span class="istickedoff">skipTrailingComma :: String -&gt; Maybe String</span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">skipTrailingComma [] = <span class="nottickedoff">Just []</span></span>
+<span class="lineno">   70 </span><span class="spaces">    </span><span class="istickedoff">skipTrailingComma ('/' : '/' : rest) =</span>
+<span class="lineno">   71 </span><span class="spaces">      </span><span class="istickedoff">skipTrailingComma (dropWhile (/= '\n') rest)</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">skipTrailingComma (c : rest)</span>
+<span class="lineno">   73 </span><span class="spaces">      </span><span class="istickedoff">| c `elem` (&quot; \t\n\r&quot; :: String) = skipTrailingComma rest</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">| c == ']' || c == '}' = Just (c : rest)</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Nothing</span></span>
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   78 </span>-- OpenClaw config types
+<span class="lineno">   79 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>data OpenClawConfig = OpenClawConfig
+<span class="lineno">   82 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_defaultModel</span></span></span>    :: Maybe Text
+<span class="lineno">   83 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_workspace</span></span></span>       :: Maybe Text
+<span class="lineno">   84 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_agents</span></span></span>          :: [OpenClawAgent]
+<span class="lineno">   85 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_signal</span></span></span>          :: Maybe OpenClawSignal
+<span class="lineno">   86 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_telegram</span></span></span>        :: Maybe OpenClawTelegram
+<span class="lineno">   87 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_thinkingDefault</span></span></span> :: Maybe Text
+<span class="lineno">   88 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_timeoutSeconds</span></span></span>  :: Maybe Int
+<span class="lineno">   89 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oc_userTimezone</span></span></span>    :: Maybe Text
+<span class="lineno">   90 </span>  }
+<span class="lineno">   91 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   92 </span>
+<span class="lineno">   93 </span>data OpenClawAgent = OpenClawAgent
+<span class="lineno">   94 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_oca_id</span></span></span>           :: Text
+<span class="lineno">   95 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oca_systemPrompt</span></span></span> :: Maybe Text
+<span class="lineno">   96 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oca_model</span></span></span>        :: Maybe Text
+<span class="lineno">   97 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oca_toolProfile</span></span></span>  :: Maybe Text
+<span class="lineno">   98 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oca_workspace</span></span></span>    :: Maybe Text
+<span class="lineno">   99 </span>  }
+<span class="lineno">  100 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>data OpenClawSignal = OpenClawSignal
+<span class="lineno">  103 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ocs_account</span></span></span>   :: Maybe Text
+<span class="lineno">  104 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ocs_dmPolicy</span></span></span>  :: Maybe Text
+<span class="lineno">  105 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ocs_allowFrom</span></span></span> :: Maybe [Text]
+<span class="lineno">  106 </span>  }
+<span class="lineno">  107 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  108 </span>
+<span class="lineno">  109 </span>data OpenClawTelegram = OpenClawTelegram
+<span class="lineno">  110 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_oct_botToken</span></span></span>  :: Maybe Text
+<span class="lineno">  111 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oct_dmPolicy</span></span></span>  :: Maybe Text
+<span class="lineno">  112 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_oct_allowFrom</span></span></span> :: Maybe [Text]
+<span class="lineno">  113 </span>  }
+<span class="lineno">  114 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  115 </span>
+<span class="lineno">  116 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  117 </span>-- OpenClaw config parsing
+<span class="lineno">  118 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  119 </span>
+<span class="lineno">  120 </span>parseOpenClawConfig :: Value -&gt; Either String OpenClawConfig
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">parseOpenClawConfig = parseEither parseOC</span></span>
+<span class="lineno">  122 </span>
+<span class="lineno">  123 </span>parseOC :: Value -&gt; Parser OpenClawConfig
+<span class="lineno">  124 </span><span class="decl"><span class="istickedoff">parseOC = withObject <span class="nottickedoff">&quot;OpenClawConfig&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  125 </span><span class="spaces">  </span><span class="istickedoff">mAgents &lt;- o .:? &quot;agents&quot;</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">defaults &lt;- maybe (pure emptyParsedDefaults) parseDefaults mAgents</span>
+<span class="lineno">  127 </span><span class="spaces">  </span><span class="istickedoff">agents &lt;- maybe (pure []) parseAgentList mAgents</span>
+<span class="lineno">  128 </span><span class="spaces">  </span><span class="istickedoff">mChannels &lt;- o .:? &quot;channels&quot;</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">signal &lt;- maybe (pure Nothing) (withObject <span class="nottickedoff">&quot;channels&quot;</span> (.:? &quot;signal&quot;) &gt;=&gt; traverse parseSignalCfg) mChannels</span>
+<span class="lineno">  130 </span><span class="spaces">  </span><span class="istickedoff">telegram &lt;- maybe (pure Nothing) (withObject <span class="nottickedoff">&quot;channels&quot;</span> (.:? &quot;telegram&quot;) &gt;=&gt; traverse parseTelegramCfg) mChannels</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">pure OpenClawConfig</span>
+<span class="lineno">  132 </span><span class="spaces">    </span><span class="istickedoff">{ _oc_defaultModel    = _pd_model defaults</span>
+<span class="lineno">  133 </span><span class="spaces">    </span><span class="istickedoff">, _oc_workspace       = _pd_workspace defaults</span>
+<span class="lineno">  134 </span><span class="spaces">    </span><span class="istickedoff">, _oc_agents          = agents</span>
+<span class="lineno">  135 </span><span class="spaces">    </span><span class="istickedoff">, _oc_signal          = signal</span>
+<span class="lineno">  136 </span><span class="spaces">    </span><span class="istickedoff">, _oc_telegram        = telegram</span>
+<span class="lineno">  137 </span><span class="spaces">    </span><span class="istickedoff">, _oc_thinkingDefault = _pd_thinkingDefault defaults</span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">, _oc_timeoutSeconds  = _pd_timeoutSeconds defaults</span>
+<span class="lineno">  139 </span><span class="spaces">    </span><span class="istickedoff">, _oc_userTimezone    = _pd_userTimezone defaults</span>
+<span class="lineno">  140 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  141 </span>
+<span class="lineno">  142 </span>data ParsedDefaults = ParsedDefaults
+<span class="lineno">  143 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_model</span></span></span>           :: Maybe Text
+<span class="lineno">  144 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_workspace</span></span></span>       :: Maybe Text
+<span class="lineno">  145 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_thinkingDefault</span></span></span> :: Maybe Text
+<span class="lineno">  146 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_timeoutSeconds</span></span></span>  :: Maybe Int
+<span class="lineno">  147 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_userTimezone</span></span></span>    :: Maybe Text
+<span class="lineno">  148 </span>  }
+<span class="lineno">  149 </span>
+<span class="lineno">  150 </span>emptyParsedDefaults :: ParsedDefaults
+<span class="lineno">  151 </span><span class="decl"><span class="istickedoff">emptyParsedDefaults = ParsedDefaults Nothing Nothing Nothing Nothing Nothing</span></span>
+<span class="lineno">  152 </span>
+<span class="lineno">  153 </span>parseDefaults :: Value -&gt; Parser ParsedDefaults
+<span class="lineno">  154 </span><span class="decl"><span class="istickedoff">parseDefaults = withObject <span class="nottickedoff">&quot;agents&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  155 </span><span class="spaces">  </span><span class="istickedoff">mDefaults &lt;- o .:? &quot;defaults&quot;</span>
+<span class="lineno">  156 </span><span class="spaces">  </span><span class="istickedoff">case mDefaults of</span>
+<span class="lineno">  157 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure emptyParsedDefaults</span></span>
+<span class="lineno">  158 </span><span class="spaces">    </span><span class="istickedoff">Just defVal -&gt; flip (withObject <span class="nottickedoff">&quot;defaults&quot;</span>) defVal $ \d -&gt; do</span>
+<span class="lineno">  159 </span><span class="spaces">      </span><span class="istickedoff">mModelVal &lt;- d .:? &quot;model&quot;</span>
+<span class="lineno">  160 </span><span class="spaces">      </span><span class="istickedoff">model &lt;- case mModelVal of</span>
+<span class="lineno">  161 </span><span class="spaces">        </span><span class="istickedoff">Just (Object m) -&gt; m .:? &quot;primary&quot;</span>
+<span class="lineno">  162 </span><span class="spaces">        </span><span class="istickedoff">Just (String s) -&gt; pure (Just s)</span>
+<span class="lineno">  163 </span><span class="spaces">        </span><span class="istickedoff">_               -&gt; <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  164 </span><span class="spaces">      </span><span class="istickedoff">ws &lt;- d .:? &quot;workspace&quot;</span>
+<span class="lineno">  165 </span><span class="spaces">      </span><span class="istickedoff">thinking &lt;- d .:? &quot;thinkingDefault&quot;</span>
+<span class="lineno">  166 </span><span class="spaces">      </span><span class="istickedoff">timeout &lt;- d .:? &quot;timeoutSeconds&quot;</span>
+<span class="lineno">  167 </span><span class="spaces">      </span><span class="istickedoff">tz &lt;- d .:? &quot;userTimezone&quot;</span>
+<span class="lineno">  168 </span><span class="spaces">      </span><span class="istickedoff">pure ParsedDefaults</span>
+<span class="lineno">  169 </span><span class="spaces">        </span><span class="istickedoff">{ _pd_model           = model</span>
+<span class="lineno">  170 </span><span class="spaces">        </span><span class="istickedoff">, _pd_workspace       = ws</span>
+<span class="lineno">  171 </span><span class="spaces">        </span><span class="istickedoff">, _pd_thinkingDefault = thinking</span>
+<span class="lineno">  172 </span><span class="spaces">        </span><span class="istickedoff">, _pd_timeoutSeconds  = timeout</span>
+<span class="lineno">  173 </span><span class="spaces">        </span><span class="istickedoff">, _pd_userTimezone    = tz</span>
+<span class="lineno">  174 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  175 </span>
+<span class="lineno">  176 </span>parseAgentList :: Value -&gt; Parser [OpenClawAgent]
+<span class="lineno">  177 </span><span class="decl"><span class="istickedoff">parseAgentList = withObject <span class="nottickedoff">&quot;agents&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="istickedoff">mList &lt;- o .:? &quot;list&quot;</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">case mList of</span>
+<span class="lineno">  180 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure []</span>
+<span class="lineno">  181 </span><span class="spaces">    </span><span class="istickedoff">Just agents -&gt; mapM parseAgentDef agents</span></span>
+<span class="lineno">  182 </span>
+<span class="lineno">  183 </span>parseAgentDef :: Value -&gt; Parser OpenClawAgent
+<span class="lineno">  184 </span><span class="decl"><span class="istickedoff">parseAgentDef = withObject <span class="nottickedoff">&quot;OpenClawAgent&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">agentId &lt;- o .: &quot;id&quot;</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">systemPrompt &lt;- o .:? &quot;systemPrompt&quot;</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">mModelVal &lt;- o .:? &quot;model&quot;</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">let model = case mModelVal of</span>
+<span class="lineno">  189 </span><span class="spaces">        </span><span class="istickedoff">Just (Object m) -&gt; parseMaybe (.: &quot;primary&quot;) m</span>
+<span class="lineno">  190 </span><span class="spaces">        </span><span class="istickedoff">Just (String s) -&gt; <span class="nottickedoff">Just s</span></span>
+<span class="lineno">  191 </span><span class="spaces">        </span><span class="istickedoff">_               -&gt; Nothing</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="istickedoff">mTools &lt;- o .:? &quot;tools&quot;</span>
+<span class="lineno">  193 </span><span class="spaces">  </span><span class="istickedoff">let toolProfile = mTools &gt;&gt;= parseMaybe (withObject <span class="nottickedoff">&quot;tools&quot;</span> (.: &quot;profile&quot;))</span>
+<span class="lineno">  194 </span><span class="spaces">  </span><span class="istickedoff">ws &lt;- o .:? &quot;workspace&quot;</span>
+<span class="lineno">  195 </span><span class="spaces">  </span><span class="istickedoff">pure OpenClawAgent</span>
+<span class="lineno">  196 </span><span class="spaces">    </span><span class="istickedoff">{ _oca_id           = agentId</span>
+<span class="lineno">  197 </span><span class="spaces">    </span><span class="istickedoff">, _oca_systemPrompt = systemPrompt</span>
+<span class="lineno">  198 </span><span class="spaces">    </span><span class="istickedoff">, _oca_model        = model</span>
+<span class="lineno">  199 </span><span class="spaces">    </span><span class="istickedoff">, _oca_toolProfile  = toolProfile</span>
+<span class="lineno">  200 </span><span class="spaces">    </span><span class="istickedoff">, _oca_workspace    = ws</span>
+<span class="lineno">  201 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  202 </span>
+<span class="lineno">  203 </span>parseSignalCfg :: Value -&gt; Parser OpenClawSignal
+<span class="lineno">  204 </span><span class="decl"><span class="istickedoff">parseSignalCfg = withObject <span class="nottickedoff">&quot;signal&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">OpenClawSignal &lt;$&gt; o .:? &quot;account&quot; &lt;*&gt; o .:? &quot;dmPolicy&quot; &lt;*&gt; o .:? &quot;allowFrom&quot;</span></span>
+<span class="lineno">  206 </span>
+<span class="lineno">  207 </span>parseTelegramCfg :: Value -&gt; Parser OpenClawTelegram
+<span class="lineno">  208 </span><span class="decl"><span class="istickedoff">parseTelegramCfg = withObject <span class="nottickedoff">&quot;telegram&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="istickedoff">OpenClawTelegram &lt;$&gt; o .:? &quot;botToken&quot; &lt;*&gt; o .:? &quot;dmPolicy&quot; &lt;*&gt; o .:? &quot;allowFrom&quot;</span></span>
+<span class="lineno">  210 </span>
+<span class="lineno">  211 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  212 </span>-- $include resolution
+<span class="lineno">  213 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  214 </span>
+<span class="lineno">  215 </span>-- | Resolve $include directives in a JSON Value, up to a max depth.
+<span class="lineno">  216 </span>resolveIncludes :: Int -&gt; FilePath -&gt; Value -&gt; IO Value
+<span class="lineno">  217 </span><span class="decl"><span class="istickedoff">resolveIncludes maxDepth baseDir val</span>
+<span class="lineno">  218 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">maxDepth &lt;= 0</span> = <span class="nottickedoff">pure val</span></span>
+<span class="lineno">  219 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = case val of</span>
+<span class="lineno">  220 </span><span class="spaces">      </span><span class="istickedoff">Object o -&gt; case KM.lookup (Key.fromText &quot;$include&quot;) o of</span>
+<span class="lineno">  221 </span><span class="spaces">        </span><span class="istickedoff">Just (String path) -&gt; do</span>
+<span class="lineno">  222 </span><span class="spaces">          </span><span class="istickedoff">let fullPath = baseDir &lt;/&gt; T.unpack path</span>
+<span class="lineno">  223 </span><span class="spaces">          </span><span class="istickedoff">included &lt;- loadJson5File fullPath</span>
+<span class="lineno">  224 </span><span class="spaces">          </span><span class="istickedoff">case included of</span>
+<span class="lineno">  225 </span><span class="spaces">            </span><span class="istickedoff">Left _    -&gt; <span class="nottickedoff">pure val</span></span>
+<span class="lineno">  226 </span><span class="spaces">            </span><span class="istickedoff">Right inc -&gt; resolveIncludes (maxDepth - 1) <span class="nottickedoff">(takeDirectory fullPath)</span> inc</span>
+<span class="lineno">  227 </span><span class="spaces">        </span><span class="istickedoff">Just (Array paths) -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  228 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">resolved &lt;- mapM (resolveIncludePath (maxDepth - 1) baseDir) (V.toList paths)</span></span>
+<span class="lineno">  229 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure (foldl deepMerge (Object KM.empty) resolved)</span></span>
+<span class="lineno">  230 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  231 </span><span class="spaces">          </span><span class="istickedoff">resolved &lt;- KM.traverseWithKey (\_ v -&gt; resolveIncludes maxDepth baseDir v) o</span>
+<span class="lineno">  232 </span><span class="spaces">          </span><span class="istickedoff">pure (Object resolved)</span>
+<span class="lineno">  233 </span><span class="spaces">      </span><span class="istickedoff">_ -&gt; pure val</span></span>
+<span class="lineno">  234 </span>
+<span class="lineno">  235 </span>resolveIncludePath :: Int -&gt; FilePath -&gt; Value -&gt; IO Value
+<span class="lineno">  236 </span><span class="decl"><span class="nottickedoff">resolveIncludePath depth baseDir (String path) = do</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="nottickedoff">let fullPath = baseDir &lt;/&gt; T.unpack path</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="nottickedoff">loaded &lt;- loadJson5File fullPath</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="nottickedoff">case loaded of</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="nottickedoff">Left _    -&gt; pure (Object KM.empty)</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="nottickedoff">Right inc -&gt; resolveIncludes depth (takeDirectory fullPath) inc</span>
+<span class="lineno">  242 </span><span class="spaces"></span><span class="nottickedoff">resolveIncludePath _ _ other = pure other</span></span>
+<span class="lineno">  243 </span>
+<span class="lineno">  244 </span>deepMerge :: Value -&gt; Value -&gt; Value
+<span class="lineno">  245 </span><span class="decl"><span class="nottickedoff">deepMerge (Object a) (Object b) = Object (KM.unionWith deepMerge a b)</span>
+<span class="lineno">  246 </span><span class="spaces"></span><span class="nottickedoff">deepMerge _ b = b</span></span>
+<span class="lineno">  247 </span>
+<span class="lineno">  248 </span>-- | Load and parse a JSON5 file.
+<span class="lineno">  249 </span>loadJson5File :: FilePath -&gt; IO (Either String Value)
+<span class="lineno">  250 </span><span class="decl"><span class="istickedoff">loadJson5File path = do</span>
+<span class="lineno">  251 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try @IOException (TIO.readFile path)</span>
+<span class="lineno">  252 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  253 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; pure (Left <span class="nottickedoff">(show err)</span>)</span>
+<span class="lineno">  254 </span><span class="spaces">    </span><span class="istickedoff">Right text -&gt;</span>
+<span class="lineno">  255 </span><span class="spaces">      </span><span class="istickedoff">let cleaned = stripJson5 text</span>
+<span class="lineno">  256 </span><span class="spaces">          </span><span class="istickedoff">bs = TE.encodeUtf8 cleaned</span>
+<span class="lineno">  257 </span><span class="spaces">      </span><span class="istickedoff">in pure (eitherDecodeStrict' bs)</span></span>
+<span class="lineno">  258 </span>
+<span class="lineno">  259 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  260 </span>-- Import execution
+<span class="lineno">  261 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  262 </span>
+<span class="lineno">  263 </span>data ImportResult = ImportResult
+<span class="lineno">  264 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ir_configWritten</span></span></span> :: Bool
+<span class="lineno">  265 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ir_agentsWritten</span></span></span> :: [Text]
+<span class="lineno">  266 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ir_skippedFields</span></span></span> :: [Text]
+<span class="lineno">  267 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ir_warnings</span></span></span>      :: [Text]
+<span class="lineno">  268 </span>  }
+<span class="lineno">  269 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  270 </span>
+<span class="lineno">  271 </span>-- | Import an OpenClaw config file into PureClaw's directory structure.
+<span class="lineno">  272 </span>-- Writes to @configDir/config.toml@ and @configDir/agents/*/AGENTS.md@.
+<span class="lineno">  273 </span>importOpenClawConfig :: FilePath -&gt; FilePath -&gt; IO (Either Text ImportResult)
+<span class="lineno">  274 </span><span class="decl"><span class="istickedoff">importOpenClawConfig openclawPath configDir = do</span>
+<span class="lineno">  275 </span><span class="spaces">  </span><span class="istickedoff">loaded &lt;- loadJson5File openclawPath</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">case loaded of</span>
+<span class="lineno">  277 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left (&quot;Failed to parse OpenClaw config: &quot; &lt;&gt; T.pack err))</span></span>
+<span class="lineno">  278 </span><span class="spaces">    </span><span class="istickedoff">Right rawJson -&gt; do</span>
+<span class="lineno">  279 </span><span class="spaces">      </span><span class="istickedoff">resolved &lt;- resolveIncludes 3 (takeDirectory openclawPath) rawJson</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">case parseOpenClawConfig resolved of</span>
+<span class="lineno">  281 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left (&quot;Failed to extract config fields: &quot; &lt;&gt; T.pack err))</span></span>
+<span class="lineno">  282 </span><span class="spaces">        </span><span class="istickedoff">Right ocConfig -&gt; writeImportedConfig configDir ocConfig</span></span>
+<span class="lineno">  283 </span>
+<span class="lineno">  284 </span>writeImportedConfig :: FilePath -&gt; OpenClawConfig -&gt; IO (Either Text ImportResult)
+<span class="lineno">  285 </span><span class="decl"><span class="istickedoff">writeImportedConfig configDir ocConfig = do</span>
+<span class="lineno">  286 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True configDir</span>
+<span class="lineno">  287 </span><span class="spaces">  </span><span class="istickedoff">let agentsDir = configDir &lt;/&gt; &quot;agents&quot;</span>
+<span class="lineno">  288 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  289 </span><span class="spaces">  </span><span class="istickedoff">-- Write main config.toml</span>
+<span class="lineno">  290 </span><span class="spaces">  </span><span class="istickedoff">let configContent = buildConfigToml ocConfig</span>
+<span class="lineno">  291 </span><span class="spaces">  </span><span class="istickedoff">TIO.writeFile (configDir &lt;/&gt; &quot;config.toml&quot;) configContent</span>
+<span class="lineno">  292 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  293 </span><span class="spaces">  </span><span class="istickedoff">-- Write agent AGENTS.md files</span>
+<span class="lineno">  294 </span><span class="spaces">  </span><span class="istickedoff">agentNames &lt;- mapM (writeAgentFile agentsDir) (_oc_agents ocConfig)</span>
+<span class="lineno">  295 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  296 </span><span class="spaces">  </span><span class="istickedoff">-- Write default agent if there are defaults</span>
+<span class="lineno">  297 </span><span class="spaces">  </span><span class="istickedoff">case (_oc_defaultModel ocConfig, _oc_workspace ocConfig) of</span>
+<span class="lineno">  298 </span><span class="spaces">    </span><span class="istickedoff">(Nothing, Nothing) -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  299 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  300 </span><span class="spaces">      </span><span class="istickedoff">let defaultDir = agentsDir &lt;/&gt; &quot;default&quot;</span>
+<span class="lineno">  301 </span><span class="spaces">      </span><span class="istickedoff">Dir.createDirectoryIfMissing True defaultDir</span>
+<span class="lineno">  302 </span><span class="spaces">      </span><span class="istickedoff">TIO.writeFile (defaultDir &lt;/&gt; &quot;AGENTS.md&quot;) $ T.unlines</span>
+<span class="lineno">  303 </span><span class="spaces">        </span><span class="istickedoff">[ &quot;---&quot;</span>
+<span class="lineno">  304 </span><span class="spaces">        </span><span class="istickedoff">, maybe <span class="nottickedoff">&quot;&quot;</span> (&quot;model: &quot; &lt;&gt;) (_oc_defaultModel ocConfig)</span>
+<span class="lineno">  305 </span><span class="spaces">        </span><span class="istickedoff">, maybe &quot;&quot; (&quot;workspace: &quot; &lt;&gt;) (_oc_workspace ocConfig)</span>
+<span class="lineno">  306 </span><span class="spaces">        </span><span class="istickedoff">, &quot;---&quot;</span>
+<span class="lineno">  307 </span><span class="spaces">        </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  308 </span><span class="spaces">        </span><span class="istickedoff">, &quot;Default PureClaw agent.&quot;</span>
+<span class="lineno">  309 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  310 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  311 </span><span class="spaces">  </span><span class="istickedoff">pure (Right ImportResult</span>
+<span class="lineno">  312 </span><span class="spaces">    </span><span class="istickedoff">{ _ir_configWritten = True</span>
+<span class="lineno">  313 </span><span class="spaces">    </span><span class="istickedoff">, _ir_agentsWritten = agentNames</span>
+<span class="lineno">  314 </span><span class="spaces">    </span><span class="istickedoff">, _ir_skippedFields = <span class="nottickedoff">[]</span></span>
+<span class="lineno">  315 </span><span class="spaces">    </span><span class="istickedoff">, _ir_warnings      = <span class="nottickedoff">[]</span></span>
+<span class="lineno">  316 </span><span class="spaces">    </span><span class="istickedoff">})</span></span>
+<span class="lineno">  317 </span>
+<span class="lineno">  318 </span>buildConfigToml :: OpenClawConfig -&gt; Text
+<span class="lineno">  319 </span><span class="decl"><span class="istickedoff">buildConfigToml oc = T.unlines $ concatMap (filter (not . T.null))</span>
+<span class="lineno">  320 </span><span class="spaces">  </span><span class="istickedoff">[ maybe [] (\m -&gt; [&quot;model = &quot; &lt;&gt; quoted m]) (_oc_defaultModel oc)</span>
+<span class="lineno">  321 </span><span class="spaces">  </span><span class="istickedoff">, maybe [] (\t -&gt; [&quot;reasoning_effort = &quot; &lt;&gt; quoted (mapThinkingDefault t)]) (_oc_thinkingDefault oc)</span>
+<span class="lineno">  322 </span><span class="spaces">  </span><span class="istickedoff">, maybe [] (\s -&gt; [&quot;max_turns = &quot; &lt;&gt; T.pack (show (computeMaxTurns s))]) (_oc_timeoutSeconds oc)</span>
+<span class="lineno">  323 </span><span class="spaces">  </span><span class="istickedoff">, maybe [] (\tz -&gt; [&quot;timezone = &quot; &lt;&gt; quoted tz]) (_oc_userTimezone oc)</span>
+<span class="lineno">  324 </span><span class="spaces">  </span><span class="istickedoff">, case _oc_signal oc of</span>
+<span class="lineno">  325 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  326 </span><span class="spaces">      </span><span class="istickedoff">Just sig -&gt;</span>
+<span class="lineno">  327 </span><span class="spaces">        </span><span class="istickedoff">[ &quot;&quot;</span>
+<span class="lineno">  328 </span><span class="spaces">        </span><span class="istickedoff">, &quot;[signal]&quot;</span>
+<span class="lineno">  329 </span><span class="spaces">        </span><span class="istickedoff">] ++ catMaybes</span>
+<span class="lineno">  330 </span><span class="spaces">        </span><span class="istickedoff">[ fmap (\a -&gt; &quot;account = &quot; &lt;&gt; quoted a) (_ocs_account sig)</span>
+<span class="lineno">  331 </span><span class="spaces">        </span><span class="istickedoff">, fmap (\p -&gt; &quot;dm_policy = &quot; &lt;&gt; quoted (camelToSnake p)) (_ocs_dmPolicy sig)</span>
+<span class="lineno">  332 </span><span class="spaces">        </span><span class="istickedoff">, fmap (\af -&gt; &quot;allow_from = &quot; &lt;&gt; fmtList af) (_ocs_allowFrom sig)</span>
+<span class="lineno">  333 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  334 </span><span class="spaces">  </span><span class="istickedoff">, case _oc_telegram oc of</span>
+<span class="lineno">  335 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  336 </span><span class="spaces">      </span><span class="istickedoff">Just tg -&gt;</span>
+<span class="lineno">  337 </span><span class="spaces">        </span><span class="istickedoff">[ &quot;&quot;</span>
+<span class="lineno">  338 </span><span class="spaces">        </span><span class="istickedoff">, &quot;[telegram]&quot;</span>
+<span class="lineno">  339 </span><span class="spaces">        </span><span class="istickedoff">] ++ catMaybes</span>
+<span class="lineno">  340 </span><span class="spaces">        </span><span class="istickedoff">[ fmap (\t -&gt; &quot;bot_token = &quot; &lt;&gt; quoted t) (_oct_botToken tg)</span>
+<span class="lineno">  341 </span><span class="spaces">        </span><span class="istickedoff">, fmap (\p -&gt; &quot;dm_policy = &quot; &lt;&gt; quoted (camelToSnake p)) (_oct_dmPolicy tg)</span>
+<span class="lineno">  342 </span><span class="spaces">        </span><span class="istickedoff">, fmap (\af -&gt; &quot;allow_from = &quot; &lt;&gt; fmtList af) (_oct_allowFrom tg)</span>
+<span class="lineno">  343 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  344 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  345 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  346 </span><span class="spaces">    </span><span class="istickedoff">catMaybes = foldr (\x acc -&gt; maybe acc (: acc) x) []</span></span>
+<span class="lineno">  347 </span>
+<span class="lineno">  348 </span>writeAgentFile :: FilePath -&gt; OpenClawAgent -&gt; IO Text
+<span class="lineno">  349 </span><span class="decl"><span class="istickedoff">writeAgentFile agentsDir agent = do</span>
+<span class="lineno">  350 </span><span class="spaces">  </span><span class="istickedoff">let agentDir = agentsDir &lt;/&gt; T.unpack (_oca_id agent)</span>
+<span class="lineno">  351 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True agentDir</span>
+<span class="lineno">  352 </span><span class="spaces">  </span><span class="istickedoff">let frontmatterLines = filter (/= &quot;&quot;)</span>
+<span class="lineno">  353 </span><span class="spaces">        </span><span class="istickedoff">[ maybe &quot;&quot; (&quot;model: &quot; &lt;&gt;) (_oca_model agent)</span>
+<span class="lineno">  354 </span><span class="spaces">        </span><span class="istickedoff">, maybe &quot;&quot; (&quot;tool_profile: &quot; &lt;&gt;) (_oca_toolProfile agent)</span>
+<span class="lineno">  355 </span><span class="spaces">        </span><span class="istickedoff">, maybe &quot;&quot; <span class="nottickedoff">(&quot;workspace: &quot; &lt;&gt;)</span> (_oca_workspace agent)</span>
+<span class="lineno">  356 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  357 </span><span class="spaces">      </span><span class="istickedoff">hasFrontmatter = not (null frontmatterLines)</span>
+<span class="lineno">  358 </span><span class="spaces">      </span><span class="istickedoff">header = if hasFrontmatter</span>
+<span class="lineno">  359 </span><span class="spaces">        </span><span class="istickedoff">then [&quot;---&quot;] ++ frontmatterLines ++ [&quot;---&quot;, &quot;&quot;]</span>
+<span class="lineno">  360 </span><span class="spaces">        </span><span class="istickedoff">else []</span>
+<span class="lineno">  361 </span><span class="spaces">      </span><span class="istickedoff">body = fromMaybe <span class="nottickedoff">&quot;&quot;</span> (_oca_systemPrompt agent)</span>
+<span class="lineno">  362 </span><span class="spaces">  </span><span class="istickedoff">TIO.writeFile (agentDir &lt;/&gt; &quot;AGENTS.md&quot;) (T.unlines (header ++ [body]))</span>
+<span class="lineno">  363 </span><span class="spaces">  </span><span class="istickedoff">pure (_oca_id agent)</span></span>
+<span class="lineno">  364 </span>
+<span class="lineno">  365 </span>quoted :: Text -&gt; Text
+<span class="lineno">  366 </span><span class="decl"><span class="istickedoff">quoted t = &quot;\&quot;&quot; &lt;&gt; T.replace &quot;\&quot;&quot; &quot;\\\&quot;&quot; t &lt;&gt; &quot;\&quot;&quot;</span></span>
+<span class="lineno">  367 </span>
+<span class="lineno">  368 </span>fmtList :: [Text] -&gt; Text
+<span class="lineno">  369 </span><span class="decl"><span class="istickedoff">fmtList xs = &quot;[&quot; &lt;&gt; T.intercalate &quot;, &quot; (map quoted xs) &lt;&gt; &quot;]&quot;</span></span>
+<span class="lineno">  370 </span>
+<span class="lineno">  371 </span>camelToSnake :: Text -&gt; Text
+<span class="lineno">  372 </span><span class="decl"><span class="istickedoff">camelToSnake = T.concatMap $ \c -&gt;</span>
+<span class="lineno">  373 </span><span class="spaces">  </span><span class="istickedoff">if Char.isAsciiUpper c</span>
+<span class="lineno">  374 </span><span class="spaces">    </span><span class="istickedoff">then T.pack ['_', Char.toLower c]</span>
+<span class="lineno">  375 </span><span class="spaces">    </span><span class="istickedoff">else T.singleton c</span></span>
+<span class="lineno">  376 </span>
+<span class="lineno">  377 </span>-- | Map OpenClaw thinkingDefault to PureClaw reasoning_effort.
+<span class="lineno">  378 </span>-- &quot;always&quot;/&quot;high&quot; → &quot;high&quot;; &quot;auto&quot;/&quot;medium&quot; → &quot;medium&quot;; everything else → &quot;low&quot;
+<span class="lineno">  379 </span>mapThinkingDefault :: Text -&gt; Text
+<span class="lineno">  380 </span><span class="decl"><span class="istickedoff">mapThinkingDefault t = case T.toLower t of</span>
+<span class="lineno">  381 </span><span class="spaces">  </span><span class="istickedoff">&quot;always&quot; -&gt; &quot;high&quot;</span>
+<span class="lineno">  382 </span><span class="spaces">  </span><span class="istickedoff">&quot;high&quot;   -&gt; &quot;high&quot;</span>
+<span class="lineno">  383 </span><span class="spaces">  </span><span class="istickedoff">&quot;auto&quot;   -&gt; &quot;medium&quot;</span>
+<span class="lineno">  384 </span><span class="spaces">  </span><span class="istickedoff">&quot;medium&quot; -&gt; &quot;medium&quot;</span>
+<span class="lineno">  385 </span><span class="spaces">  </span><span class="istickedoff">_        -&gt; &quot;low&quot;</span></span>  -- off, low, none, minimal
+<span class="lineno">  386 </span>
+<span class="lineno">  387 </span>-- | Convert OpenClaw timeoutSeconds to max_turns (seconds / 10, clamped to [1, 200]).
+<span class="lineno">  388 </span>computeMaxTurns :: Int -&gt; Int
+<span class="lineno">  389 </span><span class="decl"><span class="istickedoff">computeMaxTurns secs = min 200 (max 1 (secs `div` 10))</span></span>
+<span class="lineno">  390 </span>
+<span class="lineno">  391 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  392 </span>-- CLI options for import command
+<span class="lineno">  393 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  394 </span>
+<span class="lineno">  395 </span>-- | Options for the import command.
+<span class="lineno">  396 </span>data ImportOptions = ImportOptions
+<span class="lineno">  397 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_io_from</span></span></span> :: Maybe FilePath
+<span class="lineno">  398 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_io_to</span></span></span>   :: Maybe FilePath
+<span class="lineno">  399 </span>  }
+<span class="lineno">  400 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  401 </span>
+<span class="lineno">  402 </span>-- | Resolve import options: handle backward compat with a single positional arg.
+<span class="lineno">  403 </span>-- If a positional arg is given:
+<span class="lineno">  404 </span>--   - If it's a directory, use as --from
+<span class="lineno">  405 </span>--   - If it's a .json file, use dirname as --from
+<span class="lineno">  406 </span>-- Defaults: --from = ~/.openclaw, --to = ~/.pureclaw
+<span class="lineno">  407 </span>resolveImportOptions :: ImportOptions -&gt; Maybe FilePath -&gt; IO (FilePath, FilePath)
+<span class="lineno">  408 </span><span class="decl"><span class="istickedoff">resolveImportOptions opts mPositional = do</span>
+<span class="lineno">  409 </span><span class="spaces">  </span><span class="istickedoff">home &lt;- Dir.getHomeDirectory</span>
+<span class="lineno">  410 </span><span class="spaces">  </span><span class="istickedoff">let <span class="nottickedoff">defaultFrom = home &lt;/&gt; &quot;.openclaw&quot;</span></span>
+<span class="lineno">  411 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">defaultTo   = home &lt;/&gt; &quot;.pureclaw&quot;</span></span>
+<span class="lineno">  412 </span><span class="spaces">  </span><span class="istickedoff">fromDir &lt;- case mPositional of</span>
+<span class="lineno">  413 </span><span class="spaces">    </span><span class="istickedoff">Just pos -&gt; do</span>
+<span class="lineno">  414 </span><span class="spaces">      </span><span class="istickedoff">isDir &lt;- Dir.doesDirectoryExist pos</span>
+<span class="lineno">  415 </span><span class="spaces">      </span><span class="istickedoff">if isDir</span>
+<span class="lineno">  416 </span><span class="spaces">        </span><span class="istickedoff">then pure pos</span>
+<span class="lineno">  417 </span><span class="spaces">        </span><span class="istickedoff">else if <span class="tickonlytrue">takeExtension pos == &quot;.json&quot;</span></span>
+<span class="lineno">  418 </span><span class="spaces">          </span><span class="istickedoff">then pure (takeDirectory pos)</span>
+<span class="lineno">  419 </span><span class="spaces">          </span><span class="istickedoff">else <span class="nottickedoff">pure pos</span>  -- let it fail later with a clear error</span>
+<span class="lineno">  420 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure (fromMaybe <span class="nottickedoff">defaultFrom</span> (_io_from opts))</span>
+<span class="lineno">  421 </span><span class="spaces">  </span><span class="istickedoff">let toDir = fromMaybe <span class="nottickedoff">defaultTo</span> (_io_to opts)</span>
+<span class="lineno">  422 </span><span class="spaces">  </span><span class="istickedoff">pure (fromDir, toDir)</span></span>
+<span class="lineno">  423 </span>
+<span class="lineno">  424 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  425 </span>-- Full directory import
+<span class="lineno">  426 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  427 </span>
+<span class="lineno">  428 </span>-- | Result of a full OpenClaw directory import.
+<span class="lineno">  429 </span>data DirImportResult = DirImportResult
+<span class="lineno">  430 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_configResult</span></span></span>   :: ImportResult
+<span class="lineno">  431 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_credentialsOk</span></span></span>  :: Bool
+<span class="lineno">  432 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_deviceId</span></span></span>       :: Maybe Text
+<span class="lineno">  433 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_workspacePath</span></span></span>  :: Maybe FilePath
+<span class="lineno">  434 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_extraWorkspaces</span></span></span> :: [FilePath]
+<span class="lineno">  435 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_cronSkipped</span></span></span>    :: Bool
+<span class="lineno">  436 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_modelsImported</span></span></span> :: Bool
+<span class="lineno">  437 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dir_warnings</span></span></span>       :: [Text]
+<span class="lineno">  438 </span>  }
+<span class="lineno">  439 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  440 </span>
+<span class="lineno">  441 </span>-- | Import a full OpenClaw state directory into PureClaw.
+<span class="lineno">  442 </span>importOpenClawDir :: FilePath -&gt; FilePath -&gt; IO (Either Text DirImportResult)
+<span class="lineno">  443 </span><span class="decl"><span class="istickedoff">importOpenClawDir fromDir toDir = do</span>
+<span class="lineno">  444 </span><span class="spaces">  </span><span class="istickedoff">-- 1. Import openclaw.json → config.toml (existing logic)</span>
+<span class="lineno">  445 </span><span class="spaces">  </span><span class="istickedoff">let configPath = fromDir &lt;/&gt; &quot;openclaw.json&quot;</span>
+<span class="lineno">  446 </span><span class="spaces">  </span><span class="istickedoff">configExists &lt;- Dir.doesFileExist configPath</span>
+<span class="lineno">  447 </span><span class="spaces">  </span><span class="istickedoff">if not configExists</span>
+<span class="lineno">  448 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left $ &quot;No openclaw.json found in &quot; &lt;&gt; T.pack fromDir)</span>
+<span class="lineno">  449 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  450 </span><span class="spaces">      </span><span class="istickedoff">let configDir = toDir &lt;/&gt; &quot;config&quot;</span>
+<span class="lineno">  451 </span><span class="spaces">      </span><span class="istickedoff">configResult &lt;- importOpenClawConfig configPath configDir</span>
+<span class="lineno">  452 </span><span class="spaces">      </span><span class="istickedoff">case configResult of</span>
+<span class="lineno">  453 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  454 </span><span class="spaces">        </span><span class="istickedoff">Right ir -&gt; do</span>
+<span class="lineno">  455 </span><span class="spaces">          </span><span class="istickedoff">(addWarning, getWarnings) &lt;- newWarnings</span>
+<span class="lineno">  456 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  457 </span><span class="spaces">          </span><span class="istickedoff">-- 2. Import auth-profiles.json → credentials.json</span>
+<span class="lineno">  458 </span><span class="spaces">          </span><span class="istickedoff">credOk &lt;- importAuthProfiles fromDir toDir addWarning</span>
+<span class="lineno">  459 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  460 </span><span class="spaces">          </span><span class="istickedoff">-- 3. Import device.json → extract deviceId</span>
+<span class="lineno">  461 </span><span class="spaces">          </span><span class="istickedoff">mDeviceId &lt;- importDeviceIdentity fromDir addWarning</span>
+<span class="lineno">  462 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  463 </span><span class="spaces">          </span><span class="istickedoff">-- 4. Copy workspace files → toDir/workspace/</span>
+<span class="lineno">  464 </span><span class="spaces">          </span><span class="istickedoff">let srcWorkspace = fromDir &lt;/&gt; &quot;workspace&quot;</span>
+<span class="lineno">  465 </span><span class="spaces">          </span><span class="istickedoff">wsExists &lt;- Dir.doesDirectoryExist srcWorkspace</span>
+<span class="lineno">  466 </span><span class="spaces">          </span><span class="istickedoff">mWorkspace &lt;- if wsExists</span>
+<span class="lineno">  467 </span><span class="spaces">            </span><span class="istickedoff">then do</span>
+<span class="lineno">  468 </span><span class="spaces">              </span><span class="istickedoff">let destWorkspace = toDir &lt;/&gt; &quot;workspace&quot;</span>
+<span class="lineno">  469 </span><span class="spaces">              </span><span class="istickedoff">copyWorkspaceFiles srcWorkspace destWorkspace <span class="nottickedoff">addWarning</span></span>
+<span class="lineno">  470 </span><span class="spaces">              </span><span class="istickedoff">pure (Just destWorkspace)</span>
+<span class="lineno">  471 </span><span class="spaces">            </span><span class="istickedoff">else pure Nothing</span>
+<span class="lineno">  472 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  473 </span><span class="spaces">          </span><span class="istickedoff">-- 5. Find extra workspace-* directories</span>
+<span class="lineno">  474 </span><span class="spaces">          </span><span class="istickedoff">extraWs &lt;- findExtraWorkspaces fromDir</span>
+<span class="lineno">  475 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  476 </span><span class="spaces">          </span><span class="istickedoff">-- 6. Check for cron jobs</span>
+<span class="lineno">  477 </span><span class="spaces">          </span><span class="istickedoff">cronExists &lt;- Dir.doesFileExist (fromDir &lt;/&gt; &quot;cron&quot; &lt;/&gt; &quot;jobs.json&quot;)</span>
+<span class="lineno">  478 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  479 </span><span class="spaces">          </span><span class="istickedoff">-- 7. Import models.json</span>
+<span class="lineno">  480 </span><span class="spaces">          </span><span class="istickedoff">modelsOk &lt;- importModels fromDir toDir addWarning</span>
+<span class="lineno">  481 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  482 </span><span class="spaces">          </span><span class="istickedoff">-- 8. Append workspace/identity sections to config.toml</span>
+<span class="lineno">  483 </span><span class="spaces">          </span><span class="istickedoff">appendConfigSections configDir mWorkspace mDeviceId extraWs</span>
+<span class="lineno">  484 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  485 </span><span class="spaces">          </span><span class="istickedoff">ws &lt;- getWarnings</span>
+<span class="lineno">  486 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  487 </span><span class="spaces">          </span><span class="istickedoff">pure (Right DirImportResult</span>
+<span class="lineno">  488 </span><span class="spaces">            </span><span class="istickedoff">{ _dir_configResult   = ir</span>
+<span class="lineno">  489 </span><span class="spaces">            </span><span class="istickedoff">, _dir_credentialsOk  = credOk</span>
+<span class="lineno">  490 </span><span class="spaces">            </span><span class="istickedoff">, _dir_deviceId       = mDeviceId</span>
+<span class="lineno">  491 </span><span class="spaces">            </span><span class="istickedoff">, _dir_workspacePath  = mWorkspace</span>
+<span class="lineno">  492 </span><span class="spaces">            </span><span class="istickedoff">, _dir_extraWorkspaces = extraWs</span>
+<span class="lineno">  493 </span><span class="spaces">            </span><span class="istickedoff">, _dir_cronSkipped    = cronExists</span>
+<span class="lineno">  494 </span><span class="spaces">            </span><span class="istickedoff">, _dir_modelsImported = modelsOk</span>
+<span class="lineno">  495 </span><span class="spaces">            </span><span class="istickedoff">, _dir_warnings       = ws</span>
+<span class="lineno">  496 </span><span class="spaces">            </span><span class="istickedoff">})</span></span>
+<span class="lineno">  497 </span>
+<span class="lineno">  498 </span>newWarnings :: IO (Text -&gt; IO (), IO [Text])
+<span class="lineno">  499 </span><span class="decl"><span class="istickedoff">newWarnings = do</span>
+<span class="lineno">  500 </span><span class="spaces">  </span><span class="istickedoff">ref &lt;- newIORef []</span>
+<span class="lineno">  501 </span><span class="spaces">  </span><span class="istickedoff">let addW w = modifyIORef' ref (<span class="nottickedoff">w</span> :)</span>
+<span class="lineno">  502 </span><span class="spaces">      </span><span class="istickedoff">getW   = reverse &lt;$&gt; readIORef ref</span>
+<span class="lineno">  503 </span><span class="spaces">  </span><span class="istickedoff">pure (addW, getW)</span></span>
+<span class="lineno">  504 </span>
+<span class="lineno">  505 </span>-- | Import auth-profiles.json → credentials.json
+<span class="lineno">  506 </span>importAuthProfiles :: FilePath -&gt; FilePath -&gt; (Text -&gt; IO ()) -&gt; IO Bool
+<span class="lineno">  507 </span><span class="decl"><span class="istickedoff">importAuthProfiles fromDir toDir addWarning = do</span>
+<span class="lineno">  508 </span><span class="spaces">  </span><span class="istickedoff">let authPath = fromDir &lt;/&gt; &quot;agents&quot; &lt;/&gt; &quot;main&quot; &lt;/&gt; &quot;agent&quot; &lt;/&gt; &quot;auth-profiles.json&quot;</span>
+<span class="lineno">  509 </span><span class="spaces">  </span><span class="istickedoff">loaded &lt;- loadJson5File authPath</span>
+<span class="lineno">  510 </span><span class="spaces">  </span><span class="istickedoff">case loaded of</span>
+<span class="lineno">  511 </span><span class="spaces">    </span><span class="istickedoff">Left _ -&gt; do</span>
+<span class="lineno">  512 </span><span class="spaces">      </span><span class="istickedoff">addWarning <span class="nottickedoff">&quot;auth-profiles.json not found — no credentials imported&quot;</span></span>
+<span class="lineno">  513 </span><span class="spaces">      </span><span class="istickedoff">pure False</span>
+<span class="lineno">  514 </span><span class="spaces">    </span><span class="istickedoff">Right val -&gt; do</span>
+<span class="lineno">  515 </span><span class="spaces">      </span><span class="istickedoff">let mProfiles = parseMaybe (withObject <span class="nottickedoff">&quot;auth&quot;</span> (.: &quot;profiles&quot;)) val</span>
+<span class="lineno">  516 </span><span class="spaces">      </span><span class="istickedoff">case mProfiles of</span>
+<span class="lineno">  517 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  518 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">addWarning &quot;auth-profiles.json has no profiles field&quot;</span></span>
+<span class="lineno">  519 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure False</span></span>
+<span class="lineno">  520 </span><span class="spaces">        </span><span class="istickedoff">Just (Object profiles) -&gt; do</span>
+<span class="lineno">  521 </span><span class="spaces">          </span><span class="istickedoff">let creds = KM.foldrWithKey extractCred [] profiles</span>
+<span class="lineno">  522 </span><span class="spaces">          </span><span class="istickedoff">if <span class="tickonlyfalse">null creds</span></span>
+<span class="lineno">  523 </span><span class="spaces">            </span><span class="istickedoff">then <span class="nottickedoff">do</span></span>
+<span class="lineno">  524 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">addWarning &quot;No API tokens found in auth-profiles.json&quot;</span></span>
+<span class="lineno">  525 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure False</span></span>
+<span class="lineno">  526 </span><span class="spaces">            </span><span class="istickedoff">else do</span>
+<span class="lineno">  527 </span><span class="spaces">              </span><span class="istickedoff">Dir.createDirectoryIfMissing True toDir</span>
+<span class="lineno">  528 </span><span class="spaces">              </span><span class="istickedoff">let credsJson = object (map (uncurry (.=)) creds)</span>
+<span class="lineno">  529 </span><span class="spaces">              </span><span class="istickedoff">LBS.writeFile (toDir &lt;/&gt; &quot;credentials.json&quot;) (encode credsJson)</span>
+<span class="lineno">  530 </span><span class="spaces">              </span><span class="istickedoff">pure True</span>
+<span class="lineno">  531 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  532 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">addWarning &quot;auth-profiles.json profiles field is not an object&quot;</span></span>
+<span class="lineno">  533 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure False</span></span>
+<span class="lineno">  534 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  535 </span><span class="spaces">    </span><span class="istickedoff">extractCred _key val acc =</span>
+<span class="lineno">  536 </span><span class="spaces">      </span><span class="istickedoff">case parseMaybe parseProfile val of</span>
+<span class="lineno">  537 </span><span class="spaces">        </span><span class="istickedoff">Just (provider, token) -&gt; (Key.fromText provider, String token) : acc</span>
+<span class="lineno">  538 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">acc</span></span>
+<span class="lineno">  539 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  540 </span><span class="spaces">    </span><span class="istickedoff">parseProfile = withObject <span class="nottickedoff">&quot;profile&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  541 </span><span class="spaces">      </span><span class="istickedoff">provider &lt;- o .: &quot;provider&quot;</span>
+<span class="lineno">  542 </span><span class="spaces">      </span><span class="istickedoff">token &lt;- o .: &quot;token&quot;</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">pure (provider :: Text, token :: Text)</span></span>
+<span class="lineno">  544 </span>
+<span class="lineno">  545 </span>-- | Import device.json → extract deviceId
+<span class="lineno">  546 </span>importDeviceIdentity :: FilePath -&gt; (Text -&gt; IO ()) -&gt; IO (Maybe Text)
+<span class="lineno">  547 </span><span class="decl"><span class="istickedoff">importDeviceIdentity fromDir addWarning = do</span>
+<span class="lineno">  548 </span><span class="spaces">  </span><span class="istickedoff">let devicePath = fromDir &lt;/&gt; &quot;identity&quot; &lt;/&gt; &quot;device.json&quot;</span>
+<span class="lineno">  549 </span><span class="spaces">  </span><span class="istickedoff">loaded &lt;- loadJson5File devicePath</span>
+<span class="lineno">  550 </span><span class="spaces">  </span><span class="istickedoff">case loaded of</span>
+<span class="lineno">  551 </span><span class="spaces">    </span><span class="istickedoff">Left _ -&gt; do</span>
+<span class="lineno">  552 </span><span class="spaces">      </span><span class="istickedoff">addWarning <span class="nottickedoff">&quot;identity/device.json not found — no device ID imported&quot;</span></span>
+<span class="lineno">  553 </span><span class="spaces">      </span><span class="istickedoff">pure Nothing</span>
+<span class="lineno">  554 </span><span class="spaces">    </span><span class="istickedoff">Right val -&gt;</span>
+<span class="lineno">  555 </span><span class="spaces">      </span><span class="istickedoff">case parseMaybe (withObject <span class="nottickedoff">&quot;device&quot;</span> (.: &quot;deviceId&quot;)) val of</span>
+<span class="lineno">  556 </span><span class="spaces">        </span><span class="istickedoff">Just did -&gt; pure (Just did)</span>
+<span class="lineno">  557 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  558 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">addWarning &quot;identity/device.json has no deviceId field&quot;</span></span>
+<span class="lineno">  559 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure Nothing</span></span></span>
+<span class="lineno">  560 </span>
+<span class="lineno">  561 </span>-- | Find extra workspace-* directories
+<span class="lineno">  562 </span>findExtraWorkspaces :: FilePath -&gt; IO [FilePath]
+<span class="lineno">  563 </span><span class="decl"><span class="istickedoff">findExtraWorkspaces fromDir = do</span>
+<span class="lineno">  564 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- try @IOException (Dir.listDirectory fromDir)</span>
+<span class="lineno">  565 </span><span class="spaces">  </span><span class="istickedoff">case entries of</span>
+<span class="lineno">  566 </span><span class="spaces">    </span><span class="istickedoff">Left _  -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  567 </span><span class="spaces">    </span><span class="istickedoff">Right es -&gt; do</span>
+<span class="lineno">  568 </span><span class="spaces">      </span><span class="istickedoff">let candidates = filter (&quot;workspace-&quot; `T.isPrefixOf`) (map T.pack es)</span>
+<span class="lineno">  569 </span><span class="spaces">      </span><span class="istickedoff">dirs &lt;- filterM (\e -&gt; Dir.doesDirectoryExist (fromDir &lt;/&gt; T.unpack e)) candidates</span>
+<span class="lineno">  570 </span><span class="spaces">      </span><span class="istickedoff">pure (map (\d -&gt; fromDir &lt;/&gt; T.unpack d) dirs)</span>
+<span class="lineno">  571 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  572 </span><span class="spaces">    </span><span class="istickedoff">filterM _ []     = pure []</span>
+<span class="lineno">  573 </span><span class="spaces">    </span><span class="istickedoff">filterM p (x:xs) = do</span>
+<span class="lineno">  574 </span><span class="spaces">      </span><span class="istickedoff">b &lt;- p x</span>
+<span class="lineno">  575 </span><span class="spaces">      </span><span class="istickedoff">rest &lt;- filterM p xs</span>
+<span class="lineno">  576 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlytrue">b</span> then pure (x : rest) else <span class="nottickedoff">pure rest</span></span></span>
+<span class="lineno">  577 </span>
+<span class="lineno">  578 </span>-- | Import models.json → models.json in toDir
+<span class="lineno">  579 </span>importModels :: FilePath -&gt; FilePath -&gt; (Text -&gt; IO ()) -&gt; IO Bool
+<span class="lineno">  580 </span><span class="decl"><span class="istickedoff">importModels fromDir toDir addWarning = do</span>
+<span class="lineno">  581 </span><span class="spaces">  </span><span class="istickedoff">let modelsPath = fromDir &lt;/&gt; &quot;agents&quot; &lt;/&gt; &quot;main&quot; &lt;/&gt; &quot;agent&quot; &lt;/&gt; &quot;models.json&quot;</span>
+<span class="lineno">  582 </span><span class="spaces">  </span><span class="istickedoff">loaded &lt;- loadJson5File modelsPath</span>
+<span class="lineno">  583 </span><span class="spaces">  </span><span class="istickedoff">case loaded of</span>
+<span class="lineno">  584 </span><span class="spaces">    </span><span class="istickedoff">Left _ -&gt; do</span>
+<span class="lineno">  585 </span><span class="spaces">      </span><span class="istickedoff">addWarning <span class="nottickedoff">&quot;agents/main/agent/models.json not found — no model overrides imported&quot;</span></span>
+<span class="lineno">  586 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">False</span></span>
+<span class="lineno">  587 </span><span class="spaces">    </span><span class="istickedoff">Right val -&gt; do</span>
+<span class="lineno">  588 </span><span class="spaces">      </span><span class="istickedoff">Dir.createDirectoryIfMissing True toDir</span>
+<span class="lineno">  589 </span><span class="spaces">      </span><span class="istickedoff">LBS.writeFile (toDir &lt;/&gt; &quot;models.json&quot;) (encode val)</span>
+<span class="lineno">  590 </span><span class="spaces">      </span><span class="istickedoff">pure True</span></span>
+<span class="lineno">  591 </span>
+<span class="lineno">  592 </span>-- | The workspace files that are copied during import.
+<span class="lineno">  593 </span>-- These are the key files that define agent identity, context, and memory.
+<span class="lineno">  594 </span>workspaceFiles :: [FilePath]
+<span class="lineno">  595 </span><span class="decl"><span class="istickedoff">workspaceFiles = [&quot;SOUL.md&quot;, &quot;AGENTS.md&quot;, &quot;MEMORY.md&quot;, &quot;USER.md&quot;]</span></span>
+<span class="lineno">  596 </span>
+<span class="lineno">  597 </span>-- | Copy workspace files from the OpenClaw workspace to the PureClaw workspace.
+<span class="lineno">  598 </span>-- Only copies files that exist; missing files are silently skipped.
+<span class="lineno">  599 </span>-- IO failures on individual files are reported as warnings (not fatal).
+<span class="lineno">  600 </span>copyWorkspaceFiles :: FilePath -&gt; FilePath -&gt; (Text -&gt; IO ()) -&gt; IO ()
+<span class="lineno">  601 </span><span class="decl"><span class="istickedoff">copyWorkspaceFiles srcDir destDir addWarning = do</span>
+<span class="lineno">  602 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True destDir</span>
+<span class="lineno">  603 </span><span class="spaces">  </span><span class="istickedoff">mapM_ copyIfExists workspaceFiles</span>
+<span class="lineno">  604 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  605 </span><span class="spaces">    </span><span class="istickedoff">copyIfExists name = do</span>
+<span class="lineno">  606 </span><span class="spaces">      </span><span class="istickedoff">let src  = srcDir &lt;/&gt; name</span>
+<span class="lineno">  607 </span><span class="spaces">          </span><span class="istickedoff">dest = destDir &lt;/&gt; name</span>
+<span class="lineno">  608 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- Dir.doesFileExist src</span>
+<span class="lineno">  609 </span><span class="spaces">      </span><span class="istickedoff">when exists $ do</span>
+<span class="lineno">  610 </span><span class="spaces">        </span><span class="istickedoff">result &lt;- try @IOException (Dir.copyFile src dest)</span>
+<span class="lineno">  611 </span><span class="spaces">        </span><span class="istickedoff">case result of</span>
+<span class="lineno">  612 </span><span class="spaces">          </span><span class="istickedoff">Right () -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  613 </span><span class="spaces">          </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">addWarning (&quot;Failed to copy &quot; &lt;&gt; T.pack name &lt;&gt; &quot;: &quot; &lt;&gt; T.pack (show err))</span></span></span>
+<span class="lineno">  614 </span>
+<span class="lineno">  615 </span>-- | Append workspace and identity sections to config.toml
+<span class="lineno">  616 </span>appendConfigSections :: FilePath -&gt; Maybe FilePath -&gt; Maybe Text -&gt; [FilePath] -&gt; IO ()
+<span class="lineno">  617 </span><span class="decl"><span class="istickedoff">appendConfigSections configDir mWorkspace mDeviceId extraWs = do</span>
+<span class="lineno">  618 </span><span class="spaces">  </span><span class="istickedoff">let configPath = configDir &lt;/&gt; &quot;config.toml&quot;</span>
+<span class="lineno">  619 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- Dir.doesFileExist configPath</span>
+<span class="lineno">  620 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">not exists</span></span>
+<span class="lineno">  621 </span><span class="spaces">    </span><span class="istickedoff">then <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  622 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  623 </span><span class="spaces">      </span><span class="istickedoff">existing &lt;- TIO.readFile configPath</span>
+<span class="lineno">  624 </span><span class="spaces">      </span><span class="istickedoff">let sections = T.unlines $ concat</span>
+<span class="lineno">  625 </span><span class="spaces">            </span><span class="istickedoff">[ case mWorkspace of</span>
+<span class="lineno">  626 </span><span class="spaces">                </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  627 </span><span class="spaces">                </span><span class="istickedoff">Just ws -&gt;</span>
+<span class="lineno">  628 </span><span class="spaces">                  </span><span class="istickedoff">[ &quot;&quot;</span>
+<span class="lineno">  629 </span><span class="spaces">                  </span><span class="istickedoff">, &quot;[workspace]&quot;</span>
+<span class="lineno">  630 </span><span class="spaces">                  </span><span class="istickedoff">, &quot;path = &quot; &lt;&gt; quoted (T.pack ws)</span>
+<span class="lineno">  631 </span><span class="spaces">                  </span><span class="istickedoff">]</span>
+<span class="lineno">  632 </span><span class="spaces">            </span><span class="istickedoff">, case mDeviceId of</span>
+<span class="lineno">  633 </span><span class="spaces">                </span><span class="istickedoff">Nothing  -&gt; []</span>
+<span class="lineno">  634 </span><span class="spaces">                </span><span class="istickedoff">Just did -&gt;</span>
+<span class="lineno">  635 </span><span class="spaces">                  </span><span class="istickedoff">[ &quot;&quot;</span>
+<span class="lineno">  636 </span><span class="spaces">                  </span><span class="istickedoff">, &quot;[identity]&quot;</span>
+<span class="lineno">  637 </span><span class="spaces">                  </span><span class="istickedoff">, &quot;device_id = &quot; &lt;&gt; quoted did</span>
+<span class="lineno">  638 </span><span class="spaces">                  </span><span class="istickedoff">]</span>
+<span class="lineno">  639 </span><span class="spaces">            </span><span class="istickedoff">, if null extraWs then []</span>
+<span class="lineno">  640 </span><span class="spaces">              </span><span class="istickedoff">else</span>
+<span class="lineno">  641 </span><span class="spaces">                </span><span class="istickedoff">[ &quot;&quot;</span>
+<span class="lineno">  642 </span><span class="spaces">                </span><span class="istickedoff">, &quot;# Additional OpenClaw workspaces found:&quot;</span>
+<span class="lineno">  643 </span><span class="spaces">                </span><span class="istickedoff">] ++ map (\ws -&gt; &quot;# workspace: &quot; &lt;&gt; T.pack ws) extraWs</span>
+<span class="lineno">  644 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">  645 </span><span class="spaces">      </span><span class="istickedoff">TIO.writeFile configPath (existing &lt;&gt; sections)</span></span>
+
+</pre>
+</body>
+</html>

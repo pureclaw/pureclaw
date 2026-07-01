@@ -1,0 +1,307 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Core.Types
+<span class="lineno">    2 </span>  ( -- * Identity types
+<span class="lineno">    3 </span>    ProviderId (..)
+<span class="lineno">    4 </span>  , ModelId (..)
+<span class="lineno">    5 </span>  , Port (..)
+<span class="lineno">    6 </span>  , UserId (..)
+<span class="lineno">    7 </span>  , CommandName (..)
+<span class="lineno">    8 </span>  , ToolCallId (..)
+<span class="lineno">    9 </span>  , MemoryId (..)
+<span class="lineno">   10 </span>    -- * Session ID
+<span class="lineno">   11 </span>    -- The data constructor 'SessionId' is exported because session IDs are
+<span class="lineno">   12 </span>    -- opaque strings with no validation invariant. 'parseSessionId' is just
+<span class="lineno">   13 </span>    -- the constructor under a friendlier name.
+<span class="lineno">   14 </span>  , SessionId (..)
+<span class="lineno">   15 </span>  , parseSessionId
+<span class="lineno">   16 </span>    -- * Message target
+<span class="lineno">   17 </span>  , MessageTarget (..)
+<span class="lineno">   18 </span>    -- * Message source / origin
+<span class="lineno">   19 </span>  , ChannelKind (..)
+<span class="lineno">   20 </span>  , MessageSource (..)
+<span class="lineno">   21 </span>  , mkMessageSource
+<span class="lineno">   22 </span>  , channelKindToText
+<span class="lineno">   23 </span>  , channelKindFromText
+<span class="lineno">   24 </span>  , maxSourceLen
+<span class="lineno">   25 </span>    -- * Workspace
+<span class="lineno">   26 </span>  , WorkspaceRoot (..)
+<span class="lineno">   27 </span>    -- * Autonomy
+<span class="lineno">   28 </span>  , AutonomyLevel (..)
+<span class="lineno">   29 </span>    -- * Allow-lists
+<span class="lineno">   30 </span>  , AllowList (..)
+<span class="lineno">   31 </span>  , AllowListContext (..)
+<span class="lineno">   32 </span>  , isAllowed
+<span class="lineno">   33 </span>  , allowListOpen
+<span class="lineno">   34 </span>  , allowListWarning
+<span class="lineno">   35 </span>  ) where
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>import Data.Aeson ((.!=), (.:), (.:?), (.=))
+<span class="lineno">   38 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   39 </span>import Data.Char qualified as Char
+<span class="lineno">   40 </span>import Data.Map.Strict (Map)
+<span class="lineno">   41 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   42 </span>import Data.Set (Set)
+<span class="lineno">   43 </span>import Data.Set qualified as Set
+<span class="lineno">   44 </span>import Data.Text (Text)
+<span class="lineno">   45 </span>import Data.Text qualified as T
+<span class="lineno">   46 </span>import GHC.Generics (Generic)
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Provider identifier (e.g. &quot;anthropic&quot;, &quot;openai&quot;)
+<span class="lineno">   49 </span>newtype ProviderId = ProviderId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unProviderId</span></span></span> :: Text }
+<span class="lineno">   50 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>-- | Model identifier (e.g. &quot;claude-3-opus&quot;)
+<span class="lineno">   53 </span>newtype ModelId = ModelId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unModelId</span></span></span> :: Text }
+<span class="lineno">   54 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Network port number
+<span class="lineno">   57 </span>newtype Port = Port { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unPort</span></span></span> :: Int }
+<span class="lineno">   58 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | User identifier for allow-list matching
+<span class="lineno">   61 </span>newtype UserId = UserId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unUserId</span></span></span> :: Text }
+<span class="lineno">   62 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   63 </span>
+<span class="lineno">   64 </span>-- | Command name for policy evaluation (e.g. &quot;git&quot;, &quot;ls&quot;)
+<span class="lineno">   65 </span>newtype CommandName = CommandName { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unCommandName</span></span></span> :: Text }
+<span class="lineno">   66 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>-- | Tool call identifier from provider responses
+<span class="lineno">   69 </span>newtype ToolCallId = ToolCallId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unToolCallId</span></span></span> :: Text }
+<span class="lineno">   70 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | Memory entry identifier
+<span class="lineno">   73 </span>newtype MemoryId = MemoryId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unMemoryId</span></span></span> :: Text }
+<span class="lineno">   74 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | Opaque session identifier. The string format is produced by
+<span class="lineno">   77 </span>-- 'PureClaw.Session.Types.newSessionId' but is not validated on parse —
+<span class="lineno">   78 </span>-- 'SessionId' is treated as an opaque label so that on-disk session
+<span class="lineno">   79 </span>-- directories created by older or newer code remain readable.
+<span class="lineno">   80 </span>newtype SessionId = SessionId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unSessionId</span></span></span> :: Text }
+<span class="lineno">   81 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">   82 </span>  deriving newtype (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON</span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON SessionId</span></span></span></span> where
+<span class="lineno">   85 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;SessionId&quot;</span> (pure . SessionId)</span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>-- | Friendly alias for the 'SessionId' constructor. Provided for
+<span class="lineno">   88 </span>-- symmetry with smart constructors elsewhere; performs no validation.
+<span class="lineno">   89 </span>parseSessionId :: Text -&gt; SessionId
+<span class="lineno">   90 </span><span class="decl"><span class="istickedoff">parseSessionId = SessionId</span></span>
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>-- | Where incoming user messages are routed. Lives in 'Core.Types'
+<span class="lineno">   93 </span>-- (rather than 'PureClaw.Agent.Env') so that 'PureClaw.Session.Types'
+<span class="lineno">   94 </span>-- can refer to it without creating an import cycle through
+<span class="lineno">   95 </span>-- 'PureClaw.Session.Handle'.
+<span class="lineno">   96 </span>data MessageTarget
+<span class="lineno">   97 </span>  = TargetProvider          -- ^ Send to the configured LLM provider + model
+<span class="lineno">   98 </span>  | TargetHarness Text      -- ^ Send to a named running harness
+<span class="lineno">   99 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  100 </span>
+<span class="lineno">  101 </span>-- | The kind of channel a message originated from. Known channels get a
+<span class="lineno">  102 </span>-- typed constructor; 'CkOther' is an open escape hatch for channels that
+<span class="lineno">  103 </span>-- do not (yet) have a dedicated tag.
+<span class="lineno">  104 </span>data ChannelKind
+<span class="lineno">  105 </span>  = CkCli
+<span class="lineno">  106 </span>  | CkWeb
+<span class="lineno">  107 </span>  | CkSignal
+<span class="lineno">  108 </span>  | CkTelegram
+<span class="lineno">  109 </span>  | CkBackground
+<span class="lineno">  110 </span>  | CkOther !Text
+<span class="lineno">  111 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  112 </span>
+<span class="lineno">  113 </span>-- | Render a 'ChannelKind' as a flat lowercase tag. 'CkOther' carries its
+<span class="lineno">  114 </span>-- own name verbatim. Mirrors the @flavourToText@ precedent.
+<span class="lineno">  115 </span>channelKindToText :: ChannelKind -&gt; Text
+<span class="lineno">  116 </span><span class="decl"><span class="istickedoff">channelKindToText CkCli        = &quot;cli&quot;</span>
+<span class="lineno">  117 </span><span class="spaces"></span><span class="istickedoff">channelKindToText CkWeb        = &quot;web&quot;</span>
+<span class="lineno">  118 </span><span class="spaces"></span><span class="istickedoff">channelKindToText CkSignal     = &quot;signal&quot;</span>
+<span class="lineno">  119 </span><span class="spaces"></span><span class="istickedoff">channelKindToText CkTelegram   = &quot;telegram&quot;</span>
+<span class="lineno">  120 </span><span class="spaces"></span><span class="istickedoff">channelKindToText CkBackground = &quot;background&quot;</span>
+<span class="lineno">  121 </span><span class="spaces"></span><span class="istickedoff">channelKindToText (CkOther n)  = n</span></span>
+<span class="lineno">  122 </span>
+<span class="lineno">  123 </span>-- | Parse a flat tag back into a 'ChannelKind'. Known names map to their
+<span class="lineno">  124 </span>-- typed constructor; everything else becomes 'CkOther'. Critically,
+<span class="lineno">  125 </span>-- @&quot;signal&quot;@ maps to 'CkSignal' (never @CkOther &quot;signal&quot;@), so a
+<span class="lineno">  126 </span>-- 'CkOther' naming a known channel cannot round-trip into existence.
+<span class="lineno">  127 </span>channelKindFromText :: Text -&gt; ChannelKind
+<span class="lineno">  128 </span><span class="decl"><span class="istickedoff">channelKindFromText &quot;cli&quot;        = CkCli</span>
+<span class="lineno">  129 </span><span class="spaces"></span><span class="istickedoff">channelKindFromText &quot;web&quot;        = CkWeb</span>
+<span class="lineno">  130 </span><span class="spaces"></span><span class="istickedoff">channelKindFromText &quot;signal&quot;     = CkSignal</span>
+<span class="lineno">  131 </span><span class="spaces"></span><span class="istickedoff">channelKindFromText &quot;telegram&quot;   = CkTelegram</span>
+<span class="lineno">  132 </span><span class="spaces"></span><span class="istickedoff">channelKindFromText &quot;background&quot; = CkBackground</span>
+<span class="lineno">  133 </span><span class="spaces"></span><span class="istickedoff">channelKindFromText t            = CkOther t</span></span>
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON ChannelKind</span></span></span></span></span></span></span></span> where
+<span class="lineno">  136 </span>  <span class="decl"><span class="istickedoff">toJSON = Aeson.String . channelKindToText</span></span>
+<span class="lineno">  137 </span>
+<span class="lineno">  138 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON ChannelKind</span></span></span></span> where
+<span class="lineno">  139 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;ChannelKind&quot;</span> (pure . channelKindFromText)</span></span>
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>-- | Maximum length (in characters) for any attacker-controlled string
+<span class="lineno">  142 </span>-- stored inside a 'MessageSource' after normalization.
+<span class="lineno">  143 </span>maxSourceLen :: Int
+<span class="lineno">  144 </span><span class="decl"><span class="istickedoff">maxSourceLen = 512</span></span>
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>-- | Where an inbound message came from. Structured and extensible: a typed
+<span class="lineno">  147 </span>-- 'ChannelKind', the channel's user id (when one exists), and an open
+<span class="lineno">  148 </span>-- field map for supplementary, channel-specific data (which may carry
+<span class="lineno">  149 </span>-- nested JSON).
+<span class="lineno">  150 </span>--
+<span class="lineno">  151 </span>-- Construct via 'mkMessageSource', never the raw record — the smart
+<span class="lineno">  152 </span>-- constructor normalizes attacker-controlled input.
+<span class="lineno">  153 </span>--
+<span class="lineno">  154 </span>-- Invariants (enforced by convention, not the type): '_ms_fields' must not
+<span class="lineno">  155 </span>-- duplicate '_ms_userId' and must never contain credentials/secrets.
+<span class="lineno">  156 </span>data MessageSource = MessageSource
+<span class="lineno">  157 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ms_channel</span></span></span> :: !ChannelKind
+<span class="lineno">  158 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ms_userId</span></span></span>  :: !(Maybe UserId)
+<span class="lineno">  159 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ms_fields</span></span></span>  :: !(Map Text Aeson.Value)
+<span class="lineno">  160 </span>  } deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>-- | Strip ASCII control characters (covers newlines, tabs, carriage
+<span class="lineno">  163 </span>-- returns and other control bytes) and bound the result to 'maxSourceLen'
+<span class="lineno">  164 </span>-- characters.
+<span class="lineno">  165 </span>normalizeText :: Text -&gt; Text
+<span class="lineno">  166 </span><span class="decl"><span class="istickedoff">normalizeText = T.take maxSourceLen . T.filter (not . Char.isControl)</span></span>
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>-- | Recursively normalize every 'Aeson.String' leaf in a JSON value,
+<span class="lineno">  169 </span>-- leaving the structure otherwise intact.
+<span class="lineno">  170 </span>normalizeValue :: Aeson.Value -&gt; Aeson.Value
+<span class="lineno">  171 </span><span class="decl"><span class="istickedoff">normalizeValue (Aeson.String t) = Aeson.String (normalizeText t)</span>
+<span class="lineno">  172 </span><span class="spaces"></span><span class="istickedoff">normalizeValue (Aeson.Array xs) = Aeson.Array (fmap normalizeValue xs)</span>
+<span class="lineno">  173 </span><span class="spaces"></span><span class="istickedoff">normalizeValue (Aeson.Object o) = Aeson.Object (fmap normalizeValue o)</span>
+<span class="lineno">  174 </span><span class="spaces"></span><span class="istickedoff">normalizeValue v                = v</span></span>
+<span class="lineno">  175 </span>
+<span class="lineno">  176 </span>-- | Smart constructor for 'MessageSource'. Normalizes attacker-controlled
+<span class="lineno">  177 </span>-- input: strips control characters / newlines and bounds length on the
+<span class="lineno">  178 </span>-- user id and on every string leaf inside the field map, and folds a
+<span class="lineno">  179 </span>-- 'CkOther' naming a known channel (e.g. @CkOther &quot;signal&quot;@) down to its
+<span class="lineno">  180 </span>-- typed constructor.
+<span class="lineno">  181 </span>mkMessageSource :: ChannelKind -&gt; Maybe UserId -&gt; Map Text Aeson.Value -&gt; MessageSource
+<span class="lineno">  182 </span><span class="decl"><span class="istickedoff">mkMessageSource ch uid fields = MessageSource</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">{ _ms_channel = foldChannel ch</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">, _ms_userId  = fmap (UserId . normalizeText . unUserId) uid</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">, _ms_fields  = fmap normalizeValue fields</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  188 </span><span class="spaces">    </span><span class="istickedoff">foldChannel (CkOther n) = channelKindFromText n</span>
+<span class="lineno">  189 </span><span class="spaces">    </span><span class="istickedoff">foldChannel c           = c</span></span>
+<span class="lineno">  190 </span>
+<span class="lineno">  191 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON MessageSource</span></span></span></span></span></span></span></span> where
+<span class="lineno">  192 </span>  <span class="decl"><span class="istickedoff">toJSON s = Aeson.object $</span>
+<span class="lineno">  193 </span><span class="spaces">    </span><span class="istickedoff">[&quot;channel&quot; .= _ms_channel s]</span>
+<span class="lineno">  194 </span><span class="spaces">      </span><span class="istickedoff">&lt;&gt; case _ms_userId s of</span>
+<span class="lineno">  195 </span><span class="spaces">        </span><span class="istickedoff">Just u  -&gt; [&quot;user_id&quot; .= unUserId u]</span>
+<span class="lineno">  196 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  197 </span><span class="spaces">      </span><span class="istickedoff">&lt;&gt; [&quot;fields&quot; .= _ms_fields s | not (Map.null (_ms_fields s))]</span></span>
+<span class="lineno">  198 </span>
+<span class="lineno">  199 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON MessageSource</span></span></span></span> where
+<span class="lineno">  200 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;MessageSource&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  201 </span><span class="spaces">    </span><span class="istickedoff">ch     &lt;- o .:  &quot;channel&quot;</span>
+<span class="lineno">  202 </span><span class="spaces">    </span><span class="istickedoff">uid    &lt;- o .:? &quot;user_id&quot;</span>
+<span class="lineno">  203 </span><span class="spaces">    </span><span class="istickedoff">fields &lt;- o .:? &quot;fields&quot; .!= Map.empty</span>
+<span class="lineno">  204 </span><span class="spaces">    </span><span class="istickedoff">pure MessageSource</span>
+<span class="lineno">  205 </span><span class="spaces">      </span><span class="istickedoff">{ _ms_channel = ch</span>
+<span class="lineno">  206 </span><span class="spaces">      </span><span class="istickedoff">, _ms_userId  = fmap UserId uid</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff">, _ms_fields  = fields</span>
+<span class="lineno">  208 </span><span class="spaces">      </span><span class="istickedoff">}</span></span>
+<span class="lineno">  209 </span>
+<span class="lineno">  210 </span>-- | Workspace root directory — anchors all SafePath resolution
+<span class="lineno">  211 </span>newtype WorkspaceRoot = WorkspaceRoot { <span class="istickedoff"><span class="decl"><span class="istickedoff">unWorkspaceRoot</span></span></span> :: FilePath }
+<span class="lineno">  212 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  213 </span>
+<span class="lineno">  214 </span>-- | Agent autonomy level
+<span class="lineno">  215 </span>data AutonomyLevel
+<span class="lineno">  216 </span>  = Full        -- ^ Agent can act without confirmation
+<span class="lineno">  217 </span>  | Supervised  -- ^ Agent must confirm before acting
+<span class="lineno">  218 </span>  | Deny        -- ^ Agent cannot act at all
+<span class="lineno">  219 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  220 </span>
+<span class="lineno">  221 </span>-- | Typed allow-list. @AllowAll@ explicitly opts in to allowing everything.
+<span class="lineno">  222 </span>-- @AllowList s@ restricts to the given set.
+<span class="lineno">  223 </span>data AllowList a
+<span class="lineno">  224 </span>  = AllowAll
+<span class="lineno">  225 </span>  | AllowList (Set a)
+<span class="lineno">  226 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  227 </span>
+<span class="lineno">  228 </span>-- | Check whether a value is permitted by the allow-list.
+<span class="lineno">  229 </span>isAllowed :: Ord a =&gt; AllowList a -&gt; a -&gt; Bool
+<span class="lineno">  230 </span><span class="decl"><span class="istickedoff">isAllowed AllowAll      _ = True</span>
+<span class="lineno">  231 </span><span class="spaces"></span><span class="istickedoff">isAllowed (AllowList s) x = Set.member x s</span></span>
+<span class="lineno">  232 </span>
+<span class="lineno">  233 </span>-- | True when the list permits every sender (no restriction configured).
+<span class="lineno">  234 </span>allowListOpen :: AllowList a -&gt; Bool
+<span class="lineno">  235 </span><span class="decl"><span class="istickedoff">allowListOpen AllowAll      = True</span>
+<span class="lineno">  236 </span><span class="spaces"></span><span class="istickedoff">allowListOpen (AllowList _) = False</span></span>
+<span class="lineno">  237 </span>
+<span class="lineno">  238 </span>-- | Context needed to render an actionable open-allow-list warning. Carries
+<span class="lineno">  239 </span>--   both the human-readable channel name (for prose) and the lowercase TOML
+<span class="lineno">  240 </span>--   table key (for the copy-pasteable config example) so the two never get
+<span class="lineno">  241 </span>--   conflated.
+<span class="lineno">  242 </span>data AllowListContext = AllowListContext
+<span class="lineno">  243 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_alc_channelName</span></span></span> :: Text  -- ^ Human-readable channel name, e.g. &quot;Signal&quot;
+<span class="lineno">  244 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_alc_configTable</span></span></span> :: Text  -- ^ TOML table key, e.g. &quot;signal&quot;
+<span class="lineno">  245 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_alc_exampleId</span></span></span>   :: Text  -- ^ Example allow_from entry, e.g. a Signal user UUID or a numeric Telegram id
+<span class="lineno">  246 </span>  }
+<span class="lineno">  247 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  248 </span>
+<span class="lineno">  249 </span>-- | Banner lines plus a WARN log line describing an OPEN allow-list on the
+<span class="lineno">  250 </span>--   named channel, or Nothing when senders are restricted. Pure.
+<span class="lineno">  251 </span>--
+<span class="lineno">  252 </span>--   When open, the banner is prominent AND actionable: it tells the operator
+<span class="lineno">  253 </span>--   exactly which config file to edit, which (lowercase) TOML table to add an
+<span class="lineno">  254 </span>--   @allow_from@ list under, and shows a concrete copy-pasteable example. The
+<span class="lineno">  255 </span>--   config table key (never the display name) is used everywhere a TOML table
+<span class="lineno">  256 </span>--   is shown.
+<span class="lineno">  257 </span>allowListWarning :: AllowListContext -&gt; AllowList a -&gt; Maybe ([Text], Text)
+<span class="lineno">  258 </span><span class="decl"><span class="istickedoff">allowListWarning ctx al</span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">| not (allowListOpen al) = Nothing</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Just (banner, logLine)</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">name  = _alc_channelName ctx</span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">table = _alc_configTable ctx</span>
+<span class="lineno">  264 </span><span class="spaces">    </span><span class="istickedoff">exId  = _alc_exampleId ctx</span>
+<span class="lineno">  265 </span><span class="spaces">    </span><span class="istickedoff">rule  = T.replicate 64 &quot;=&quot;</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">banner =</span>
+<span class="lineno">  267 </span><span class="spaces">      </span><span class="istickedoff">[ rule</span>
+<span class="lineno">  268 </span><span class="spaces">      </span><span class="istickedoff">, &quot;  SECURITY WARNING: channel \&quot;&quot; &lt;&gt; name &lt;&gt; &quot;\&quot; has NO allow-list configured.&quot;</span>
+<span class="lineno">  269 </span><span class="spaces">      </span><span class="istickedoff">, &quot;  It will accept messages from ANY sender, which is a security risk.&quot;</span>
+<span class="lineno">  270 </span><span class="spaces">      </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  271 </span><span class="spaces">      </span><span class="istickedoff">, &quot;  To restrict who may message this agent, edit your config file:&quot;</span>
+<span class="lineno">  272 </span><span class="spaces">      </span><span class="istickedoff">, &quot;      ~/.pureclaw/config.toml&quot;</span>
+<span class="lineno">  273 </span><span class="spaces">      </span><span class="istickedoff">, &quot;  and add an `allow_from` list under the [&quot; &lt;&gt; table &lt;&gt; &quot;] section, e.g.:&quot;</span>
+<span class="lineno">  274 </span><span class="spaces">      </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  275 </span><span class="spaces">      </span><span class="istickedoff">, &quot;      [&quot; &lt;&gt; table &lt;&gt; &quot;]&quot;</span>
+<span class="lineno">  276 </span><span class="spaces">      </span><span class="istickedoff">, &quot;      allow_from = [\&quot;&quot; &lt;&gt; exId &lt;&gt; &quot;\&quot;]&quot;</span>
+<span class="lineno">  277 </span><span class="spaces">      </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  278 </span><span class="spaces">      </span><span class="istickedoff">, &quot;  List one ID per allowed sender, then restart PureClaw.&quot;</span>
+<span class="lineno">  279 </span><span class="spaces">      </span><span class="istickedoff">, rule</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">]</span>
+<span class="lineno">  281 </span><span class="spaces">    </span><span class="istickedoff">logLine =</span>
+<span class="lineno">  282 </span><span class="spaces">      </span><span class="istickedoff">&quot;channel \&quot;&quot; &lt;&gt; name &lt;&gt; &quot;\&quot; has no allow-list configured; &quot;</span>
+<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; &quot;accepting messages from any sender &quot;</span>
+<span class="lineno">  284 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; &quot;(set allow_from under [&quot; &lt;&gt; table &lt;&gt; &quot;] in config.toml to restrict)&quot;</span></span>
+
+</pre>
+</body>
+</html>

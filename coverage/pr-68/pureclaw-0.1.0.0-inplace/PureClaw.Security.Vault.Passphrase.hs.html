@@ -1,0 +1,92 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Vault.Passphrase
+<span class="lineno">    2 </span>  ( mkPassphraseVaultEncryptor
+<span class="lineno">    3 </span>  ) where
+<span class="lineno">    4 </span>
+<span class="lineno">    5 </span>import Control.Concurrent.STM
+<span class="lineno">    6 </span>import Control.Monad.Trans.Except (runExceptT)
+<span class="lineno">    7 </span>import Crypto.Age (decrypt, encrypt)
+<span class="lineno">    8 </span>import Crypto.Age.Identity (Identity (..), ScryptIdentity (..))
+<span class="lineno">    9 </span>import Crypto.Age.Recipient (Recipients (..), ScryptRecipient (..))
+<span class="lineno">   10 </span>import Crypto.Age.Scrypt (Passphrase (..), WorkFactor, bytesToSalt, mkWorkFactor)
+<span class="lineno">   11 </span>import Crypto.Random (getRandomBytes)
+<span class="lineno">   12 </span>import Data.ByteArray (convert)
+<span class="lineno">   13 </span>import Data.ByteString (ByteString)
+<span class="lineno">   14 </span>import Data.List.NonEmpty (NonEmpty (..))
+<span class="lineno">   15 </span>import Data.Maybe (fromJust)
+<span class="lineno">   16 </span>import Data.Text qualified as T
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import PureClaw.Security.Vault.Age (VaultEncryptor (..), VaultError (..))
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | scrypt work factor (N = 2^22), matching the age CLI default.
+<span class="lineno">   21 </span>ageWorkFactor :: WorkFactor
+<span class="lineno">   22 </span><span class="decl"><span class="istickedoff">ageWorkFactor = fromJust (mkWorkFactor 22)</span></span>
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>-- | Convert a passphrase 'ByteString' to an age 'Passphrase'.
+<span class="lineno">   25 </span>toAgePass :: ByteString -&gt; Passphrase
+<span class="lineno">   26 </span><span class="decl"><span class="istickedoff">toAgePass bs = Passphrase (convert bs)</span></span>
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>-- | Create a passphrase-based vault encryptor using the age encryption format.
+<span class="lineno">   29 </span>-- The resulting ciphertext is a standard age binary file, compatible with
+<span class="lineno">   30 </span>-- @age -d --passphrase@.
+<span class="lineno">   31 </span>-- The IO action is called at most once to obtain the passphrase, then cached.
+<span class="lineno">   32 </span>mkPassphraseVaultEncryptor :: IO ByteString -&gt; IO VaultEncryptor
+<span class="lineno">   33 </span><span class="decl"><span class="istickedoff">mkPassphraseVaultEncryptor getPass = do</span>
+<span class="lineno">   34 </span><span class="spaces">  </span><span class="istickedoff">cache &lt;- newTVarIO Nothing</span>
+<span class="lineno">   35 </span><span class="spaces">  </span><span class="istickedoff">let getOrPrompt = do</span>
+<span class="lineno">   36 </span><span class="spaces">        </span><span class="istickedoff">c &lt;- readTVarIO cache</span>
+<span class="lineno">   37 </span><span class="spaces">        </span><span class="istickedoff">case c of</span>
+<span class="lineno">   38 </span><span class="spaces">          </span><span class="istickedoff">Just p  -&gt; pure p</span>
+<span class="lineno">   39 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">   40 </span><span class="spaces">            </span><span class="istickedoff">p &lt;- getPass</span>
+<span class="lineno">   41 </span><span class="spaces">            </span><span class="istickedoff">atomically (writeTVar cache (Just p))</span>
+<span class="lineno">   42 </span><span class="spaces">            </span><span class="istickedoff">pure p</span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="istickedoff">pure VaultEncryptor</span>
+<span class="lineno">   44 </span><span class="spaces">    </span><span class="istickedoff">{ _ve_encrypt = \plaintext -&gt; do</span>
+<span class="lineno">   45 </span><span class="spaces">        </span><span class="istickedoff">passphrase &lt;- getOrPrompt</span>
+<span class="lineno">   46 </span><span class="spaces">        </span><span class="istickedoff">saltBytes  &lt;- getRandomBytes 16</span>
+<span class="lineno">   47 </span><span class="spaces">        </span><span class="istickedoff">case bytesToSalt saltBytes of</span>
+<span class="lineno">   48 </span><span class="spaces">          </span><span class="istickedoff">Nothing   -&gt; <span class="nottickedoff">pure (Left (VaultCorrupted &quot;salt generation failed&quot;))</span></span>
+<span class="lineno">   49 </span><span class="spaces">          </span><span class="istickedoff">Just salt -&gt; do</span>
+<span class="lineno">   50 </span><span class="spaces">            </span><span class="istickedoff">let recipient = ScryptRecipient</span>
+<span class="lineno">   51 </span><span class="spaces">                  </span><span class="istickedoff">{ srPassphrase  = toAgePass passphrase</span>
+<span class="lineno">   52 </span><span class="spaces">                  </span><span class="istickedoff">, srSalt        = salt</span>
+<span class="lineno">   53 </span><span class="spaces">                  </span><span class="istickedoff">, srWorkFactor  = ageWorkFactor</span>
+<span class="lineno">   54 </span><span class="spaces">                  </span><span class="istickedoff">}</span>
+<span class="lineno">   55 </span><span class="spaces">            </span><span class="istickedoff">result &lt;- runExceptT (encrypt (RecipientsScrypt recipient) plaintext)</span>
+<span class="lineno">   56 </span><span class="spaces">            </span><span class="istickedoff">case result of</span>
+<span class="lineno">   57 </span><span class="spaces">              </span><span class="istickedoff">Left  err -&gt; <span class="nottickedoff">pure (Left (VaultCorrupted (&quot;age encrypt: &quot; &lt;&gt; T.pack (show err))))</span></span>
+<span class="lineno">   58 </span><span class="spaces">              </span><span class="istickedoff">Right ct  -&gt; pure (Right ct)</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="istickedoff">, _ve_decrypt = \ciphertext -&gt; do</span>
+<span class="lineno">   60 </span><span class="spaces">        </span><span class="istickedoff">passphrase &lt;- getOrPrompt</span>
+<span class="lineno">   61 </span><span class="spaces">        </span><span class="istickedoff">let identity   = ScryptIdentity</span>
+<span class="lineno">   62 </span><span class="spaces">              </span><span class="istickedoff">{ siPassphrase    = toAgePass passphrase</span>
+<span class="lineno">   63 </span><span class="spaces">              </span><span class="istickedoff">, siMaxWorkFactor = ageWorkFactor</span>
+<span class="lineno">   64 </span><span class="spaces">              </span><span class="istickedoff">}</span>
+<span class="lineno">   65 </span><span class="spaces">            </span><span class="istickedoff">identities = IdentityScrypt identity :| []</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="istickedoff">case decrypt identities ciphertext of</span>
+<span class="lineno">   67 </span><span class="spaces">          </span><span class="istickedoff">Left  _  -&gt; pure (Left (VaultCorrupted &quot;wrong passphrase&quot;))</span>
+<span class="lineno">   68 </span><span class="spaces">          </span><span class="istickedoff">Right pt -&gt; <span class="nottickedoff">pure (Right pt)</span></span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

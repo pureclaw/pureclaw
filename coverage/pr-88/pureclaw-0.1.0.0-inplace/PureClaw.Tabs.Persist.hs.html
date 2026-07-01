@@ -1,0 +1,390 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tabs.Persist
+<span class="lineno">    3 </span>-- Description : Persist the tab view to @~\/.pureclaw\/state\/tabs.json@.
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- The tab /view/ — the ordered 'TabList', the per-'ConversationKey' cursors,
+<span class="lineno">    6 </span>-- and the per-conversation 'RelayMode' overrides — is machine-local mutable
+<span class="lineno">    7 </span>-- runtime state, kept apart from the version-controllable session\/agent
+<span class="lineno">    8 </span>-- ground truth. It lives under @state\/@ (mode @0700@) as @tabs.json@ (mode
+<span class="lineno">    9 </span>-- @0600@). See the Tabs-as-View design §10 (GitHub #79).
+<span class="lineno">   10 </span>--
+<span class="lineno">   11 </span>-- Codec policy (project convention): the on-disk shape is a __hand-written__
+<span class="lineno">   12 </span>-- Aeson codec, never generic deriving, so the wire format is reviewable and
+<span class="lineno">   13 </span>-- stable. Maps with tuple keys ('ConversationKey') serialize as an /array of
+<span class="lineno">   14 </span>-- objects/ (@{&quot;channel&quot;:…,&quot;conversation&quot;:…,…}@), not as JSON object keys, so
+<span class="lineno">   15 </span>-- the key structure is explicit. A 'TabRef' is a tag-discriminated object
+<span class="lineno">   16 </span>-- (@session@\/@harness@), mirroring the @TerminalBackend@ codec in
+<span class="lineno">   17 </span>-- &quot;PureClaw.Session.Kind&quot;.
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>-- Security (§2): the file stores __no secrets__ — no tokens, API keys,
+<span class="lineno">   20 </span>-- passwords, or absolute filesystem paths. Only tab refs (opaque ids),
+<span class="lineno">   21 </span>-- statuses, channel kinds, conversation ids, cursors, and relay modes.
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- IO seams are injected through 'PersistDeps' so boot reconcile is testable
+<span class="lineno">   24 </span>-- without a real tmux\/harness: liveness probing and the &quot;one discovery pass
+<span class="lineno">   25 </span>-- completed&quot; gate are both functions in the record.
+<span class="lineno">   26 </span>module PureClaw.Tabs.Persist
+<span class="lineno">   27 </span>  ( -- * Injected dependencies
+<span class="lineno">   28 </span>    PersistDeps (..)
+<span class="lineno">   29 </span>    -- * Save \/ load
+<span class="lineno">   30 </span>  , saveTabs
+<span class="lineno">   31 </span>  , loadTabs
+<span class="lineno">   32 </span>  ) where
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>import Control.Exception (SomeException, try)
+<span class="lineno">   35 </span>import Control.Exception qualified as E
+<span class="lineno">   36 </span>import Data.Aeson ((.:), (.=))
+<span class="lineno">   37 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   38 </span>import Data.Aeson.Types qualified as Aeson
+<span class="lineno">   39 </span>import Data.ByteString qualified as BS
+<span class="lineno">   40 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   41 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   42 </span>import Data.Text (Text)
+<span class="lineno">   43 </span>import System.Directory (removeFile)
+<span class="lineno">   44 </span>import System.FilePath ((&lt;/&gt;))
+<span class="lineno">   45 </span>import System.IO qualified as IO
+<span class="lineno">   46 </span>import System.Posix.Files qualified as PF
+<span class="lineno">   47 </span>import System.Posix.Temp qualified as Temp
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>import PureClaw.Core.Types
+<span class="lineno">   50 </span>  ( ConversationId (..)
+<span class="lineno">   51 </span>  , SessionId (..)
+<span class="lineno">   52 </span>  , channelKindFromText
+<span class="lineno">   53 </span>  , channelKindToText
+<span class="lineno">   54 </span>  , isValidSessionId
+<span class="lineno">   55 </span>  )
+<span class="lineno">   56 </span>import PureClaw.Harness.Registry
+<span class="lineno">   57 </span>  ( HarnessId
+<span class="lineno">   58 </span>  , harnessIdToText
+<span class="lineno">   59 </span>  , parseHarnessId
+<span class="lineno">   60 </span>  )
+<span class="lineno">   61 </span>import PureClaw.Security.Path (ensureRuntimeRoot)
+<span class="lineno">   62 </span>import PureClaw.Tabs.Types
+<span class="lineno">   63 </span>  ( ConversationKey
+<span class="lineno">   64 </span>  , CursorState (..)
+<span class="lineno">   65 </span>  , RelayMode (..)
+<span class="lineno">   66 </span>  , Tab (..)
+<span class="lineno">   67 </span>  , TabList
+<span class="lineno">   68 </span>  , TabRef (..)
+<span class="lineno">   69 </span>  , TabStatus (..)
+<span class="lineno">   70 </span>  , appendTab
+<span class="lineno">   71 </span>  , emptyCursors
+<span class="lineno">   72 </span>  , emptyTabs
+<span class="lineno">   73 </span>  , pruneDangling
+<span class="lineno">   74 </span>  , setStatus
+<span class="lineno">   75 </span>  , toList
+<span class="lineno">   76 </span>  )
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   79 </span>-- Injected dependencies
+<span class="lineno">   80 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   81 </span>
+<span class="lineno">   82 </span>-- | The IO seams 'loadTabs' needs, injected so boot reconcile is deterministic
+<span class="lineno">   83 </span>-- in tests (no real tmux\/harness).
+<span class="lineno">   84 </span>data PersistDeps = PersistDeps
+<span class="lineno">   85 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_stateDir</span></span></span>       :: !FilePath
+<span class="lineno">   86 </span>    -- ^ The @state\/@ directory (created @0700@ if missing on save).
+<span class="lineno">   87 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_harnessLive</span></span></span>    :: !(HarnessId -&gt; IO Bool)
+<span class="lineno">   88 </span>    -- ^ Probe whether a harness-backed tab's ground truth is still alive.
+<span class="lineno">   89 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_discoveryReady</span></span></span> :: !(IO ())
+<span class="lineno">   90 </span>    -- ^ Block until at least one harness-discovery\/reconcile pass has
+<span class="lineno">   91 </span>    --   completed, so a transiently-absent live harness is not wrongly
+<span class="lineno">   92 </span>    --   dropped at boot. Awaited /before/ any harness pruning.
+<span class="lineno">   93 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pd_sessionExists</span></span></span>  :: !(SessionId -&gt; IO Bool)
+<span class="lineno">   94 </span>    -- ^ Probe whether a session-backed tab's ground truth still exists on
+<span class="lineno">   95 </span>    --   disk. A 'BoundSession' tab whose session.json has been removed
+<span class="lineno">   96 </span>    --   out-of-band is dropped during reconcile (analogous to the harness
+<span class="lineno">   97 </span>    --   liveness probe for 'BoundHarness' tabs).
+<span class="lineno">   98 </span>  }
+<span class="lineno">   99 </span>
+<span class="lineno">  100 </span>-- | The on-disk file name under '_pd_stateDir'.
+<span class="lineno">  101 </span>tabsFileName :: FilePath
+<span class="lineno">  102 </span><span class="decl"><span class="istickedoff">tabsFileName = &quot;tabs.json&quot;</span></span>
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  105 </span>-- Save
+<span class="lineno">  106 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  107 </span>
+<span class="lineno">  108 </span>-- | Write the tab view to @&lt;stateDir&gt;\/tabs.json@. The @state\/@ directory is
+<span class="lineno">  109 </span>-- created @0700@ if missing (via 'ensureRuntimeRoot').
+<span class="lineno">  110 </span>--
+<span class="lineno">  111 </span>-- Security-by-construction (§2): the file is created @0600@ /atomically/ — the
+<span class="lineno">  112 </span>-- payload is written to a unique temp file in the same directory, created at
+<span class="lineno">  113 </span>-- mode @0600@ by 'mkstemp' (POSIX), then 'rename'd over the target. This
+<span class="lineno">  114 </span>-- avoids both the world-readable window of a write-then-chmod (the file is
+<span class="lineno">  115 </span>-- never momentarily @0644@) and the re-exposure window when overwriting an
+<span class="lineno">  116 </span>-- existing @0600@ file. The same-directory rename is atomic, so a crash mid-
+<span class="lineno">  117 </span>-- write never leaves a torn @tabs.json@; the temp artifact is removed on any
+<span class="lineno">  118 </span>-- failure.
+<span class="lineno">  119 </span>saveTabs :: FilePath -&gt; TabList -&gt; CursorState -&gt; IO ()
+<span class="lineno">  120 </span><span class="decl"><span class="istickedoff">saveTabs stateDir tabs cursors = do</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- ensureRuntimeRoot stateDir</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">let path    = stateDir &lt;/&gt; tabsFileName</span>
+<span class="lineno">  123 </span><span class="spaces">      </span><span class="istickedoff">tmplate = stateDir &lt;/&gt; (tabsFileName &lt;&gt; &quot;.&quot;)</span>
+<span class="lineno">  124 </span><span class="spaces">      </span><span class="istickedoff">payload = BL.toStrict (Aeson.encode (encodeState tabs cursors))</span>
+<span class="lineno">  125 </span><span class="spaces">  </span><span class="istickedoff">E.bracketOnError</span>
+<span class="lineno">  126 </span><span class="spaces">    </span><span class="istickedoff">(Temp.mkstemp tmplate)</span>
+<span class="lineno">  127 </span><span class="spaces">    </span><span class="istickedoff">(uncurry cleanupTemp)</span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="istickedoff">(\(tmpPath, h) -&gt; do</span>
+<span class="lineno">  129 </span><span class="spaces">        </span><span class="istickedoff">BS.hPut h payload</span>
+<span class="lineno">  130 </span><span class="spaces">        </span><span class="istickedoff">IO.hClose h</span>
+<span class="lineno">  131 </span><span class="spaces">        </span><span class="istickedoff">PF.rename tmpPath path)</span></span>
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | Best-effort cleanup of a temp file after a failed save: close the handle
+<span class="lineno">  134 </span>-- and remove the file, swallowing any error so the original failure (e.g. a
+<span class="lineno">  135 </span>-- disk-full write) is the one that propagates.
+<span class="lineno">  136 </span>cleanupTemp :: FilePath -&gt; IO.Handle -&gt; IO ()
+<span class="lineno">  137 </span><span class="decl"><span class="istickedoff">cleanupTemp tmpPath h = do</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="istickedoff">ignore (IO.hClose h)</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">ignore (removeFile tmpPath)</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  141 </span><span class="spaces">    </span><span class="istickedoff">ignore :: IO () -&gt; IO ()</span>
+<span class="lineno">  142 </span><span class="spaces">    </span><span class="istickedoff">ignore act = act `E.catch` <span class="nottickedoff">\(_ :: SomeException) -&gt; pure ()</span></span></span>
+<span class="lineno">  143 </span>
+<span class="lineno">  144 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  145 </span>-- Load
+<span class="lineno">  146 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>-- | Load and reconcile the tab view from @&lt;stateDir&gt;\/tabs.json@:
+<span class="lineno">  149 </span>--
+<span class="lineno">  150 </span>--   1. Read + decode the file. A missing file, an IO error, or any decode
+<span class="lineno">  151 </span>--      failure yields a __fresh__ @('emptyTabs', 'emptyCursors')@ — never an
+<span class="lineno">  152 </span>--      exception (Tabs-as-View design §10.2\/§10.3).
+<span class="lineno">  153 </span>--   2. Await one discovery pass ('_pd_discoveryReady') before pruning.
+<span class="lineno">  154 </span>--   3. Drop harness-backed tabs whose '_pd_harnessLive' reports False
+<span class="lineno">  155 </span>--      (silently — the documented I5 boot-drop exception); provider-session
+<span class="lineno">  156 </span>--      tabs are kept as-is.
+<span class="lineno">  157 </span>--   4. Prune any cursor whose 'TabRef' no longer resolves (I3).
+<span class="lineno">  158 </span>loadTabs :: PersistDeps -&gt; IO (TabList, CursorState)
+<span class="lineno">  159 </span><span class="decl"><span class="istickedoff">loadTabs deps = do</span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">decoded &lt;- readPersisted (_pd_stateDir deps &lt;/&gt; tabsFileName)</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="istickedoff">case decoded of</span>
+<span class="lineno">  162 </span><span class="spaces">    </span><span class="istickedoff">Nothing                -&gt; pure (emptyTabs, emptyCursors)</span>
+<span class="lineno">  163 </span><span class="spaces">    </span><span class="istickedoff">Just (tabs, cursors)   -&gt; do</span>
+<span class="lineno">  164 </span><span class="spaces">      </span><span class="istickedoff">_pd_discoveryReady deps</span>
+<span class="lineno">  165 </span><span class="spaces">      </span><span class="istickedoff">liveTabs &lt;- reconcileTabs deps tabs</span>
+<span class="lineno">  166 </span><span class="spaces">      </span><span class="istickedoff">pure (liveTabs, pruneDangling liveTabs cursors)</span></span>
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>-- | Read and decode the persisted state, returning 'Nothing' on any failure
+<span class="lineno">  169 </span>-- (missing file, IO error, or malformed JSON) so the caller starts fresh.
+<span class="lineno">  170 </span>--
+<span class="lineno">  171 </span>-- The read is __strict__ ('BS.readFile') and the decode strict
+<span class="lineno">  172 </span>-- ('Aeson.eitherDecodeStrict''), both inside the 'try'. Lazy
+<span class="lineno">  173 </span>-- 'Data.ByteString.Lazy.readFile' would defer the actual read syscalls until
+<span class="lineno">  174 </span>-- the bytes are forced by the decoder, /outside/ the guard — a read-time
+<span class="lineno">  175 </span>-- 'IOException' (truncation or removal mid-read, disk @EIO@, a stale NFS
+<span class="lineno">  176 </span>-- handle) would then escape 'loadTabs' and crash boot. Reading and decoding
+<span class="lineno">  177 </span>-- strictly forces every read syscall and the full parse within the guarded
+<span class="lineno">  178 </span>-- scope, so any IO error or decode error degrades to a fresh start.
+<span class="lineno">  179 </span>readPersisted :: FilePath -&gt; IO (Maybe (TabList, CursorState))
+<span class="lineno">  180 </span><span class="decl"><span class="istickedoff">readPersisted path = do</span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try (BS.readFile path) :: IO (Either SomeException BS.ByteString)</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  183 </span><span class="spaces">    </span><span class="istickedoff">Left _    -&gt; pure Nothing</span>
+<span class="lineno">  184 </span><span class="spaces">    </span><span class="istickedoff">Right raw -&gt; case Aeson.eitherDecodeStrict' raw of</span>
+<span class="lineno">  185 </span><span class="spaces">      </span><span class="istickedoff">Left _   -&gt; pure Nothing</span>
+<span class="lineno">  186 </span><span class="spaces">      </span><span class="istickedoff">Right ps -&gt; pure (Just (psTabs ps, psCursors ps))</span></span>
+<span class="lineno">  187 </span>
+<span class="lineno">  188 </span>-- | A tab's persisted content, slot excluded — the slot is always re-derived
+<span class="lineno">  189 </span>-- (I1) by 'rebuildTabs', never trusted from disk.
+<span class="lineno">  190 </span>type TabSpec = (TabRef, TabStatus)
+<span class="lineno">  191 </span>
+<span class="lineno">  192 </span>-- | Project a 'Tab' onto its persisted content (dropping the slot).
+<span class="lineno">  193 </span>tabSpec :: Tab -&gt; TabSpec
+<span class="lineno">  194 </span><span class="decl"><span class="istickedoff">tabSpec t = (_tab_ref t, _tab_status t)</span></span>
+<span class="lineno">  195 </span>
+<span class="lineno">  196 </span>-- | Drop harness-backed tabs whose ground truth is gone. Provider tabs are
+<span class="lineno">  197 </span>-- always retained; the surviving tabs are re-appended in order so the result
+<span class="lineno">  198 </span>-- satisfies I1 (contiguous slots) via 'rebuildTabs'.
+<span class="lineno">  199 </span>reconcileTabs :: PersistDeps -&gt; TabList -&gt; IO TabList
+<span class="lineno">  200 </span><span class="decl"><span class="istickedoff">reconcileTabs deps tabs = do</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">survivors &lt;- filterM keepTab (toList tabs)</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="istickedoff">pure (rebuildTabs (map tabSpec survivors))</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  204 </span><span class="spaces">    </span><span class="istickedoff">keepTab :: Tab -&gt; IO Bool</span>
+<span class="lineno">  205 </span><span class="spaces">    </span><span class="istickedoff">keepTab t = case _tab_ref t of</span>
+<span class="lineno">  206 </span><span class="spaces">      </span><span class="istickedoff">BoundSession s -&gt; _pd_sessionExists deps s</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff">BoundHarness h -&gt; _pd_harnessLive deps h</span></span>
+<span class="lineno">  208 </span>
+<span class="lineno">  209 </span>-- | Re-append a list of tab specs into a fresh 'TabList', stamping contiguous
+<span class="lineno">  210 </span>-- slots (I1) and carrying each tab's original 'TabStatus' through (so a 'Dead'
+<span class="lineno">  211 </span>-- tombstone survives). The input satisfies I2 (unique refs) — for decoded
+<span class="lineno">  212 </span>-- input this is enforced by 'appendTab' itself silently de-duplicating, which
+<span class="lineno">  213 </span>-- is the desired tolerant-load behaviour.
+<span class="lineno">  214 </span>rebuildTabs :: [TabSpec] -&gt; TabList
+<span class="lineno">  215 </span><span class="decl"><span class="istickedoff">rebuildTabs = foldl step emptyTabs</span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  217 </span><span class="spaces">    </span><span class="istickedoff">step tl (ref, status) = case appendTab ref tl of</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">Right (_, tl') -&gt; setStatus ref status tl'</span>
+<span class="lineno">  219 </span><span class="spaces">      </span><span class="istickedoff">Left _         -&gt; tl</span></span>
+<span class="lineno">  220 </span>
+<span class="lineno">  221 </span>-- | A small local 'filterM' to avoid pulling in @Control.Monad@ for one use.
+<span class="lineno">  222 </span>filterM :: Applicative m =&gt; (a -&gt; m Bool) -&gt; [a] -&gt; m [a]
+<span class="lineno">  223 </span><span class="decl"><span class="istickedoff">filterM p = foldr step (pure [])</span>
+<span class="lineno">  224 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="istickedoff">step x acc = (\keep rest -&gt; if keep then x : rest else rest) &lt;$&gt; p x &lt;*&gt; acc</span></span>
+<span class="lineno">  226 </span>
+<span class="lineno">  227 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  228 </span>-- On-disk representation + hand-written codec
+<span class="lineno">  229 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  230 </span>
+<span class="lineno">  231 </span>-- | The decoded on-disk payload.
+<span class="lineno">  232 </span>data PersistedState = PersistedState
+<span class="lineno">  233 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">psTabs</span></span></span>    :: !TabList
+<span class="lineno">  234 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">psCursors</span></span></span> :: !CursorState
+<span class="lineno">  235 </span>  }
+<span class="lineno">  236 </span>
+<span class="lineno">  237 </span>-- | Build the top-level JSON 'Aeson.Value' for the tab view.
+<span class="lineno">  238 </span>encodeState :: TabList -&gt; CursorState -&gt; Aeson.Value
+<span class="lineno">  239 </span><span class="decl"><span class="istickedoff">encodeState tabs cursors =</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="istickedoff">Aeson.object</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;tabs&quot;    .= map encodeTab (toList tabs)</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">, &quot;cursors&quot; .= map encodeCursorEntry (Map.toList (_cs_cursors cursors))</span>
+<span class="lineno">  243 </span><span class="spaces">    </span><span class="istickedoff">, &quot;relay&quot;   .= map encodeRelayEntry (Map.toList (_cs_relay cursors))</span>
+<span class="lineno">  244 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  245 </span>
+<span class="lineno">  246 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON PersistedState</span></span></span></span> where
+<span class="lineno">  247 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;PersistedState&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">tabRows    &lt;- o .: &quot;tabs&quot;</span>
+<span class="lineno">  249 </span><span class="spaces">    </span><span class="istickedoff">cursorRows &lt;- o .: &quot;cursors&quot;</span>
+<span class="lineno">  250 </span><span class="spaces">    </span><span class="istickedoff">relayRows  &lt;- o .: &quot;relay&quot;</span>
+<span class="lineno">  251 </span><span class="spaces">    </span><span class="istickedoff">tabs       &lt;- rebuildTabs &lt;$&gt; traverse parseTab tabRows</span>
+<span class="lineno">  252 </span><span class="spaces">    </span><span class="istickedoff">cursorMap  &lt;- Map.fromList &lt;$&gt; traverse parseCursorEntry cursorRows</span>
+<span class="lineno">  253 </span><span class="spaces">    </span><span class="istickedoff">relayMap   &lt;- Map.fromList &lt;$&gt; traverse parseRelayEntry relayRows</span>
+<span class="lineno">  254 </span><span class="spaces">    </span><span class="istickedoff">pure (PersistedState tabs (CursorState cursorMap relayMap))</span></span>
+<span class="lineno">  255 </span>
+<span class="lineno">  256 </span>-- Tab -----------------------------------------------------------------------
+<span class="lineno">  257 </span>
+<span class="lineno">  258 </span>encodeTab :: Tab -&gt; Aeson.Value
+<span class="lineno">  259 </span><span class="decl"><span class="istickedoff">encodeTab t =</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">Aeson.object</span>
+<span class="lineno">  261 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;ref&quot;    .= encodeRef (_tab_ref t)</span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">, &quot;status&quot; .= statusToText (_tab_status t)</span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  264 </span>
+<span class="lineno">  265 </span>-- | Parse a tab row into a slot-less 'TabSpec'; the slot is re-derived on load
+<span class="lineno">  266 </span>-- (I1) by 'rebuildTabs', never read from disk.
+<span class="lineno">  267 </span>--
+<span class="lineno">  268 </span>-- Back-compat: a legacy @tabs.json@ may carry a per-tab @&quot;name&quot;@ key (tabs no
+<span class="lineno">  269 </span>-- longer have their own label — the title derives from the bound session). The
+<span class="lineno">  270 </span>-- key is ignored on load; Aeson tolerates the extra field, so older files keep
+<span class="lineno">  271 </span>-- loading and re-encode without it.
+<span class="lineno">  272 </span>parseTab :: Aeson.Value -&gt; Aeson.Parser TabSpec
+<span class="lineno">  273 </span><span class="decl"><span class="istickedoff">parseTab = Aeson.withObject <span class="nottickedoff">&quot;Tab&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  274 </span><span class="spaces">  </span><span class="istickedoff">ref    &lt;- o .: &quot;ref&quot; &gt;&gt;= parseRef</span>
+<span class="lineno">  275 </span><span class="spaces">  </span><span class="istickedoff">status &lt;- o .: &quot;status&quot; &gt;&gt;= statusFromText</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">pure (ref, status)</span></span>
+<span class="lineno">  277 </span>
+<span class="lineno">  278 </span>-- TabRef --------------------------------------------------------------------
+<span class="lineno">  279 </span>
+<span class="lineno">  280 </span>encodeRef :: TabRef -&gt; Aeson.Value
+<span class="lineno">  281 </span><span class="decl"><span class="istickedoff">encodeRef (BoundSession (SessionId s)) =</span>
+<span class="lineno">  282 </span><span class="spaces">  </span><span class="istickedoff">Aeson.object [&quot;tag&quot; .= (&quot;session&quot; :: Text), &quot;sessionId&quot; .= s]</span>
+<span class="lineno">  283 </span><span class="spaces"></span><span class="istickedoff">encodeRef (BoundHarness h) =</span>
+<span class="lineno">  284 </span><span class="spaces">  </span><span class="istickedoff">Aeson.object [&quot;tag&quot; .= (&quot;harness&quot; :: Text), &quot;harnessId&quot; .= harnessIdToText h]</span></span>
+<span class="lineno">  285 </span>
+<span class="lineno">  286 </span>parseRef :: Aeson.Value -&gt; Aeson.Parser TabRef
+<span class="lineno">  287 </span><span class="decl"><span class="istickedoff">parseRef = Aeson.withObject <span class="nottickedoff">&quot;TabRef&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  288 </span><span class="spaces">  </span><span class="istickedoff">tag &lt;- o .: &quot;tag&quot; :: Aeson.Parser Text</span>
+<span class="lineno">  289 </span><span class="spaces">  </span><span class="istickedoff">case tag of</span>
+<span class="lineno">  290 </span><span class="spaces">    </span><span class="istickedoff">&quot;session&quot; -&gt; do</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">raw &lt;- o .: &quot;sessionId&quot;</span>
+<span class="lineno">  292 </span><span class="spaces">      </span><span class="istickedoff">if isValidSessionId raw</span>
+<span class="lineno">  293 </span><span class="spaces">        </span><span class="istickedoff">then pure (BoundSession (SessionId raw))</span>
+<span class="lineno">  294 </span><span class="spaces">        </span><span class="istickedoff">else fail <span class="nottickedoff">&quot;invalid sessionId in tabs.json&quot;</span></span>
+<span class="lineno">  295 </span><span class="spaces">    </span><span class="istickedoff">&quot;harness&quot; -&gt; do</span>
+<span class="lineno">  296 </span><span class="spaces">      </span><span class="istickedoff">raw &lt;- o .: &quot;harnessId&quot;</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">case parseHarnessId raw of</span>
+<span class="lineno">  298 </span><span class="spaces">        </span><span class="istickedoff">Just h  -&gt; pure (BoundHarness h)</span>
+<span class="lineno">  299 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; fail <span class="nottickedoff">&quot;invalid harnessId in tabs.json&quot;</span></span>
+<span class="lineno">  300 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; fail <span class="nottickedoff">&quot;unknown TabRef tag&quot;</span></span></span>
+<span class="lineno">  301 </span>
+<span class="lineno">  302 </span>-- TabStatus -----------------------------------------------------------------
+<span class="lineno">  303 </span>
+<span class="lineno">  304 </span>statusToText :: TabStatus -&gt; Text
+<span class="lineno">  305 </span><span class="decl"><span class="istickedoff">statusToText Live = &quot;live&quot;</span>
+<span class="lineno">  306 </span><span class="spaces"></span><span class="istickedoff">statusToText Dead = &quot;dead&quot;</span></span>
+<span class="lineno">  307 </span>
+<span class="lineno">  308 </span>statusFromText :: Text -&gt; Aeson.Parser TabStatus
+<span class="lineno">  309 </span><span class="decl"><span class="istickedoff">statusFromText &quot;live&quot; = pure Live</span>
+<span class="lineno">  310 </span><span class="spaces"></span><span class="istickedoff">statusFromText &quot;dead&quot; = pure Dead</span>
+<span class="lineno">  311 </span><span class="spaces"></span><span class="istickedoff">statusFromText _      = fail <span class="nottickedoff">&quot;unknown tab status&quot;</span></span></span>
+<span class="lineno">  312 </span>
+<span class="lineno">  313 </span>-- Cursor entry --------------------------------------------------------------
+<span class="lineno">  314 </span>
+<span class="lineno">  315 </span>encodeCursorEntry :: (ConversationKey, TabRef) -&gt; Aeson.Value
+<span class="lineno">  316 </span><span class="decl"><span class="istickedoff">encodeCursorEntry ((ch, conv), ref) =</span>
+<span class="lineno">  317 </span><span class="spaces">  </span><span class="istickedoff">Aeson.object</span>
+<span class="lineno">  318 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;channel&quot;      .= channelKindToText ch</span>
+<span class="lineno">  319 </span><span class="spaces">    </span><span class="istickedoff">, &quot;conversation&quot; .= conversationIdToText conv</span>
+<span class="lineno">  320 </span><span class="spaces">    </span><span class="istickedoff">, &quot;ref&quot;          .= encodeRef ref</span>
+<span class="lineno">  321 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  322 </span>
+<span class="lineno">  323 </span>parseCursorEntry :: Aeson.Value -&gt; Aeson.Parser (ConversationKey, TabRef)
+<span class="lineno">  324 </span><span class="decl"><span class="istickedoff">parseCursorEntry = Aeson.withObject <span class="nottickedoff">&quot;CursorEntry&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  325 </span><span class="spaces">  </span><span class="istickedoff">key &lt;- parseKey o</span>
+<span class="lineno">  326 </span><span class="spaces">  </span><span class="istickedoff">ref &lt;- o .: &quot;ref&quot; &gt;&gt;= parseRef</span>
+<span class="lineno">  327 </span><span class="spaces">  </span><span class="istickedoff">pure (key, ref)</span></span>
+<span class="lineno">  328 </span>
+<span class="lineno">  329 </span>-- Relay entry ---------------------------------------------------------------
+<span class="lineno">  330 </span>
+<span class="lineno">  331 </span>encodeRelayEntry :: (ConversationKey, RelayMode) -&gt; Aeson.Value
+<span class="lineno">  332 </span><span class="decl"><span class="istickedoff">encodeRelayEntry ((ch, conv), mode) =</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">Aeson.object</span>
+<span class="lineno">  334 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;channel&quot;      .= channelKindToText ch</span>
+<span class="lineno">  335 </span><span class="spaces">    </span><span class="istickedoff">, &quot;conversation&quot; .= conversationIdToText conv</span>
+<span class="lineno">  336 </span><span class="spaces">    </span><span class="istickedoff">, &quot;mode&quot;         .= relayModeToText mode</span>
+<span class="lineno">  337 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  338 </span>
+<span class="lineno">  339 </span>parseRelayEntry :: Aeson.Value -&gt; Aeson.Parser (ConversationKey, RelayMode)
+<span class="lineno">  340 </span><span class="decl"><span class="istickedoff">parseRelayEntry = Aeson.withObject <span class="nottickedoff">&quot;RelayEntry&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  341 </span><span class="spaces">  </span><span class="istickedoff">key  &lt;- parseKey o</span>
+<span class="lineno">  342 </span><span class="spaces">  </span><span class="istickedoff">mode &lt;- o .: &quot;mode&quot; &gt;&gt;= relayModeFromText</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="istickedoff">pure (key, mode)</span></span>
+<span class="lineno">  344 </span>
+<span class="lineno">  345 </span>-- ConversationKey -----------------------------------------------------------
+<span class="lineno">  346 </span>
+<span class="lineno">  347 </span>parseKey :: Aeson.Object -&gt; Aeson.Parser ConversationKey
+<span class="lineno">  348 </span><span class="decl"><span class="istickedoff">parseKey o = do</span>
+<span class="lineno">  349 </span><span class="spaces">  </span><span class="istickedoff">ch   &lt;- channelKindFromText &lt;$&gt; o .: &quot;channel&quot;</span>
+<span class="lineno">  350 </span><span class="spaces">  </span><span class="istickedoff">conv &lt;- ConversationId &lt;$&gt; o .: &quot;conversation&quot;</span>
+<span class="lineno">  351 </span><span class="spaces">  </span><span class="istickedoff">pure (ch, conv)</span></span>
+<span class="lineno">  352 </span>
+<span class="lineno">  353 </span>conversationIdToText :: ConversationId -&gt; Text
+<span class="lineno">  354 </span><span class="decl"><span class="istickedoff">conversationIdToText (ConversationId t) = t</span></span>
+<span class="lineno">  355 </span>
+<span class="lineno">  356 </span>-- RelayMode -----------------------------------------------------------------
+<span class="lineno">  357 </span>
+<span class="lineno">  358 </span>relayModeToText :: RelayMode -&gt; Text
+<span class="lineno">  359 </span><span class="decl"><span class="istickedoff">relayModeToText FocusedOnly    = &quot;focused&quot;</span>
+<span class="lineno">  360 </span><span class="spaces"></span><span class="istickedoff">relayModeToText ActivityDigest = &quot;activity&quot;</span>
+<span class="lineno">  361 </span><span class="spaces"></span><span class="istickedoff">relayModeToText Firehose       = &quot;firehose&quot;</span></span>
+<span class="lineno">  362 </span>
+<span class="lineno">  363 </span>relayModeFromText :: Text -&gt; Aeson.Parser RelayMode
+<span class="lineno">  364 </span><span class="decl"><span class="istickedoff">relayModeFromText &quot;focused&quot;  = pure FocusedOnly</span>
+<span class="lineno">  365 </span><span class="spaces"></span><span class="istickedoff">relayModeFromText &quot;activity&quot; = pure ActivityDigest</span>
+<span class="lineno">  366 </span><span class="spaces"></span><span class="istickedoff">relayModeFromText &quot;firehose&quot; = pure Firehose</span>
+<span class="lineno">  367 </span><span class="spaces"></span><span class="istickedoff">relayModeFromText _          = fail <span class="nottickedoff">&quot;unknown relay mode&quot;</span></span></span>
+
+</pre>
+</body>
+</html>

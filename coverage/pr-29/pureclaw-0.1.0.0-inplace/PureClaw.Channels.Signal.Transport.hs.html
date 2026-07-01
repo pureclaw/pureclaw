@@ -1,0 +1,138 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Channels.Signal.Transport
+<span class="lineno">    2 </span>  ( -- * Transport handle (testability seam for signal-cli)
+<span class="lineno">    3 </span>    SignalTransport (..)
+<span class="lineno">    4 </span>    -- * Real implementation
+<span class="lineno">    5 </span>  , mkSignalCliTransport
+<span class="lineno">    6 </span>    -- * Mock implementation (for tests)
+<span class="lineno">    7 </span>  , mkMockSignalTransport
+<span class="lineno">    8 </span>    -- * Message chunking
+<span class="lineno">    9 </span>  , chunkMessage
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Concurrent.STM
+<span class="lineno">   13 </span>import Data.Aeson
+<span class="lineno">   14 </span>import Data.ByteString.Char8 qualified as BS8
+<span class="lineno">   15 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   16 </span>import Data.IORef
+<span class="lineno">   17 </span>import Data.Text (Text)
+<span class="lineno">   18 </span>import Data.Text qualified as T
+<span class="lineno">   19 </span>import System.IO
+<span class="lineno">   20 </span>import System.Process.Typed qualified as P
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>import PureClaw.Handles.Log
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>-- | Transport abstraction over signal-cli. The real implementation spawns
+<span class="lineno">   25 </span>-- signal-cli as a child process and communicates via JSON-RPC over stdio.
+<span class="lineno">   26 </span>-- The mock implementation uses in-memory queues for testing.
+<span class="lineno">   27 </span>data SignalTransport = SignalTransport
+<span class="lineno">   28 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_receive</span></span></span> :: IO Value
+<span class="lineno">   29 </span>    -- ^ Block until a JSON-RPC message arrives from signal-cli
+<span class="lineno">   30 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_send</span></span></span>    :: Text -&gt; Text -&gt; IO ()
+<span class="lineno">   31 </span>    -- ^ Send a message: recipient (E.164) -&gt; body -&gt; IO ()
+<span class="lineno">   32 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_close</span></span></span>   :: IO ()
+<span class="lineno">   33 </span>    -- ^ Shut down the transport (kill signal-cli, close handles)
+<span class="lineno">   34 </span>  }
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>-- | Create a real transport that spawns @signal-cli jsonRpc@ as a child process.
+<span class="lineno">   37 </span>-- The process runs for the lifetime of the transport. Call '_st_close' to shut down.
+<span class="lineno">   38 </span>mkSignalCliTransport :: Text -&gt; LogHandle -&gt; IO SignalTransport
+<span class="lineno">   39 </span><span class="decl"><span class="nottickedoff">mkSignalCliTransport account logger = do</span>
+<span class="lineno">   40 </span><span class="spaces">  </span><span class="nottickedoff">let config = P.setStdin P.createPipe</span>
+<span class="lineno">   41 </span><span class="spaces">             </span><span class="nottickedoff">$ P.setStdout P.createPipe</span>
+<span class="lineno">   42 </span><span class="spaces">             </span><span class="nottickedoff">$ P.setStderr P.inherit</span>
+<span class="lineno">   43 </span><span class="spaces">             </span><span class="nottickedoff">$ P.proc &quot;signal-cli&quot;</span>
+<span class="lineno">   44 </span><span class="spaces">                 </span><span class="nottickedoff">[ &quot;--output=json&quot;</span>
+<span class="lineno">   45 </span><span class="spaces">                 </span><span class="nottickedoff">, &quot;--trust-new-identities=always&quot;</span>
+<span class="lineno">   46 </span><span class="spaces">                 </span><span class="nottickedoff">, &quot;-u&quot;, T.unpack account</span>
+<span class="lineno">   47 </span><span class="spaces">                 </span><span class="nottickedoff">, &quot;jsonRpc&quot;</span>
+<span class="lineno">   48 </span><span class="spaces">                 </span><span class="nottickedoff">]</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="nottickedoff">process &lt;- P.startProcess config</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="nottickedoff">let stdinH  = P.getStdin process</span>
+<span class="lineno">   51 </span><span class="spaces">      </span><span class="nottickedoff">stdoutH = P.getStdout process</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="nottickedoff">hSetBuffering stdinH LineBuffering</span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="nottickedoff">hSetBuffering stdoutH LineBuffering</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="nottickedoff">_lh_logInfo logger $ &quot;signal-cli started for account &quot; &lt;&gt; account</span>
+<span class="lineno">   55 </span><span class="spaces">  </span><span class="nottickedoff">reqIdRef &lt;- newIORef (0 :: Int)</span>
+<span class="lineno">   56 </span><span class="spaces">  </span><span class="nottickedoff">let recvLoop = do</span>
+<span class="lineno">   57 </span><span class="spaces">        </span><span class="nottickedoff">line &lt;- BS8.hGetLine stdoutH</span>
+<span class="lineno">   58 </span><span class="spaces">        </span><span class="nottickedoff">case eitherDecode (BL.fromStrict line) of</span>
+<span class="lineno">   59 </span><span class="spaces">          </span><span class="nottickedoff">Left err -&gt; do</span>
+<span class="lineno">   60 </span><span class="spaces">            </span><span class="nottickedoff">_lh_logWarn logger $ &quot;signal-cli parse error: &quot; &lt;&gt; T.pack err</span>
+<span class="lineno">   61 </span><span class="spaces">            </span><span class="nottickedoff">recvLoop  -- Skip unparseable lines and try again</span>
+<span class="lineno">   62 </span><span class="spaces">          </span><span class="nottickedoff">Right val -&gt; pure val</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="nottickedoff">pure SignalTransport</span>
+<span class="lineno">   64 </span><span class="spaces">    </span><span class="nottickedoff">{ _st_receive = recvLoop</span>
+<span class="lineno">   65 </span><span class="spaces">    </span><span class="nottickedoff">, _st_send = \recipient body -&gt; do</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="nottickedoff">reqId &lt;- atomicModifyIORef' reqIdRef (\n -&gt; (n + 1, n + 1))</span>
+<span class="lineno">   67 </span><span class="spaces">        </span><span class="nottickedoff">let rpcMsg = object</span>
+<span class="lineno">   68 </span><span class="spaces">              </span><span class="nottickedoff">[ &quot;jsonrpc&quot; .= (&quot;2.0&quot; :: Text)</span>
+<span class="lineno">   69 </span><span class="spaces">              </span><span class="nottickedoff">, &quot;method&quot;  .= (&quot;send&quot; :: Text)</span>
+<span class="lineno">   70 </span><span class="spaces">              </span><span class="nottickedoff">, &quot;id&quot;      .= show reqId</span>
+<span class="lineno">   71 </span><span class="spaces">              </span><span class="nottickedoff">, &quot;params&quot;  .= object</span>
+<span class="lineno">   72 </span><span class="spaces">                  </span><span class="nottickedoff">[ &quot;recipient&quot; .= [recipient]</span>
+<span class="lineno">   73 </span><span class="spaces">                  </span><span class="nottickedoff">, &quot;message&quot;   .= body</span>
+<span class="lineno">   74 </span><span class="spaces">                  </span><span class="nottickedoff">]</span>
+<span class="lineno">   75 </span><span class="spaces">              </span><span class="nottickedoff">]</span>
+<span class="lineno">   76 </span><span class="spaces">        </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Signal send to &quot; &lt;&gt; recipient &lt;&gt; &quot; (&quot; &lt;&gt; T.pack (show (T.length body)) &lt;&gt; &quot; chars)&quot;</span>
+<span class="lineno">   77 </span><span class="spaces">        </span><span class="nottickedoff">BL.hPut stdinH (encode rpcMsg &lt;&gt; &quot;\n&quot;)</span>
+<span class="lineno">   78 </span><span class="spaces">        </span><span class="nottickedoff">hFlush stdinH</span>
+<span class="lineno">   79 </span><span class="spaces">    </span><span class="nottickedoff">, _st_close = do</span>
+<span class="lineno">   80 </span><span class="spaces">        </span><span class="nottickedoff">_lh_logInfo logger &quot;Stopping signal-cli...&quot;</span>
+<span class="lineno">   81 </span><span class="spaces">        </span><span class="nottickedoff">P.stopProcess process</span>
+<span class="lineno">   82 </span><span class="spaces">    </span><span class="nottickedoff">}</span></span>
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>-- | Create a mock transport backed by in-memory queues. Used in tests.
+<span class="lineno">   85 </span>mkMockSignalTransport
+<span class="lineno">   86 </span>  :: TQueue Value         -- ^ Incoming messages (simulates signal-cli stdout)
+<span class="lineno">   87 </span>  -&gt; TQueue (Text, Text)  -- ^ Outgoing messages (recipient, body) for assertions
+<span class="lineno">   88 </span>  -&gt; SignalTransport
+<span class="lineno">   89 </span><span class="decl"><span class="istickedoff">mkMockSignalTransport inQueue outQueue = SignalTransport</span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="istickedoff">{ _st_receive = atomically $ readTQueue inQueue</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">, _st_send    = \recipient body -&gt;</span>
+<span class="lineno">   92 </span><span class="spaces">      </span><span class="istickedoff">atomically $ writeTQueue outQueue (recipient, body)</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">, _st_close   = pure ()</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- | Split a long message into chunks that fit within a character limit,
+<span class="lineno">   97 </span>-- breaking on paragraph boundaries (double newline) where possible.
+<span class="lineno">   98 </span>chunkMessage :: Int -&gt; Text -&gt; [Text]
+<span class="lineno">   99 </span><span class="decl"><span class="istickedoff">chunkMessage limit text</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">| T.length text &lt;= limit = [text]</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = go text</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">go remaining</span>
+<span class="lineno">  104 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlyfalse">T.null remaining</span> = <span class="nottickedoff">[]</span></span>
+<span class="lineno">  105 </span><span class="spaces">      </span><span class="istickedoff">| T.length remaining &lt;= limit = [remaining]</span>
+<span class="lineno">  106 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  107 </span><span class="spaces">          </span><span class="istickedoff">let candidate = T.take limit remaining</span>
+<span class="lineno">  108 </span><span class="spaces">              </span><span class="istickedoff">-- Try to break at a paragraph boundary</span>
+<span class="lineno">  109 </span><span class="spaces">              </span><span class="istickedoff">breakPoint = case T.breakOnAll &quot;\n\n&quot; candidate of</span>
+<span class="lineno">  110 </span><span class="spaces">                </span><span class="istickedoff">[] -&gt; case T.breakOnAll &quot;\n&quot; candidate of</span>
+<span class="lineno">  111 </span><span class="spaces">                  </span><span class="istickedoff">[] -&gt; limit  -- no good break point, hard cut</span>
+<span class="lineno">  112 </span><span class="spaces">                  </span><span class="istickedoff">breaks -&gt; T.length (fst (last breaks)) + 1</span>
+<span class="lineno">  113 </span><span class="spaces">                </span><span class="istickedoff">breaks -&gt; T.length (fst (last breaks)) + 2</span>
+<span class="lineno">  114 </span><span class="spaces">              </span><span class="istickedoff">(chunk, rest) = T.splitAt breakPoint remaining</span>
+<span class="lineno">  115 </span><span class="spaces">          </span><span class="istickedoff">in T.stripEnd chunk : go (T.stripStart rest)</span></span>
+
+</pre>
+</body>
+</html>

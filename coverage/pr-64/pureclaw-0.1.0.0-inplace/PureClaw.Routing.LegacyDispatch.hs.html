@@ -1,0 +1,118 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.LegacyDispatch
+<span class="lineno">    3 </span>-- Description : Bridge from the legacy single-tab CLI loop into Routing.AutoSpawn.
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- The new tabbed-chat dispatcher ('PureClaw.Routing.Dispatcher.runDispatcher')
+<span class="lineno">    6 </span>-- is not yet wired as the production CLI entry point. Users running
+<span class="lineno">    7 </span>-- 'PureClaw.Agent.Loop.runAgentLoop' (the legacy single-tab loop) need
+<span class="lineno">    8 </span>-- @\/tab*@ commands to actually DO something — without this module they
+<span class="lineno">    9 </span>-- hit the @CmdTab _@ fallback in 'executeSlashCommand' which only
+<span class="lineno">   10 </span>-- emits a stub message.
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>-- 'dispatchLegacyTabCmd' is the bridge: it receives a parsed
+<span class="lineno">   13 </span>-- 'TabSlashCommand' and invokes the matching 'PureClaw.Routing.AutoSpawn'
+<span class="lineno">   14 </span>-- handler against the existing 'AgentEnv'. Handler callbacks are wired
+<span class="lineno">   15 </span>-- with the minimum surface needed for legacy mode:
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>--   * 'BannerEmit' — direct @_ch_send@ to the user's channel.
+<span class="lineno">   18 </span>--   * 'PromptRenderer' — built from the channel's streaming flag via
+<span class="lineno">   19 </span>--     'mkDefaultPromptRenderer'.
+<span class="lineno">   20 </span>--   * 'SpawnArgs' map — a fresh empty 'IORef' per dispatch. Legacy mode
+<span class="lineno">   21 </span>--     does not implement the X1 crashed-tab retry UX, so per-call
+<span class="lineno">   22 </span>--     ephemerality is fine.
+<span class="lineno">   23 </span>--   * 'RenumberCallback' — no-op (no DispatcherState to keep in sync).
+<span class="lineno">   24 </span>--   * Sanitize callback — 'PureClaw.Routing.Parse.sanitizeTabName'.
+<span class="lineno">   25 </span>--   * 'TabFactory' — dispatches by 'TabKind' to the real
+<span class="lineno">   26 </span>--     'PureClaw.Tab.Ai.mkTabAi' \/ 'Tab.Harness.mkTabHarness' \/
+<span class="lineno">   27 </span>--     'Tab.Backend.mkTabBackend' factories (all 3-arg variants that
+<span class="lineno">   28 </span>--     take 'AgentEnv').
+<span class="lineno">   29 </span>--
+<span class="lineno">   30 </span>-- @\/tab resume@ requires 'DispatcherState' (session resolver +
+<span class="lineno">   31 </span>-- pending-retry tracking) that legacy mode lacks; this dispatch emits
+<span class="lineno">   32 </span>-- a &quot;not available in legacy mode&quot; message rather than crashing.
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- This module sits ABOVE 'PureClaw.Agent.SlashCommands' (for the
+<span class="lineno">   35 </span>-- 'TabSlashCommand' ADT) and ABOVE 'PureClaw.Routing.AutoSpawn' (for
+<span class="lineno">   36 </span>-- the handlers), so it can import both freely. Conversely it must NOT
+<span class="lineno">   37 </span>-- be imported from 'Agent.SlashCommands' (would create a cycle through
+<span class="lineno">   38 </span>-- 'AutoSpawn' which already imports 'SlashCommands').
+<span class="lineno">   39 </span>module PureClaw.Routing.LegacyDispatch
+<span class="lineno">   40 </span>  ( dispatchLegacyTabCmd
+<span class="lineno">   41 </span>  ) where
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>import Data.IORef
+<span class="lineno">   44 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   45 </span>import Data.Text (Text)
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>import PureClaw.Agent.Env (AgentEnv (..))
+<span class="lineno">   48 </span>import PureClaw.Agent.SlashCommands (ForceMode (..), TabSlashCommand (..))
+<span class="lineno">   49 </span>import PureClaw.Handles.Channel (ChannelHandle (..), OutgoingMessage (..))
+<span class="lineno">   50 </span>import PureClaw.Routing.AutoSpawn qualified as AutoSpawn
+<span class="lineno">   51 </span>import PureClaw.Routing.Dispatcher qualified as Dispatcher
+<span class="lineno">   52 </span>import PureClaw.Routing.Parse qualified as Parse
+<span class="lineno">   53 </span>import PureClaw.Routing.PromptRenderer (mkDefaultPromptRenderer)
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Dispatch a 'TabSlashCommand' from the legacy CLI loop into the
+<span class="lineno">   57 </span>-- 'Routing.AutoSpawn' handler surface.
+<span class="lineno">   58 </span>--
+<span class="lineno">   59 </span>-- All output reaches the user via @_ch_send@; the caller does not need
+<span class="lineno">   60 </span>-- to consume any return value (handlers are 'IO ()').
+<span class="lineno">   61 </span>dispatchLegacyTabCmd :: AgentEnv -&gt; TabSlashCommand -&gt; IO ()
+<span class="lineno">   62 </span><span class="decl"><span class="istickedoff">dispatchLegacyTabCmd env tabCmd = do</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">let emit     = legacyEmit env</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">renderer = mkDefaultPromptRenderer (_env_channel env)</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">argsRef &lt;- newIORef <span class="nottickedoff">(Map.empty :: Map.Map Int AutoSpawn.SpawnArgs)</span></span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">case tabCmd of</span>
+<span class="lineno">   67 </span><span class="spaces">    </span><span class="istickedoff">TabListCmd -&gt;</span>
+<span class="lineno">   68 </span><span class="spaces">      </span><span class="istickedoff">AutoSpawn.handleListTabs env emit</span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">TabFocusCmd rawIdx -&gt;</span>
+<span class="lineno">   70 </span><span class="spaces">      </span><span class="istickedoff">AutoSpawn.handleFocus env emit rawIdx</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">TabCloseCmd rawIdx force -&gt;</span>
+<span class="lineno">   72 </span><span class="spaces">      </span><span class="istickedoff">AutoSpawn.handleClose env emit <span class="nottickedoff">argsRef</span> <span class="nottickedoff">noRenumber</span> rawIdx</span>
+<span class="lineno">   73 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">(force == ForceYes)</span></span>
+<span class="lineno">   74 </span><span class="spaces">    </span><span class="istickedoff">TabRenameCmd rawIdx rawName -&gt;</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="istickedoff">AutoSpawn.handleRename env emit <span class="nottickedoff">Parse.sanitizeTabName</span> rawIdx <span class="nottickedoff">rawName</span></span>
+<span class="lineno">   76 </span><span class="spaces">    </span><span class="istickedoff">TabNewCmd mKind mArgs -&gt;</span>
+<span class="lineno">   77 </span><span class="spaces">      </span><span class="istickedoff">AutoSpawn.handleNew env renderer (Dispatcher.spawnTab env)</span>
+<span class="lineno">   78 </span><span class="spaces">                          </span><span class="istickedoff">emit <span class="nottickedoff">argsRef</span> mKind mArgs</span>
+<span class="lineno">   79 </span><span class="spaces">    </span><span class="istickedoff">TabResumeCmd _sid -&gt;</span>
+<span class="lineno">   80 </span><span class="spaces">      </span><span class="istickedoff">emit</span>
+<span class="lineno">   81 </span><span class="spaces">        </span><span class="istickedoff">&quot;Tab resume requires the tabbed-chat dispatcher\</span>
+<span class="lineno">   82 </span><span class="spaces">        </span><span class="istickedoff">\ — not yet wired in the legacy CLI loop.&quot;</span></span>
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>-- | The 'BannerEmit' callback used by every handler — directly emits via
+<span class="lineno">   85 </span>-- @_ch_send@.
+<span class="lineno">   86 </span>legacyEmit :: AgentEnv -&gt; Text -&gt; IO ()
+<span class="lineno">   87 </span><span class="decl"><span class="istickedoff">legacyEmit env text =</span>
+<span class="lineno">   88 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage text)</span></span>
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>-- | Renumber callback — no-op for legacy mode. Legacy has no
+<span class="lineno">   91 </span>-- 'DispatcherState', so the pending-retry / spawn-args sidemaps that
+<span class="lineno">   92 </span>-- would otherwise need reindexing don't exist.
+<span class="lineno">   93 </span>noRenumber :: Int -&gt; IO ()
+<span class="lineno">   94 </span><span class="decl"><span class="nottickedoff">noRenumber _ = pure ()</span></span>
+<span class="lineno">   95 </span>
+
+</pre>
+</body>
+</html>

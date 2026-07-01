@@ -1,0 +1,121 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Policy
+<span class="lineno">    2 </span>  ( -- * Policy type
+<span class="lineno">    3 </span>    SecurityPolicy (..)
+<span class="lineno">    4 </span>    -- * Constructors and combinators
+<span class="lineno">    5 </span>  , defaultPolicy
+<span class="lineno">    6 </span>  , allowCommand
+<span class="lineno">    7 </span>  , denyCommand
+<span class="lineno">    8 </span>  , allowRemoteCommand
+<span class="lineno">    9 </span>  , denyRemoteCommand
+<span class="lineno">   10 </span>  , withAutonomy
+<span class="lineno">   11 </span>    -- * Pure evaluation
+<span class="lineno">   12 </span>  , isCommandAllowed
+<span class="lineno">   13 </span>  , isRemoteCommandAllowed
+<span class="lineno">   14 </span>  ) where
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>import Data.Set qualified as Set
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import PureClaw.Core.Types
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | Security policy governing what an agent can do.
+<span class="lineno">   21 </span>-- Policy evaluation is pure — no IO, fully testable with QuickCheck.
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- Local subprocess authorization consults '_sp_allowedCommands'.
+<span class="lineno">   24 </span>-- Remote subprocess authorization (e.g. ssh-dispatched commands)
+<span class="lineno">   25 </span>-- consults '_sp_allowedRemoteCommands'; the two allowlists are
+<span class="lineno">   26 </span>-- independent so granting &quot;git&quot; locally does not silently grant
+<span class="lineno">   27 </span>-- &quot;git&quot; remotely.
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- __Construction-site enforcement:__ adding a new field to
+<span class="lineno">   30 </span>-- 'SecurityPolicy' is intentionally a breaking change. With
+<span class="lineno">   31 </span>-- @-Werror -Wall@ (which implies @-Wmissing-fields@) any brace-form
+<span class="lineno">   32 </span>-- construction site that forgets the new field fails to compile.
+<span class="lineno">   33 </span>-- Positional construction sites (e.g. @SecurityPolicy AllowAll Full _@)
+<span class="lineno">   34 </span>-- fail to compile because the arity changes. This is the type-level
+<span class="lineno">   35 </span>-- migration safety net referenced in 'docs\/SECURITY_PRACTICES.md' §5.2
+<span class="lineno">   36 </span>-- and 'docs\/terminal-backend-abstractions.md' § \&quot;SecurityPolicy
+<span class="lineno">   37 </span>-- field migration\&quot;.
+<span class="lineno">   38 </span>data SecurityPolicy = SecurityPolicy
+<span class="lineno">   39 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sp_allowedCommands</span></span></span>       :: AllowList CommandName
+<span class="lineno">   40 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sp_autonomy</span></span></span>              :: AutonomyLevel
+<span class="lineno">   41 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sp_allowedRemoteCommands</span></span></span> :: AllowList CommandName
+<span class="lineno">   42 </span>  }
+<span class="lineno">   43 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>-- | Default policy: deny everything (local and remote). Start here and
+<span class="lineno">   46 </span>-- open up explicitly.
+<span class="lineno">   47 </span>defaultPolicy :: SecurityPolicy
+<span class="lineno">   48 </span><span class="decl"><span class="istickedoff">defaultPolicy = SecurityPolicy</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">{ _sp_allowedCommands       = AllowList Set.empty</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">, _sp_autonomy              = Deny</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">, _sp_allowedRemoteCommands = AllowList Set.empty</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>-- | Add a command to the local allowed set.
+<span class="lineno">   55 </span>-- If the policy already uses 'AllowAll', this is a no-op.
+<span class="lineno">   56 </span>allowCommand :: CommandName -&gt; SecurityPolicy -&gt; SecurityPolicy
+<span class="lineno">   57 </span><span class="decl"><span class="istickedoff">allowCommand cmd policy =</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">case _sp_allowedCommands policy of</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="istickedoff">AllowAll    -&gt; policy</span>
+<span class="lineno">   60 </span><span class="spaces">    </span><span class="istickedoff">AllowList s -&gt; policy { _sp_allowedCommands = AllowList (Set.insert cmd s) }</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Remove a command from the local allowed set.
+<span class="lineno">   63 </span>-- If the policy uses 'AllowAll', this has no effect (you cannot deny
+<span class="lineno">   64 </span>-- individual commands from an AllowAll policy — switch to explicit list first).
+<span class="lineno">   65 </span>denyCommand :: CommandName -&gt; SecurityPolicy -&gt; SecurityPolicy
+<span class="lineno">   66 </span><span class="decl"><span class="istickedoff">denyCommand cmd policy =</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="istickedoff">case _sp_allowedCommands policy of</span>
+<span class="lineno">   68 </span><span class="spaces">    </span><span class="istickedoff">AllowAll    -&gt; policy</span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">AllowList s -&gt; policy { _sp_allowedCommands = AllowList (Set.delete cmd s) }</span></span>
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- | Add a command to the remote allowed set.
+<span class="lineno">   72 </span>-- If the policy already uses 'AllowAll' for remote commands, this is a no-op.
+<span class="lineno">   73 </span>allowRemoteCommand :: CommandName -&gt; SecurityPolicy -&gt; SecurityPolicy
+<span class="lineno">   74 </span><span class="decl"><span class="istickedoff">allowRemoteCommand cmd policy =</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">case _sp_allowedRemoteCommands policy of</span>
+<span class="lineno">   76 </span><span class="spaces">    </span><span class="istickedoff">AllowAll    -&gt; policy</span>
+<span class="lineno">   77 </span><span class="spaces">    </span><span class="istickedoff">AllowList s -&gt; policy { _sp_allowedRemoteCommands = AllowList (Set.insert cmd s) }</span></span>
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | Remove a command from the remote allowed set.
+<span class="lineno">   80 </span>-- If the policy uses 'AllowAll' for remote commands, this has no effect
+<span class="lineno">   81 </span>-- (switch to an explicit list first).
+<span class="lineno">   82 </span>denyRemoteCommand :: CommandName -&gt; SecurityPolicy -&gt; SecurityPolicy
+<span class="lineno">   83 </span><span class="decl"><span class="istickedoff">denyRemoteCommand cmd policy =</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">case _sp_allowedRemoteCommands policy of</span>
+<span class="lineno">   85 </span><span class="spaces">    </span><span class="istickedoff">AllowAll    -&gt; policy</span>
+<span class="lineno">   86 </span><span class="spaces">    </span><span class="istickedoff">AllowList s -&gt; policy { _sp_allowedRemoteCommands = AllowList (Set.delete cmd s) }</span></span>
+<span class="lineno">   87 </span>
+<span class="lineno">   88 </span>-- | Set the autonomy level on a policy.
+<span class="lineno">   89 </span>withAutonomy :: AutonomyLevel -&gt; SecurityPolicy -&gt; SecurityPolicy
+<span class="lineno">   90 </span><span class="decl"><span class="istickedoff">withAutonomy level policy = policy { _sp_autonomy = level }</span></span>
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>-- | Check whether a command is allowed for local execution by this policy. Pure.
+<span class="lineno">   93 </span>isCommandAllowed :: SecurityPolicy -&gt; CommandName -&gt; Bool
+<span class="lineno">   94 </span><span class="decl"><span class="istickedoff">isCommandAllowed policy = isAllowed (_sp_allowedCommands policy)</span></span>
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- | Check whether a command is allowed for remote execution by this policy. Pure.
+<span class="lineno">   97 </span>isRemoteCommandAllowed :: SecurityPolicy -&gt; CommandName -&gt; Bool
+<span class="lineno">   98 </span><span class="decl"><span class="istickedoff">isRemoteCommandAllowed policy = isAllowed (_sp_allowedRemoteCommands policy)</span></span>
+
+</pre>
+</body>
+</html>

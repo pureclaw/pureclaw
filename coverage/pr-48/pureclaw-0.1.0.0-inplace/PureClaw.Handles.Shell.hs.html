@@ -1,0 +1,152 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Handles.Shell
+<span class="lineno">    2 </span>  ( -- * Process result
+<span class="lineno">    3 </span>    ProcessResult (..)
+<span class="lineno">    4 </span>    -- * Execution options
+<span class="lineno">    5 </span>  , ExecOptions (..)
+<span class="lineno">    6 </span>  , defaultExecOptions
+<span class="lineno">    7 </span>    -- * Handle type
+<span class="lineno">    8 </span>  , ShellHandle (..)
+<span class="lineno">    9 </span>    -- * Implementations
+<span class="lineno">   10 </span>  , mkShellHandle
+<span class="lineno">   11 </span>  , mkNoOpShellHandle
+<span class="lineno">   12 </span>  ) where
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   15 </span>import Data.ByteString (ByteString)
+<span class="lineno">   16 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   17 </span>import Data.Text qualified as T
+<span class="lineno">   18 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   19 </span>import System.Exit
+<span class="lineno">   20 </span>import System.Process.Typed qualified as P
+<span class="lineno">   21 </span>import System.Timeout qualified as Timeout
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>import PureClaw.Handles.Log
+<span class="lineno">   24 </span>import PureClaw.Security.Command
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>-- | Result of a subprocess execution.
+<span class="lineno">   27 </span>data ProcessResult = ProcessResult
+<span class="lineno">   28 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_exitCode</span></span></span> :: ExitCode
+<span class="lineno">   29 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_stdout</span></span></span>   :: ByteString
+<span class="lineno">   30 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_stderr</span></span></span>   :: ByteString
+<span class="lineno">   31 </span>  }
+<span class="lineno">   32 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>-- | Options controlling how a command is executed. Designed to be
+<span class="lineno">   35 </span>-- extended as new backends (Docker, SSH, etc.) are added — each
+<span class="lineno">   36 </span>-- backend interprets the fields it supports and ignores the rest.
+<span class="lineno">   37 </span>data ExecOptions = ExecOptions
+<span class="lineno">   38 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_eo_timeout</span></span></span>    :: Maybe Int
+<span class="lineno">   39 </span>    -- ^ Timeout in milliseconds. 'Nothing' means no timeout.
+<span class="lineno">   40 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_eo_workingDir</span></span></span> :: Maybe FilePath
+<span class="lineno">   41 </span>    -- ^ Working directory for the subprocess. 'Nothing' uses the
+<span class="lineno">   42 </span>    -- agent's current directory.
+<span class="lineno">   43 </span>  }
+<span class="lineno">   44 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>-- | Default execution options: no timeout, inherit working directory.
+<span class="lineno">   47 </span>defaultExecOptions :: ExecOptions
+<span class="lineno">   48 </span><span class="decl"><span class="istickedoff">defaultExecOptions = ExecOptions</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">{ _eo_timeout    = Nothing</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">, _eo_workingDir = Nothing</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Subprocess execution capability. Only accepts 'AuthorizedCommand',
+<span class="lineno">   54 </span>-- which is proof that the command passed security policy evaluation.
+<span class="lineno">   55 </span>--
+<span class="lineno">   56 </span>-- The real implementation strips the subprocess environment to prevent
+<span class="lineno">   57 </span>-- secret leakage via inherited environment variables.
+<span class="lineno">   58 </span>--
+<span class="lineno">   59 </span>-- Backends (local, Docker, SSH, etc.) provide different implementations
+<span class="lineno">   60 </span>-- of this record. All backends receive 'ExecOptions' and interpret the
+<span class="lineno">   61 </span>-- fields they support.
+<span class="lineno">   62 </span>newtype ShellHandle = ShellHandle
+<span class="lineno">   63 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_execute</span></span></span> :: ExecOptions -&gt; AuthorizedCommand -&gt; IO ProcessResult
+<span class="lineno">   64 </span>  }
+<span class="lineno">   65 </span>
+<span class="lineno">   66 </span>-- | Minimal safe environment for subprocesses. Provides only PATH so
+<span class="lineno">   67 </span>-- commands can be resolved, but inherits nothing else from the parent.
+<span class="lineno">   68 </span>safeEnv :: [(String, String)]
+<span class="lineno">   69 </span><span class="decl"><span class="istickedoff">safeEnv = [(&quot;PATH&quot;, &quot;/usr/bin:/bin:/usr/local/bin&quot;)]</span></span>
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- | Real shell handle using @typed-process@. Strips the subprocess
+<span class="lineno">   72 </span>-- environment (provides only a minimal PATH) as noted in the architecture.
+<span class="lineno">   73 </span>mkShellHandle :: LogHandle -&gt; ShellHandle
+<span class="lineno">   74 </span><span class="decl"><span class="istickedoff">mkShellHandle logger = ShellHandle</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">{ _sh_execute = \opts cmd -&gt; do</span>
+<span class="lineno">   76 </span><span class="spaces">      </span><span class="istickedoff">let prog = getCommandProgram cmd</span>
+<span class="lineno">   77 </span><span class="spaces">          </span><span class="istickedoff">args = map T.unpack (getCommandArgs cmd)</span>
+<span class="lineno">   78 </span><span class="spaces">          </span><span class="istickedoff">config = maybe id P.setWorkingDir (_eo_workingDir opts)</span>
+<span class="lineno">   79 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setEnv safeEnv</span>
+<span class="lineno">   80 </span><span class="spaces">                 </span><span class="istickedoff">$ P.proc prog args</span>
+<span class="lineno">   81 </span><span class="spaces">      </span><span class="istickedoff">_lh_logInfo logger $ <span class="nottickedoff">&quot;Executing: &quot; &lt;&gt; T.pack prog &lt;&gt; &quot; &quot; &lt;&gt; T.unwords (getCommandArgs cmd)</span></span>
+<span class="lineno">   82 </span><span class="spaces">      </span><span class="istickedoff">case _eo_timeout opts of</span>
+<span class="lineno">   83 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">   84 </span><span class="spaces">          </span><span class="istickedoff">(exitCode, outLazy, errLazy) &lt;- P.readProcess config</span>
+<span class="lineno">   85 </span><span class="spaces">          </span><span class="istickedoff">pure ProcessResult</span>
+<span class="lineno">   86 </span><span class="spaces">            </span><span class="istickedoff">{ _pr_exitCode = exitCode</span>
+<span class="lineno">   87 </span><span class="spaces">            </span><span class="istickedoff">, _pr_stdout   = BL.toStrict outLazy</span>
+<span class="lineno">   88 </span><span class="spaces">            </span><span class="istickedoff">, _pr_stderr   = BL.toStrict errLazy</span>
+<span class="lineno">   89 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">   90 </span><span class="spaces">        </span><span class="istickedoff">Just ms -&gt; runWithTimeout config ms</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   92 </span>
+<span class="lineno">   93 </span>-- | Run a process with a timeout. Launches the process via
+<span class="lineno">   94 </span>-- 'readProcess' on a background thread, then races it against a
+<span class="lineno">   95 </span>-- timer. On timeout the process is killed via 'Async.cancel' and a
+<span class="lineno">   96 </span>-- synthetic exit-124 result is returned.
+<span class="lineno">   97 </span>--
+<span class="lineno">   98 </span>-- This avoids the &quot;waitForProcess: No child processes&quot; error that
+<span class="lineno">   99 </span>-- occurs when 'System.Timeout.timeout' wrapping 'readProcess' races
+<span class="lineno">  100 </span>-- with the child reaper on Linux — 'Async.cancel' delivers a clean
+<span class="lineno">  101 </span>-- 'AsyncCancelled' that typed-process handles correctly.
+<span class="lineno">  102 </span>runWithTimeout :: P.ProcessConfig () () () -&gt; Int -&gt; IO ProcessResult
+<span class="lineno">  103 </span><span class="decl"><span class="istickedoff">runWithTimeout config ms = do</span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">worker &lt;- Async.async $ P.readProcess config</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- Timeout.timeout (ms * 1000) (Async.wait worker)</span>
+<span class="lineno">  106 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  107 </span><span class="spaces">    </span><span class="istickedoff">Just (exitCode, outLazy, errLazy) -&gt;</span>
+<span class="lineno">  108 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure ProcessResult</span></span>
+<span class="lineno">  109 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">{ _pr_exitCode = exitCode</span></span>
+<span class="lineno">  110 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _pr_stdout   = BL.toStrict outLazy</span></span>
+<span class="lineno">  111 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _pr_stderr   = BL.toStrict errLazy</span></span>
+<span class="lineno">  112 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">  113 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  114 </span><span class="spaces">      </span><span class="istickedoff">Async.cancel worker</span>
+<span class="lineno">  115 </span><span class="spaces">      </span><span class="istickedoff">pure ProcessResult</span>
+<span class="lineno">  116 </span><span class="spaces">        </span><span class="istickedoff">{ _pr_exitCode = ExitFailure 124</span>
+<span class="lineno">  117 </span><span class="spaces">        </span><span class="istickedoff">, _pr_stdout   = <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  118 </span><span class="spaces">        </span><span class="istickedoff">, _pr_stderr   = TE.encodeUtf8 (&quot;Command timed out after &quot; &lt;&gt; T.pack (show ms) &lt;&gt; &quot;ms&quot;)</span>
+<span class="lineno">  119 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- | No-op shell handle. Returns success with empty output.
+<span class="lineno">  122 </span>mkNoOpShellHandle :: ShellHandle
+<span class="lineno">  123 </span><span class="decl"><span class="istickedoff">mkNoOpShellHandle = ShellHandle</span>
+<span class="lineno">  124 </span><span class="spaces">  </span><span class="istickedoff">{ _sh_execute = \_ _ -&gt; pure ProcessResult</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">{ _pr_exitCode = ExitSuccess</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">, _pr_stdout   = &quot;&quot;</span>
+<span class="lineno">  127 </span><span class="spaces">      </span><span class="istickedoff">, _pr_stderr   = &quot;&quot;</span>
+<span class="lineno">  128 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

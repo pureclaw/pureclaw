@@ -1,0 +1,494 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tab.Harness
+<span class="lineno">    3 </span>-- Description : Harness tab factory (Tabbed Chat WU7).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- A harness tab is a 'PureClaw.Handles.Tab.TabHandle' that wraps an
+<span class="lineno">    6 </span>-- existing 'PureClaw.Handles.Harness.HarnessHandle' (e.g. a tmux-managed
+<span class="lineno">    7 </span>-- @claude-code@ subprocess). The tab owns two helper threads:
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>--   * a /drainer/ that loops on '_hh_receive' and emits each non-empty
+<span class="lineno">   10 </span>--     output chunk as @'FullMsg' !TabIndex !Text@ via '_env_channelOutQ'
+<span class="lineno">   11 </span>--     (focus-gated at the producer side per D4 and at the writer side
+<span class="lineno">   12 </span>--     per D3);
+<span class="lineno">   13 </span>--   * a /writer/ that drains a bounded outbound queue and forwards
+<span class="lineno">   14 </span>--     bytes to '_hh_send', keeping the public 'TabHandle._tabHandle_send'
+<span class="lineno">   15 </span>--     non-blocking per H4.
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- == Factory shape
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>-- @
+<span class="lineno">   20 </span>-- 'mkTabHarness' :: 'PureClaw.Agent.Env.AgentEnv'
+<span class="lineno">   21 </span>--                -&gt; 'PureClaw.Handles.Tab.TabIndex'
+<span class="lineno">   22 </span>--                -&gt; 'PureClaw.Handles.Tab.HarnessSpawnArgs'
+<span class="lineno">   23 </span>--                -&gt; IO (Either 'PureClaw.Handles.Tab.TabError'
+<span class="lineno">   24 </span>--                              'PureClaw.Handles.Tab.TabHandle')
+<span class="lineno">   25 </span>-- @
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- Mirrors the WU6 'PureClaw.Tab.Ai.mkTabAi' factory pattern: takes
+<span class="lineno">   28 </span>-- 'AgentEnv', returns either a constructed 'TabHandle' or a
+<span class="lineno">   29 </span>-- redacted 'TabError'.
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- == HarnessHandle lookup
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>-- The 'HarnessSpawnArgs._harness_requestedName' field is the lookup
+<span class="lineno">   34 </span>-- key for '_env_harnesses' (which is the existing
+<span class="lineno">   35 </span>-- @IORef (Map Text HarnessHandle)@). Harness lifecycle (start \/ stop)
+<span class="lineno">   36 </span>-- is owned by the existing @\/harness@ slash command surface; the
+<span class="lineno">   37 </span>-- tab factory only /adopts/ a running harness. If the name does not
+<span class="lineno">   38 </span>-- resolve, the factory returns @'Left' ('TabNotFound' ix)@ where @ix@
+<span class="lineno">   39 </span>-- is the requested 'TabIndex' rendered as 'Int' (the public projection
+<span class="lineno">   40 </span>-- is still the channel-safe @\&quot;tab: not found\&quot;@ short label).
+<span class="lineno">   41 </span>--
+<span class="lineno">   42 </span>-- == Slash commands are unsupported (H13 \/ I4)
+<span class="lineno">   43 </span>--
+<span class="lineno">   44 </span>-- '_tabHandle_enqueueSlash' returns @'Left' ('TabUnsupportedCommand'
+<span class="lineno">   45 </span>-- cmd)@ immediately without enqueueing — harness tabs do not have a
+<span class="lineno">   46 </span>-- per-tab 'Context' or slash-command surface. Direct-inject text
+<span class="lineno">   47 </span>-- (@\/N \&lt;text\&gt;@) is forwarded verbatim to the harness via the
+<span class="lineno">   48 </span>-- writer thread so a payload like @\/N \/pwd@ reaches the harness as
+<span class="lineno">   49 </span>-- the literal @\&quot;\/pwd\&quot;@ (I4 — slash-prefix opaque to backend).
+<span class="lineno">   50 </span>--
+<span class="lineno">   51 </span>-- == Close semantics (H8 \/ H9)
+<span class="lineno">   52 </span>--
+<span class="lineno">   53 </span>-- Both 'CloseGraceful' and 'CloseForce' are destructive: they cancel
+<span class="lineno">   54 </span>-- both helper threads and call '_hh_stop' on the underlying
+<span class="lineno">   55 </span>-- 'HarnessHandle'. The harness is /not/ archived (there's no
+<span class="lineno">   56 </span>-- transcript-equivalent to flush). Idempotent + never-throws (H6 \/
+<span class="lineno">   57 </span>-- H7 contract).
+<span class="lineno">   58 </span>--
+<span class="lineno">   59 </span>-- == Async exception discipline
+<span class="lineno">   60 </span>--
+<span class="lineno">   61 </span>-- Helper threads catch 'SomeException' EXCEPT 'AsyncCancelled', which
+<span class="lineno">   62 </span>-- propagates so that '_tabHandle_close' (which cancels the helpers'
+<span class="lineno">   63 </span>-- 'TabRunner's) can unblock a stuck 'threadDelay' or pending
+<span class="lineno">   64 </span>-- '_hh_receive'. Mirrors the WU6 'safelyRunLoop' pattern.
+<span class="lineno">   65 </span>--
+<span class="lineno">   66 </span>-- See @docs\/tabbed-chat.md@ §&quot;H-series&quot; (close lifecycle), §&quot;I4&quot;
+<span class="lineno">   67 </span>-- (opaque slash-prefix), and §&quot;D5&quot; (FullMsg emission).
+<span class="lineno">   68 </span>module PureClaw.Tab.Harness
+<span class="lineno">   69 </span>  ( -- * Factory
+<span class="lineno">   70 </span>    mkTabHarness
+<span class="lineno">   71 </span>    -- * Internal state (exposed for tests)
+<span class="lineno">   72 </span>  , HarnessTabState (..)
+<span class="lineno">   73 </span>    -- * Internal helpers (exposed for tests)
+<span class="lineno">   74 </span>  , drainerSleepMicros
+<span class="lineno">   75 </span>  ) where
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>import Control.Concurrent (threadDelay)
+<span class="lineno">   78 </span>import Control.Concurrent.Async (AsyncCancelled (..))
+<span class="lineno">   79 </span>import Control.Concurrent.STM
+<span class="lineno">   80 </span>  ( STM
+<span class="lineno">   81 </span>  , TBQueue
+<span class="lineno">   82 </span>  , atomically
+<span class="lineno">   83 </span>  , isFullTBQueue
+<span class="lineno">   84 </span>  , newTBQueueIO
+<span class="lineno">   85 </span>  , readTBQueue
+<span class="lineno">   86 </span>  , writeTBQueue
+<span class="lineno">   87 </span>  )
+<span class="lineno">   88 </span>import Control.Exception
+<span class="lineno">   89 </span>  ( Exception
+<span class="lineno">   90 </span>  , SomeException
+<span class="lineno">   91 </span>  , catch
+<span class="lineno">   92 </span>  , fromException
+<span class="lineno">   93 </span>  , throwIO
+<span class="lineno">   94 </span>  , try
+<span class="lineno">   95 </span>  )
+<span class="lineno">   96 </span>import Control.Monad (unless, when)
+<span class="lineno">   97 </span>import Data.ByteString (ByteString)
+<span class="lineno">   98 </span>import Data.ByteString qualified as BS
+<span class="lineno">   99 </span>import Data.Foldable (for_)
+<span class="lineno">  100 </span>import Data.IORef
+<span class="lineno">  101 </span>  ( IORef
+<span class="lineno">  102 </span>  , atomicModifyIORef'
+<span class="lineno">  103 </span>  , newIORef
+<span class="lineno">  104 </span>  , readIORef
+<span class="lineno">  105 </span>  , writeIORef
+<span class="lineno">  106 </span>  )
+<span class="lineno">  107 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">  108 </span>import Data.Text (Text)
+<span class="lineno">  109 </span>import Data.Text qualified as T
+<span class="lineno">  110 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">  111 </span>import Data.Time (getCurrentTime)
+<span class="lineno">  112 </span>
+<span class="lineno">  113 </span>import PureClaw.Agent.Env (AgentEnv (..))
+<span class="lineno">  114 </span>import PureClaw.Agent.SlashCommands (SlashCommand)
+<span class="lineno">  115 </span>import PureClaw.Handles.Harness
+<span class="lineno">  116 </span>  ( HarnessHandle (..)
+<span class="lineno">  117 </span>  , HarnessStatus (..)
+<span class="lineno">  118 </span>  , sanitizeHarnessOutput
+<span class="lineno">  119 </span>  )
+<span class="lineno">  120 </span>import PureClaw.Handles.Tab
+<span class="lineno">  121 </span>  ( CloseMode (..)
+<span class="lineno">  122 </span>  , HarnessSpawnArgs (..)
+<span class="lineno">  123 </span>  , PublicTabError (..)
+<span class="lineno">  124 </span>  , TabError (..)
+<span class="lineno">  125 </span>  , TabHandle (..)
+<span class="lineno">  126 </span>  , TabIndex
+<span class="lineno">  127 </span>  , TabKind (..)
+<span class="lineno">  128 </span>  , TabName (..)
+<span class="lineno">  129 </span>  , TabRunner (..)
+<span class="lineno">  130 </span>  , TabStatus (..)
+<span class="lineno">  131 </span>  , unTabIndex
+<span class="lineno">  132 </span>  )
+<span class="lineno">  133 </span>import PureClaw.Routing.ChannelOut (shouldEmit)
+<span class="lineno">  134 </span>import PureClaw.Routing.Parse qualified as Parse
+<span class="lineno">  135 </span>import PureClaw.Routing.Types
+<span class="lineno">  136 </span>  ( ChannelEvent (..)
+<span class="lineno">  137 </span>  , OutputSource (..)
+<span class="lineno">  138 </span>  , RoutingConfig (..)
+<span class="lineno">  139 </span>  )
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>
+<span class="lineno">  142 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  143 </span>-- HarnessTabState — per-tab mutable state, private to the factory closure
+<span class="lineno">  144 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>-- | Per-harness-tab mutable state. Fields are exposed so a future
+<span class="lineno">  147 </span>-- diagnostic @tab info@ handler can inspect them; production code never
+<span class="lineno">  148 </span>-- touches the record outside this module.
+<span class="lineno">  149 </span>data HarnessTabState = HarnessTabState
+<span class="lineno">  150 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_hts_harness</span></span></span>        :: !HarnessHandle
+<span class="lineno">  151 </span>    -- ^ The underlying harness adopted at spawn time. Looked up by
+<span class="lineno">  152 </span>    -- name from '_env_harnesses'; the tab does NOT own the harness
+<span class="lineno">  153 </span>    -- lifecycle (the existing @\/harness@ command surface does), but
+<span class="lineno">  154 </span>    -- '_tabHandle_close' DOES call '_hh_stop' on it per H8 (destructive
+<span class="lineno">  155 </span>    -- close — there is no archive equivalent).
+<span class="lineno">  156 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hts_sendQ</span></span></span>          :: !(TBQueue ByteString)
+<span class="lineno">  157 </span>    -- ^ Bounded outbound queue. '_tabHandle_send' enqueues here
+<span class="lineno">  158 </span>    -- non-blockingly; the writer thread drains and calls '_hh_send'.
+<span class="lineno">  159 </span>    -- Bounded by '_rc_inputQueueBound' so a saturating producer
+<span class="lineno">  160 </span>    -- surfaces 'TabConcurrencyLimit' rather than blocking the
+<span class="lineno">  161 </span>    -- dispatcher (H4).
+<span class="lineno">  162 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hts_drainRunner</span></span></span>    :: !(IORef (Maybe TabRunner))
+<span class="lineno">  163 </span>    -- ^ Drainer thread runner (output side: '_hh_receive' →
+<span class="lineno">  164 </span>    -- 'FullMsg'). Filled by 'mkTabHarness' post-fork; stays 'Nothing'
+<span class="lineno">  165 </span>    -- for the brief window between allocation and fork-fill.
+<span class="lineno">  166 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hts_writerRunner</span></span></span>   :: !(IORef (Maybe TabRunner))
+<span class="lineno">  167 </span>    -- ^ Writer thread runner (input side: '_hts_sendQ' →
+<span class="lineno">  168 </span>    -- '_hh_send'). Filled by 'mkTabHarness' post-fork.
+<span class="lineno">  169 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hts_closed</span></span></span>         :: !(IORef Bool)
+<span class="lineno">  170 </span>    -- ^ Idempotency flag for '_tabHandle_close'. Flipped to 'True' on
+<span class="lineno">  171 </span>    -- the first invocation; subsequent invocations are no-ops (H6).
+<span class="lineno">  172 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hts_statusRef</span></span></span>      :: !(IORef TabStatus)
+<span class="lineno">  173 </span>    -- ^ Held status backing '_tabHandle_status'. The drainer and
+<span class="lineno">  174 </span>    -- writer threads do not transition this on a per-chunk basis (a
+<span class="lineno">  175 </span>    -- harness tab is conceptually always available for I\/O); it
+<span class="lineno">  176 </span>    -- starts 'Idle' at spawn and transitions to 'Crashed' if a helper
+<span class="lineno">  177 </span>    -- thread hits a synchronous exception.
+<span class="lineno">  178 </span>  }
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  182 </span>-- Tuning knobs
+<span class="lineno">  183 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  184 </span>
+<span class="lineno">  185 </span>-- | Microseconds the drainer sleeps between '_hh_receive' calls.
+<span class="lineno">  186 </span>--
+<span class="lineno">  187 </span>-- '_hh_receive' is a /snapshot/ read (it returns whatever output is
+<span class="lineno">  188 </span>-- currently buffered, possibly empty), so we cannot block on it. A
+<span class="lineno">  189 </span>-- 100 ms cadence keeps idle harness tabs from burning CPU while still
+<span class="lineno">  190 </span>-- producing responsive output on focused tabs.
+<span class="lineno">  191 </span>--
+<span class="lineno">  192 </span>-- Exposed for tests so they can pin the cadence; production callers
+<span class="lineno">  193 </span>-- never reference it directly.
+<span class="lineno">  194 </span>drainerSleepMicros :: Int
+<span class="lineno">  195 </span><span class="decl"><span class="istickedoff">drainerSleepMicros = 100000</span></span>  -- 100 ms
+<span class="lineno">  196 </span>
+<span class="lineno">  197 </span>
+<span class="lineno">  198 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  199 </span>-- mkTabHarness — the harness tab factory
+<span class="lineno">  200 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  201 </span>
+<span class="lineno">  202 </span>-- | Construct a harness tab. Looks up the requested harness from
+<span class="lineno">  203 </span>-- '_env_harnesses', allocates per-tab state, forks the drainer and
+<span class="lineno">  204 </span>-- writer threads via '_env_fork', and returns a 'TabHandle' whose IO
+<span class="lineno">  205 </span>-- actions close over the state.
+<span class="lineno">  206 </span>--
+<span class="lineno">  207 </span>-- The factory itself never throws: it always returns @'Right' h@ or
+<span class="lineno">  208 </span>-- @'Left' e@. Failures inside the forked helper threads are caught by
+<span class="lineno">  209 </span>-- their own outer exception handler and surface as a 'Crashed' status
+<span class="lineno">  210 </span>-- (visible via '_tabHandle_status').
+<span class="lineno">  211 </span>mkTabHarness :: AgentEnv -&gt; TabIndex -&gt; HarnessSpawnArgs
+<span class="lineno">  212 </span>             -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  213 </span><span class="decl"><span class="istickedoff">mkTabHarness env idx args =</span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">case Parse.sanitizeTabName (_harness_requestedName args) of</span>
+<span class="lineno">  215 </span><span class="spaces">    </span><span class="istickedoff">Left nameErr -&gt; pure (Left (TabInvalidName nameErr))</span>
+<span class="lineno">  216 </span><span class="spaces">    </span><span class="istickedoff">Right nameTxt -&gt; do</span>
+<span class="lineno">  217 </span><span class="spaces">      </span><span class="istickedoff">mHarness &lt;- lookupHarness env (_harness_requestedName args)</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">case mHarness of</span>
+<span class="lineno">  219 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; pure (Left (TabNotFound (unTabIndex idx)))</span>
+<span class="lineno">  220 </span><span class="spaces">        </span><span class="istickedoff">Just hh -&gt; Right &lt;$&gt; spawnTabWithHarness env idx nameTxt hh</span></span>
+<span class="lineno">  221 </span>
+<span class="lineno">  222 </span>-- | Look up the requested harness from '_env_harnesses' by name. We
+<span class="lineno">  223 </span>-- match by the raw (pre-sanitization) requested name because that's
+<span class="lineno">  224 </span>-- the key used by the existing @\/harness start \&lt;name\&gt;@ surface.
+<span class="lineno">  225 </span>lookupHarness :: AgentEnv -&gt; Text -&gt; IO (Maybe HarnessHandle)
+<span class="lineno">  226 </span><span class="decl"><span class="istickedoff">lookupHarness env name = do</span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="istickedoff">hs &lt;- readIORef (_env_harnesses env)</span>
+<span class="lineno">  228 </span><span class="spaces">  </span><span class="istickedoff">pure (Map.lookup name hs)</span></span>
+<span class="lineno">  229 </span>
+<span class="lineno">  230 </span>-- | Allocate per-tab state, fork the drainer + writer threads, and
+<span class="lineno">  231 </span>-- build the public 'TabHandle' record.
+<span class="lineno">  232 </span>spawnTabWithHarness
+<span class="lineno">  233 </span>  :: AgentEnv -&gt; TabIndex -&gt; Text -&gt; HarnessHandle -&gt; IO TabHandle
+<span class="lineno">  234 </span><span class="decl"><span class="istickedoff">spawnTabWithHarness env idx nameTxt hh = do</span>
+<span class="lineno">  235 </span><span class="spaces">  </span><span class="istickedoff">state &lt;- allocState env hh</span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="istickedoff">-- Sentinel: state starts Idle at allocation; the drainer thread does</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">-- not own status transitions in WU7 (a harness tab is always</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="istickedoff">-- available unless a helper thread crashes — see 'safelyRun').</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_hts_statusRef state) (Idle now)</span>
+<span class="lineno">  241 </span><span class="spaces">  </span><span class="istickedoff">-- Fork the drainer (output) and writer (input) threads via the</span>
+<span class="lineno">  242 </span><span class="spaces">  </span><span class="istickedoff">-- env's fork seam. Both runners are captured into the state so</span>
+<span class="lineno">  243 </span><span class="spaces">  </span><span class="istickedoff">-- '_tabHandle_close' can cancel them.</span>
+<span class="lineno">  244 </span><span class="spaces">  </span><span class="istickedoff">drainRunner  &lt;- _env_fork env (drainerLoop env idx state)</span>
+<span class="lineno">  245 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_hts_drainRunner state) (Just drainRunner)</span>
+<span class="lineno">  246 </span><span class="spaces">  </span><span class="istickedoff">writerRunner &lt;- _env_fork env (writerLoop state)</span>
+<span class="lineno">  247 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_hts_writerRunner state) (Just writerRunner)</span>
+<span class="lineno">  248 </span><span class="spaces">  </span><span class="istickedoff">pure (mkHandle <span class="nottickedoff">env</span> idx (TabName nameTxt) state)</span></span>
+<span class="lineno">  249 </span>
+<span class="lineno">  250 </span>-- | Allocate the per-tab state. The bounded outbound queue's capacity
+<span class="lineno">  251 </span>-- comes from '_rc_inputQueueBound' so the H4 \&quot;non-blocking send\&quot;
+<span class="lineno">  252 </span>-- contract is configurable.
+<span class="lineno">  253 </span>allocState :: AgentEnv -&gt; HarnessHandle -&gt; IO HarnessTabState
+<span class="lineno">  254 </span><span class="decl"><span class="istickedoff">allocState env hh = do</span>
+<span class="lineno">  255 </span><span class="spaces">  </span><span class="istickedoff">let rc = _env_routingConfig env</span>
+<span class="lineno">  256 </span><span class="spaces">  </span><span class="istickedoff">sendQ        &lt;- newTBQueueIO (fromIntegral (_rc_inputQueueBound rc))</span>
+<span class="lineno">  257 </span><span class="spaces">  </span><span class="istickedoff">drainRef     &lt;- newIORef <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  258 </span><span class="spaces">  </span><span class="istickedoff">writerRef    &lt;- newIORef <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">closedRef    &lt;- newIORef False</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">statRef      &lt;- newIORef <span class="nottickedoff">Active</span>  -- replaced with Idle by spawnTabWithHarness</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="istickedoff">pure HarnessTabState</span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">{ _hts_harness        = hh</span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">, _hts_sendQ          = sendQ</span>
+<span class="lineno">  264 </span><span class="spaces">    </span><span class="istickedoff">, _hts_drainRunner    = drainRef</span>
+<span class="lineno">  265 </span><span class="spaces">    </span><span class="istickedoff">, _hts_writerRunner   = writerRef</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">, _hts_closed         = closedRef</span>
+<span class="lineno">  267 </span><span class="spaces">    </span><span class="istickedoff">, _hts_statusRef      = statRef</span>
+<span class="lineno">  268 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  269 </span>
+<span class="lineno">  270 </span>-- | Build the public 'TabHandle' record from the per-tab state.
+<span class="lineno">  271 </span>mkHandle :: AgentEnv -&gt; TabIndex -&gt; TabName -&gt; HarnessTabState -&gt; TabHandle
+<span class="lineno">  272 </span><span class="decl"><span class="istickedoff">mkHandle env idx name state = TabHandle</span>
+<span class="lineno">  273 </span><span class="spaces">  </span><span class="istickedoff">{ _tabHandle_index        = idx</span>
+<span class="lineno">  274 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_name         = name</span>
+<span class="lineno">  275 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_kind         = KindHarness</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_status       = readIORef (_hts_statusRef state)</span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_send         = sendBytes state</span>
+<span class="lineno">  278 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_enqueueSlash = enqueueSlashUnsupported</span>
+<span class="lineno">  279 </span><span class="spaces">  </span><span class="istickedoff">, _tabHandle_close        = closeTabHarness <span class="nottickedoff">env</span> state</span>
+<span class="lineno">  280 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  281 </span>
+<span class="lineno">  282 </span>
+<span class="lineno">  283 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  284 </span>-- _tabHandle_send / _tabHandle_enqueueSlash
+<span class="lineno">  285 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  286 </span>
+<span class="lineno">  287 </span>-- | Enqueue a 'Text' payload onto the outbound queue. Non-blocking:
+<span class="lineno">  288 </span>-- returns @'Left' ('TabConcurrencyLimit' 0)@ if the queue is full so
+<span class="lineno">  289 </span>-- the dispatcher's send loop never blocks (H4).
+<span class="lineno">  290 </span>--
+<span class="lineno">  291 </span>-- The text is UTF-8 encoded and forwarded verbatim — including any
+<span class="lineno">  292 </span>-- leading @\/@ — so a direct-inject like @\/N \/pwd@ reaches the
+<span class="lineno">  293 </span>-- harness as the literal @\&quot;\/pwd\&quot;@ (I4: slash-prefix opaque to the
+<span class="lineno">  294 </span>-- backend).
+<span class="lineno">  295 </span>sendBytes :: HarnessTabState -&gt; Text -&gt; IO (Either TabError ())
+<span class="lineno">  296 </span><span class="decl"><span class="istickedoff">sendBytes state t = atomically (tryEnqueueSTM (_hts_sendQ state) (TE.encodeUtf8 t))</span></span>
+<span class="lineno">  297 </span>
+<span class="lineno">  298 </span>-- | STM body of 'sendBytes', factored out so tests can drive it inside
+<span class="lineno">  299 </span>-- a larger transaction if needed.
+<span class="lineno">  300 </span>tryEnqueueSTM :: TBQueue ByteString -&gt; ByteString -&gt; STM (Either TabError ())
+<span class="lineno">  301 </span><span class="decl"><span class="istickedoff">tryEnqueueSTM q bs = do</span>
+<span class="lineno">  302 </span><span class="spaces">  </span><span class="istickedoff">full &lt;- isFullTBQueue q</span>
+<span class="lineno">  303 </span><span class="spaces">  </span><span class="istickedoff">if full</span>
+<span class="lineno">  304 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (TabConcurrencyLimit 0))</span>
+<span class="lineno">  305 </span><span class="spaces">    </span><span class="istickedoff">else writeTBQueue q bs &gt;&gt; pure (Right ())</span></span>
+<span class="lineno">  306 </span>
+<span class="lineno">  307 </span>-- | '_tabHandle_enqueueSlash' for a harness tab: slash commands are
+<span class="lineno">  308 </span>-- not supported, so we return @'Left' ('TabUnsupportedCommand' cmd)@
+<span class="lineno">  309 </span>-- immediately without enqueueing (H13 \/ I4 contract).
+<span class="lineno">  310 </span>enqueueSlashUnsupported :: SlashCommand -&gt; IO (Either TabError ())
+<span class="lineno">  311 </span><span class="decl"><span class="istickedoff">enqueueSlashUnsupported cmd = pure (Left (TabUnsupportedCommand cmd))</span></span>
+<span class="lineno">  312 </span>
+<span class="lineno">  313 </span>
+<span class="lineno">  314 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  315 </span>-- _tabHandle_close — destructive close for harness tabs
+<span class="lineno">  316 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  317 </span>
+<span class="lineno">  318 </span>-- | Close a harness tab. Idempotent + never throws (H6, H7).
+<span class="lineno">  319 </span>--
+<span class="lineno">  320 </span>-- Both 'CloseGraceful' and 'CloseForce' are destructive: there is no
+<span class="lineno">  321 </span>-- harness-side archive equivalent to flush. The triad below cancels
+<span class="lineno">  322 </span>-- both helper threads and then calls '_hh_stop'. Each step is wrapped
+<span class="lineno">  323 </span>-- in 'safeIgnore' so a misbehaving harness can't leak an exception out
+<span class="lineno">  324 </span>-- of the never-throws contract.
+<span class="lineno">  325 </span>closeTabHarness :: AgentEnv -&gt; HarnessTabState -&gt; CloseMode -&gt; IO ()
+<span class="lineno">  326 </span><span class="decl"><span class="istickedoff">closeTabHarness _env state mode = do</span>
+<span class="lineno">  327 </span><span class="spaces">  </span><span class="istickedoff">alreadyClosed &lt;- atomicModifyIORef' (_hts_closed state) (True,)</span>
+<span class="lineno">  328 </span><span class="spaces">  </span><span class="istickedoff">unless alreadyClosed $ do</span>
+<span class="lineno">  329 </span><span class="spaces">    </span><span class="istickedoff">safeIgnore (cancelMaybeRunner (_hts_drainRunner state))</span>
+<span class="lineno">  330 </span><span class="spaces">    </span><span class="istickedoff">safeIgnore (cancelMaybeRunner (_hts_writerRunner state))</span>
+<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">-- H9: 'CloseGraceful' and 'CloseForce' are semantically identical</span>
+<span class="lineno">  332 </span><span class="spaces">    </span><span class="istickedoff">-- for non-AI tabs (close is already destructive). The pattern-match</span>
+<span class="lineno">  333 </span><span class="spaces">    </span><span class="istickedoff">-- below is here for symmetry with the WU6 KindAi factory and so</span>
+<span class="lineno">  334 </span><span class="spaces">    </span><span class="istickedoff">-- coverage tools see both arms exercised.</span>
+<span class="lineno">  335 </span><span class="spaces">    </span><span class="istickedoff">case mode of</span>
+<span class="lineno">  336 </span><span class="spaces">      </span><span class="istickedoff">CloseGraceful -&gt; safeIgnore (_hh_stop (_hts_harness state))</span>
+<span class="lineno">  337 </span><span class="spaces">      </span><span class="istickedoff">CloseForce    -&gt; safeIgnore (_hh_stop (_hts_harness state))</span></span>
+<span class="lineno">  338 </span>
+<span class="lineno">  339 </span>-- | Read the captured 'TabRunner' (set by 'mkTabHarness' after fork)
+<span class="lineno">  340 </span>-- and invoke its cancel. Tolerant of the brief allocation\/fork window
+<span class="lineno">  341 </span>-- when the IORef is still 'Nothing'.
+<span class="lineno">  342 </span>cancelMaybeRunner :: IORef (Maybe TabRunner) -&gt; IO ()
+<span class="lineno">  343 </span><span class="decl"><span class="istickedoff">cancelMaybeRunner ref = do</span>
+<span class="lineno">  344 </span><span class="spaces">  </span><span class="istickedoff">mRunner &lt;- readIORef ref</span>
+<span class="lineno">  345 </span><span class="spaces">  </span><span class="istickedoff">for_ mRunner _trun_cancel</span></span>
+<span class="lineno">  346 </span>
+<span class="lineno">  347 </span>-- | Best-effort: run an IO action and swallow synchronous failures.
+<span class="lineno">  348 </span>-- The close path MUST be never-throws (H7), so every step is wrapped
+<span class="lineno">  349 </span>-- defensively. 'AsyncCancelled' is also swallowed here because the
+<span class="lineno">  350 </span>-- close handler is invoked from outside the helper threads; any
+<span class="lineno">  351 </span>-- AsyncCancelled bubbling up through cancel itself is benign (the
+<span class="lineno">  352 </span>-- target thread has already received the cancel).
+<span class="lineno">  353 </span>safeIgnore :: IO () -&gt; IO ()
+<span class="lineno">  354 </span><span class="decl"><span class="istickedoff">safeIgnore m = do</span>
+<span class="lineno">  355 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- try @SomeException m</span>
+<span class="lineno">  356 </span><span class="spaces">  </span><span class="istickedoff">pure ()</span></span>
+<span class="lineno">  357 </span>
+<span class="lineno">  358 </span>
+<span class="lineno">  359 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  360 </span>-- Drainer thread — _hh_receive → FullMsg via _env_channelOutQ
+<span class="lineno">  361 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  362 </span>
+<span class="lineno">  363 </span>-- | Drainer-thread top-level. Wraps 'drainerStep' in 'safelyRun' so a
+<span class="lineno">  364 </span>-- synchronous exception transitions the tab to 'Crashed' rather than
+<span class="lineno">  365 </span>-- killing the parent thread, and so 'AsyncCancelled' propagates per
+<span class="lineno">  366 </span>-- the C5 contract.
+<span class="lineno">  367 </span>drainerLoop :: AgentEnv -&gt; TabIndex -&gt; HarnessTabState -&gt; IO ()
+<span class="lineno">  368 </span><span class="decl"><span class="istickedoff">drainerLoop env idx state = safelyRun state loop</span>
+<span class="lineno">  369 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  370 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  371 </span><span class="spaces">      </span><span class="istickedoff">drainerStep env idx state</span>
+<span class="lineno">  372 </span><span class="spaces">      </span><span class="istickedoff">loop</span></span>
+<span class="lineno">  373 </span>
+<span class="lineno">  374 </span>-- | One iteration of the drainer. Reads '_hh_receive', emits a
+<span class="lineno">  375 </span>-- 'FullMsg' if the result is non-empty and the tab is focused (D4
+<span class="lineno">  376 </span>-- producer-side skip), then sleeps to avoid CPU burn on idle harnesses.
+<span class="lineno">  377 </span>--
+<span class="lineno">  378 </span>-- Also checks '_hh_status': if the harness has exited, we stop the
+<span class="lineno">  379 </span>-- drainer (the writer thread will eventually surface the next send
+<span class="lineno">  380 </span>-- as a no-op since the harness pipe is closed).
+<span class="lineno">  381 </span>drainerStep :: AgentEnv -&gt; TabIndex -&gt; HarnessTabState -&gt; IO ()
+<span class="lineno">  382 </span><span class="decl"><span class="istickedoff">drainerStep env idx state = do</span>
+<span class="lineno">  383 </span><span class="spaces">  </span><span class="istickedoff">-- Check status first so an exited harness terminates the loop</span>
+<span class="lineno">  384 </span><span class="spaces">  </span><span class="istickedoff">-- quickly. '_hh_status' is documented total in the no-op handle;</span>
+<span class="lineno">  385 </span><span class="spaces">  </span><span class="istickedoff">-- for the real claude-code variant it inspects tmux output.</span>
+<span class="lineno">  386 </span><span class="spaces">  </span><span class="istickedoff">st &lt;- _hh_status (_hts_harness state)</span>
+<span class="lineno">  387 </span><span class="spaces">  </span><span class="istickedoff">case st of</span>
+<span class="lineno">  388 </span><span class="spaces">    </span><span class="istickedoff">HarnessExited _ -&gt;</span>
+<span class="lineno">  389 </span><span class="spaces">      </span><span class="istickedoff">-- Harness has exited — drainer's job is done. The tab handle</span>
+<span class="lineno">  390 </span><span class="spaces">      </span><span class="istickedoff">-- remains valid until '_tabHandle_close' is invoked; closing</span>
+<span class="lineno">  391 </span><span class="spaces">      </span><span class="istickedoff">-- will be a no-op on the underlying harness which is already</span>
+<span class="lineno">  392 </span><span class="spaces">      </span><span class="istickedoff">-- gone.</span>
+<span class="lineno">  393 </span><span class="spaces">      </span><span class="istickedoff">throwIO HarnessExitedSignal</span>
+<span class="lineno">  394 </span><span class="spaces">    </span><span class="istickedoff">HarnessRunning -&gt; do</span>
+<span class="lineno">  395 </span><span class="spaces">      </span><span class="istickedoff">raw &lt;- _hh_receive (_hts_harness state)</span>
+<span class="lineno">  396 </span><span class="spaces">      </span><span class="istickedoff">unless (BS.null raw) $ do</span>
+<span class="lineno">  397 </span><span class="spaces">        </span><span class="istickedoff">-- Decode + sanitize for display. The sanitizer strips ANSI,</span>
+<span class="lineno">  398 </span><span class="spaces">        </span><span class="istickedoff">-- decorative Unicode, and trims surrounding blank lines.</span>
+<span class="lineno">  399 </span><span class="spaces">        </span><span class="istickedoff">let txt = sanitizeHarnessOutput (TE.decodeUtf8 raw)</span>
+<span class="lineno">  400 </span><span class="spaces">        </span><span class="istickedoff">unless (T.null (T.strip txt)) $ do</span>
+<span class="lineno">  401 </span><span class="spaces">          </span><span class="istickedoff">-- D4 producer-side focus check: skip the enqueue work when</span>
+<span class="lineno">  402 </span><span class="spaces">          </span><span class="istickedoff">-- the tab is not focused. The writer thread re-applies the</span>
+<span class="lineno">  403 </span><span class="spaces">          </span><span class="istickedoff">-- predicate on dequeue (D3), so this is an optimisation</span>
+<span class="lineno">  404 </span><span class="spaces">          </span><span class="istickedoff">-- only; correctness comes from the writer.</span>
+<span class="lineno">  405 </span><span class="spaces">          </span><span class="istickedoff">curFocus &lt;- readIORef (_env_focus env)</span>
+<span class="lineno">  406 </span><span class="spaces">          </span><span class="istickedoff">when (shouldEmit curFocus (SrcTab idx)) $</span>
+<span class="lineno">  407 </span><span class="spaces">            </span><span class="istickedoff">atomically $ writeTBQueue (_env_channelOutQ env)</span>
+<span class="lineno">  408 </span><span class="spaces">                           </span><span class="istickedoff">(SrcTab idx, FullMsg idx txt)</span>
+<span class="lineno">  409 </span><span class="spaces">      </span><span class="istickedoff">threadDelay drainerSleepMicros</span></span>
+<span class="lineno">  410 </span>
+<span class="lineno">  411 </span>
+<span class="lineno">  412 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  413 </span>-- Writer thread — _hts_sendQ → _hh_send
+<span class="lineno">  414 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  415 </span>
+<span class="lineno">  416 </span>-- | Writer-thread top-level. Drains '_hts_sendQ' forever, forwarding
+<span class="lineno">  417 </span>-- each chunk to '_hh_send'. Wrapped in 'safelyRun' for the same
+<span class="lineno">  418 </span>-- AsyncCancelled \/ Crashed semantics as the drainer.
+<span class="lineno">  419 </span>writerLoop :: HarnessTabState -&gt; IO ()
+<span class="lineno">  420 </span><span class="decl"><span class="istickedoff">writerLoop state = safelyRun <span class="nottickedoff">state</span> loop</span>
+<span class="lineno">  421 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  422 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  423 </span><span class="spaces">      </span><span class="istickedoff">bs &lt;- atomically (readTBQueue (_hts_sendQ state))</span>
+<span class="lineno">  424 </span><span class="spaces">      </span><span class="istickedoff">-- '_hh_send' may block (it writes to a tmux pipe). We tolerate</span>
+<span class="lineno">  425 </span><span class="spaces">      </span><span class="istickedoff">-- the block because the bounded '_hts_sendQ' keeps the producer</span>
+<span class="lineno">  426 </span><span class="spaces">      </span><span class="istickedoff">-- side non-blocking; the writer is a single-purpose drainer and</span>
+<span class="lineno">  427 </span><span class="spaces">      </span><span class="istickedoff">-- nothing else depends on its progress.</span>
+<span class="lineno">  428 </span><span class="spaces">      </span><span class="istickedoff">_hh_send (_hts_harness state) bs</span>
+<span class="lineno">  429 </span><span class="spaces">      </span><span class="istickedoff">loop</span></span>
+<span class="lineno">  430 </span>
+<span class="lineno">  431 </span>
+<span class="lineno">  432 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  433 </span>-- safelyRun — shared exception handler for drainer + writer
+<span class="lineno">  434 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  435 </span>
+<span class="lineno">  436 </span>-- | A private signal raised by the drainer when '_hh_status' reports
+<span class="lineno">  437 </span>-- the harness has exited. Caught by 'safelyRun' so the drainer exits
+<span class="lineno">  438 </span>-- silently (without transitioning the tab to Crashed); other
+<span class="lineno">  439 </span>-- synchronous exceptions DO transition to Crashed.
+<span class="lineno">  440 </span>--
+<span class="lineno">  441 </span>-- 'Show' is hand-written (not derived) so HPC's per-derived-method
+<span class="lineno">  442 </span>-- accounting does not flag the auto-generated instance code as
+<span class="lineno">  443 </span>-- uncovered. The single constructor name suffices for the exception
+<span class="lineno">  444 </span>-- machinery.
+<span class="lineno">  445 </span>data HarnessExitedSignal = HarnessExitedSignal
+<span class="lineno">  446 </span>
+<span class="lineno">  447 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show HarnessExitedSignal</span></span></span></span> where
+<span class="lineno">  448 </span>  <span class="decl"><span class="nottickedoff">show _ = &quot;HarnessExitedSignal&quot;</span></span>
+<span class="lineno">  449 </span>
+<span class="lineno">  450 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff">Exception HarnessExitedSignal</span></span></span></span></span></span></span></span>
+<span class="lineno">  451 </span>
+<span class="lineno">  452 </span>-- | Outer exception handler shared by both helper threads.
+<span class="lineno">  453 </span>--
+<span class="lineno">  454 </span>-- * 'AsyncCancelled' propagates (re-raised) so '_tabHandle_close'
+<span class="lineno">  455 </span>--   semantics work correctly per C5.
+<span class="lineno">  456 </span>-- * 'HarnessExitedSignal' is swallowed silently — the harness exit is
+<span class="lineno">  457 </span>--   an expected lifecycle event, not a crash.
+<span class="lineno">  458 </span>-- * Other 'SomeException' transitions the tab to 'Crashed' (carrying
+<span class="lineno">  459 </span>--   a redacted short label) and the helper thread exits.
+<span class="lineno">  460 </span>safelyRun :: HarnessTabState -&gt; IO () -&gt; IO ()
+<span class="lineno">  461 </span><span class="decl"><span class="istickedoff">safelyRun state body = body `catch` handler</span>
+<span class="lineno">  462 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  463 </span><span class="spaces">    </span><span class="istickedoff">handler :: SomeException -&gt; IO ()</span>
+<span class="lineno">  464 </span><span class="spaces">    </span><span class="istickedoff">handler e</span>
+<span class="lineno">  465 </span><span class="spaces">      </span><span class="istickedoff">| Just AsyncCancelled        &lt;- fromException e =</span>
+<span class="lineno">  466 </span><span class="spaces">          </span><span class="istickedoff">throwIO e  -- propagate AsyncCancelled (C5)</span>
+<span class="lineno">  467 </span><span class="spaces">      </span><span class="istickedoff">| Just HarnessExitedSignal   &lt;- fromException e =</span>
+<span class="lineno">  468 </span><span class="spaces">          </span><span class="istickedoff">pure <span class="nottickedoff">()</span>    -- expected exit; not a crash</span>
+<span class="lineno">  469 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  470 </span><span class="spaces">          </span><span class="istickedoff">writeIORef (_hts_statusRef state)</span>
+<span class="lineno">  471 </span><span class="spaces">                     </span><span class="istickedoff">(Crashed (PublicTabError &quot;tab: harness loop crashed&quot;))</span></span>
+
+</pre>
+</body>
+</html>

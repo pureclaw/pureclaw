@@ -1,0 +1,115 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Transcript.Types
+<span class="lineno">    2 </span>  ( -- * Direction
+<span class="lineno">    3 </span>    Direction (..)
+<span class="lineno">    4 </span>    -- * Transcript entry
+<span class="lineno">    5 </span>  , TranscriptEntry (..)
+<span class="lineno">    6 </span>    -- * Filter
+<span class="lineno">    7 </span>  , TranscriptFilter (..)
+<span class="lineno">    8 </span>  , emptyFilter
+<span class="lineno">    9 </span>  , matchesFilter
+<span class="lineno">   10 </span>  , applyFilter
+<span class="lineno">   11 </span>    -- * Payload helpers
+<span class="lineno">   12 </span>  , encodePayload
+<span class="lineno">   13 </span>  , decodePayload
+<span class="lineno">   14 </span>  ) where
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>import Data.Aeson (FromJSON, ToJSON, Value)
+<span class="lineno">   17 </span>import Data.ByteString (ByteString)
+<span class="lineno">   18 </span>import Data.Map.Strict (Map)
+<span class="lineno">   19 </span>import Data.Text (Text)
+<span class="lineno">   20 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   21 </span>import Data.Time (UTCTime)
+<span class="lineno">   22 </span>import GHC.Generics (Generic)
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>-- | Direction of an API call.
+<span class="lineno">   25 </span>data Direction = Request | Response
+<span class="lineno">   26 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Generic</span></span></span></span>)
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON Direction</span></span></span></span></span></span></span></span></span></span>
+<span class="lineno">   29 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff">FromJSON Direction</span></span></span></span></span></span>
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>-- | A single transcript entry recording one request or response.
+<span class="lineno">   32 </span>data TranscriptEntry = TranscriptEntry
+<span class="lineno">   33 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_te_id</span></span></span>            :: !Text          -- ^ UUID
+<span class="lineno">   34 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_timestamp</span></span></span>     :: !UTCTime
+<span class="lineno">   35 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_harness</span></span></span>       :: !(Maybe Text)  -- ^ e.g. Just &quot;claude-code&quot;, Nothing if direct
+<span class="lineno">   36 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_model</span></span></span>         :: !(Maybe Text)  -- ^ e.g. Just &quot;llama3&quot;, Nothing if unknown
+<span class="lineno">   37 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_direction</span></span></span>     :: !Direction
+<span class="lineno">   38 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_payload</span></span></span>       :: !Text          -- ^ Raw text payload
+<span class="lineno">   39 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_durationMs</span></span></span>    :: !(Maybe Int)   -- ^ present on Response entries only
+<span class="lineno">   40 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_correlationId</span></span></span> :: !Text          -- ^ shared UUID linking Request to its Response
+<span class="lineno">   41 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_te_metadata</span></span></span>      :: !(Map Text Value) -- ^ extensible
+<span class="lineno">   42 </span>  }
+<span class="lineno">   43 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Generic</span></span></span></span>)
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON TranscriptEntry</span></span></span></span></span></span></span></span></span></span>
+<span class="lineno">   46 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TranscriptEntry</span></span></span></span></span></span>
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Record-of-Maybe filter; all fields AND together.
+<span class="lineno">   49 </span>data TranscriptFilter = TranscriptFilter
+<span class="lineno">   50 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tf_harness</span></span></span>   :: !(Maybe Text)
+<span class="lineno">   51 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tf_model</span></span></span>     :: !(Maybe Text)
+<span class="lineno">   52 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tf_direction</span></span></span> :: !(Maybe Direction)
+<span class="lineno">   53 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tf_timeRange</span></span></span> :: !(Maybe (UTCTime, UTCTime))
+<span class="lineno">   54 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tf_limit</span></span></span>     :: !(Maybe Int)
+<span class="lineno">   55 </span>  }
+<span class="lineno">   56 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   57 </span>
+<span class="lineno">   58 </span>-- | A filter that matches all entries with no limit.
+<span class="lineno">   59 </span>emptyFilter :: TranscriptFilter
+<span class="lineno">   60 </span><span class="decl"><span class="istickedoff">emptyFilter = TranscriptFilter</span>
+<span class="lineno">   61 </span><span class="spaces">  </span><span class="istickedoff">{ _tf_harness   = Nothing</span>
+<span class="lineno">   62 </span><span class="spaces">  </span><span class="istickedoff">, _tf_model     = Nothing</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">, _tf_direction = Nothing</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">, _tf_timeRange = Nothing</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">, _tf_limit     = Nothing</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>-- | Pure predicate: does an entry match the non-limit filter criteria?
+<span class="lineno">   69 </span>-- '_tf_limit' is intentionally NOT checked here — it is applied by 'applyFilter'.
+<span class="lineno">   70 </span>matchesFilter :: TranscriptFilter -&gt; TranscriptEntry -&gt; Bool
+<span class="lineno">   71 </span><span class="decl"><span class="istickedoff">matchesFilter tf entry =</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="istickedoff">maybe True <span class="nottickedoff">(\h -&gt; _te_harness entry == Just h)</span> (_tf_harness tf)</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">&amp;&amp; maybe True (\m -&gt; _te_model entry == Just m) (_tf_model tf)</span>
+<span class="lineno">   74 </span><span class="spaces">    </span><span class="istickedoff">&amp;&amp; maybe True (\d -&gt; _te_direction entry == d) (_tf_direction tf)</span>
+<span class="lineno">   75 </span><span class="spaces">    </span><span class="istickedoff">&amp;&amp; maybe True (\(lo, hi) -&gt;</span>
+<span class="lineno">   76 </span><span class="spaces">         </span><span class="istickedoff">let ts = _te_timestamp entry in ts &gt;= lo &amp;&amp; ts &lt;= hi) (_tf_timeRange tf)</span></span>
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | Apply the filter to a list of entries.
+<span class="lineno">   79 </span>-- First filters by 'matchesFilter', then applies '_tf_limit' (take N).
+<span class="lineno">   80 </span>applyFilter :: TranscriptFilter -&gt; [TranscriptEntry] -&gt; [TranscriptEntry]
+<span class="lineno">   81 </span><span class="decl"><span class="istickedoff">applyFilter tf = applyLimit . filter (matchesFilter tf)</span>
+<span class="lineno">   82 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   83 </span><span class="spaces">    </span><span class="istickedoff">applyLimit = maybe id take (_tf_limit tf)</span></span>
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>-- | Encode raw bytes to text for storage in '_te_payload'.
+<span class="lineno">   86 </span>-- Uses UTF-8 decoding (lenient — replaces invalid bytes with U+FFFD).
+<span class="lineno">   87 </span>encodePayload :: ByteString -&gt; Text
+<span class="lineno">   88 </span><span class="decl"><span class="istickedoff">encodePayload = TE.decodeUtf8Lenient</span></span>
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>-- | Encode text payload back to raw bytes.
+<span class="lineno">   91 </span>decodePayload :: Text -&gt; Maybe ByteString
+<span class="lineno">   92 </span><span class="decl"><span class="istickedoff">decodePayload = Just . TE.encodeUtf8</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,790 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | WS-streaming endpoint for live transcript updates — WU3.
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- Implements the wire protocol defined in
+<span class="lineno">    4 </span>-- @docs/transcript-streaming.md §Wire Protocol@: on upgrade, the server
+<span class="lineno">    5 </span>-- sends a one-shot @hello@; then a reader/writer race forwards
+<span class="lineno">    6 </span>-- 'BrokerEvent's from the broker to the WS peer while accepting
+<span class="lineno">    7 </span>-- @focus@ ops from the client.
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- /Security/. Every WS upgrade is gated by an exact-match Origin allowlist
+<span class="lineno">   10 </span>-- ('originAllowed' against the supplied list), a per-origin subscriber
+<span class="lineno">   11 </span>-- cap (via 'StreamGuard'), and the broker's global cap. Inbound frames
+<span class="lineno">   12 </span>-- are bounded at 4 KB; malformed JSON returns an in-band error without
+<span class="lineno">   13 </span>-- closing the connection. 'Network.WebSockets.withPingThread' provides
+<span class="lineno">   14 </span>-- the keepalive (Warp's idle timeout does NOT apply to hijacked sockets).
+<span class="lineno">   15 </span>--
+<span class="lineno">   16 </span>-- /Replay/. A focus op carrying @since@ enters replay mode: incoming
+<span class="lineno">   17 </span>-- 'EntryRecorded' events for the focused session are buffered until the
+<span class="lineno">   18 </span>-- file slice is read, then the buffered set is sent (UUID-deduped against
+<span class="lineno">   19 </span>-- the file slice). The algorithm tolerates publishes-during-read and
+<span class="lineno">   20 </span>-- falls back to @replay-failed@ on any anomaly so the client can refetch
+<span class="lineno">   21 </span>-- via HTTP.
+<span class="lineno">   22 </span>module PureClaw.Frontend.Stream
+<span class="lineno">   23 </span>  ( -- * Server entry point
+<span class="lineno">   24 </span>    streamApp
+<span class="lineno">   25 </span>  , serverStartedAt
+<span class="lineno">   26 </span>    -- * Origin normalization (exported for testing)
+<span class="lineno">   27 </span>  , normalizeOrigin
+<span class="lineno">   28 </span>  , originAllowed
+<span class="lineno">   29 </span>  , originAcceptable
+<span class="lineno">   30 </span>    -- * StreamGuard operations
+<span class="lineno">   31 </span>  , tryClaim
+<span class="lineno">   32 </span>  , releaseClaim
+<span class="lineno">   33 </span>    -- * Wire types (exported for testing)
+<span class="lineno">   34 </span>  , ServerEvent (..)
+<span class="lineno">   35 </span>  , ClientOp (..)
+<span class="lineno">   36 </span>  , ErrorCode (..)
+<span class="lineno">   37 </span>  , ActivityKind (..)
+<span class="lineno">   38 </span>  , errorCodeText
+<span class="lineno">   39 </span>  , encodeServerEvent
+<span class="lineno">   40 </span>  , decodeClientOp
+<span class="lineno">   41 </span>    -- * Transcript projection (exported for testing)
+<span class="lineno">   42 </span>  , toEntryInfo
+<span class="lineno">   43 </span>  ) where
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>import Control.Concurrent.Async (AsyncCancelled (..))
+<span class="lineno">   46 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   47 </span>import Control.Concurrent.STM
+<span class="lineno">   48 </span>  ( STM
+<span class="lineno">   49 </span>  , atomically
+<span class="lineno">   50 </span>  , modifyTVar'
+<span class="lineno">   51 </span>  , orElse
+<span class="lineno">   52 </span>  , readTBQueue
+<span class="lineno">   53 </span>  , readTVar
+<span class="lineno">   54 </span>  , retry
+<span class="lineno">   55 </span>  , writeTVar
+<span class="lineno">   56 </span>  )
+<span class="lineno">   57 </span>import Control.Exception
+<span class="lineno">   58 </span>  ( SomeException
+<span class="lineno">   59 </span>  , bracket
+<span class="lineno">   60 </span>  , fromException
+<span class="lineno">   61 </span>  , handle
+<span class="lineno">   62 </span>  , try
+<span class="lineno">   63 </span>  )
+<span class="lineno">   64 </span>import Control.Exception qualified as Exception
+<span class="lineno">   65 </span>import Control.Monad (forM_)
+<span class="lineno">   66 </span>import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.=))
+<span class="lineno">   67 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   68 </span>import Data.Aeson.Types qualified as Aeson
+<span class="lineno">   69 </span>import Data.ByteString qualified as BS
+<span class="lineno">   70 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   71 </span>import Data.IORef
+<span class="lineno">   72 </span>  ( IORef
+<span class="lineno">   73 </span>  , atomicModifyIORef'
+<span class="lineno">   74 </span>  , newIORef
+<span class="lineno">   75 </span>  , readIORef
+<span class="lineno">   76 </span>  , writeIORef
+<span class="lineno">   77 </span>  )
+<span class="lineno">   78 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   79 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   80 </span>import Data.Set qualified as Set
+<span class="lineno">   81 </span>import Data.Text (Text)
+<span class="lineno">   82 </span>import Data.Text qualified as T
+<span class="lineno">   83 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   84 </span>import Data.Time (UTCTime, getCurrentTime)
+<span class="lineno">   85 </span>import Data.Time.Format.ISO8601 (iso8601Show)
+<span class="lineno">   86 </span>import Network.WebSockets qualified as WS
+<span class="lineno">   87 </span>import System.IO.Error (isDoesNotExistError)
+<span class="lineno">   88 </span>import System.IO.Unsafe (unsafePerformIO)
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>import PureClaw.Core.Types (SessionId (..))
+<span class="lineno">   91 </span>import PureClaw.Frontend.API
+<span class="lineno">   92 </span>  ( computeListsSnapshot
+<span class="lineno">   93 </span>  , FrontendEnv (..)
+<span class="lineno">   94 </span>  , HarnessActivity (..)
+<span class="lineno">   95 </span>  , StreamGuard (..)
+<span class="lineno">   96 </span>  , TranscriptEntryInfo (..)
+<span class="lineno">   97 </span>  , isValidSessionId
+<span class="lineno">   98 </span>  )
+<span class="lineno">   99 </span>import PureClaw.Frontend.StreamBroker
+<span class="lineno">  100 </span>  ( BrokerError (..)
+<span class="lineno">  101 </span>  , BrokerEvent (..)
+<span class="lineno">  102 </span>  , SessionActivity (..)
+<span class="lineno">  103 </span>  , StreamBroker (..)
+<span class="lineno">  104 </span>  , Subscription (..)
+<span class="lineno">  105 </span>  )
+<span class="lineno">  106 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">  107 </span>import PureClaw.Session.Types (SessionMeta (..))
+<span class="lineno">  108 </span>import PureClaw.Transcript.Types (Direction (..), TranscriptEntry (..), encodeEntryRaw)
+<span class="lineno">  109 </span>
+<span class="lineno">  110 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  111 </span>-- Wire types
+<span class="lineno">  112 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  113 </span>
+<span class="lineno">  114 </span>-- | Server-to-client events. Encoded as a discriminated union with the
+<span class="lineno">  115 </span>-- @type@ field.
+<span class="lineno">  116 </span>data ServerEvent
+<span class="lineno">  117 </span>  = SeHello   !Text !UTCTime
+<span class="lineno">  118 </span>  | SeEntry   !SessionId !TranscriptEntry
+<span class="lineno">  119 </span>    -- | Ephemeral in-progress update for a harness message being streamed.
+<span class="lineno">  120 </span>    -- Encodes as @{type:&quot;entry-update&quot;}@; the frontend infers streaming from
+<span class="lineno">  121 </span>    -- the event type (no @streaming@ field on the Haskell side).
+<span class="lineno">  122 </span>  | SeEntryUpdate !SessionId !TranscriptEntry
+<span class="lineno">  123 </span>  | SeActivity !SessionId !ActivityKind
+<span class="lineno">  124 </span>  | SeReplayEnd !SessionId !(Maybe Text)
+<span class="lineno">  125 </span>  | SeOverflow
+<span class="lineno">  126 </span>  | SeError   !ErrorCode !Text
+<span class="lineno">  127 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  128 </span>
+<span class="lineno">  129 </span>-- | Activity-event kind (the @activity.kind@ discriminant).
+<span class="lineno">  130 </span>data ActivityKind
+<span class="lineno">  131 </span>  = AkEntryAt        !UTCTime
+<span class="lineno">  132 </span>  | AkHarnessStatus  !HarnessActivity
+<span class="lineno">  133 </span>  | AkSessionCreated !SessionMeta
+<span class="lineno">  134 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  135 </span>
+<span class="lineno">  136 </span>-- | Closed set of in-band error codes emitted by the WS handler.
+<span class="lineno">  137 </span>data ErrorCode
+<span class="lineno">  138 </span>  = EcInvalidOp
+<span class="lineno">  139 </span>  | EcInvalidFrame
+<span class="lineno">  140 </span>  | EcSessionNotFound
+<span class="lineno">  141 </span>  | EcFrameTooLarge
+<span class="lineno">  142 </span>  | EcReplayFailed
+<span class="lineno">  143 </span>  | EcReplayAborted
+<span class="lineno">  144 </span>  | EcInternal
+<span class="lineno">  145 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  146 </span>
+<span class="lineno">  147 </span>-- | Client-to-server ops.
+<span class="lineno">  148 </span>data ClientOp
+<span class="lineno">  149 </span>  = CoFocus !(Maybe SessionId) !(Maybe Text)
+<span class="lineno">  150 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>errorCodeText :: ErrorCode -&gt; Text
+<span class="lineno">  153 </span><span class="decl"><span class="istickedoff">errorCodeText EcInvalidOp       = &quot;invalid-op&quot;</span>
+<span class="lineno">  154 </span><span class="spaces"></span><span class="istickedoff">errorCodeText EcInvalidFrame    = &quot;invalid-frame&quot;</span>
+<span class="lineno">  155 </span><span class="spaces"></span><span class="istickedoff">errorCodeText EcSessionNotFound = &quot;session-not-found&quot;</span>
+<span class="lineno">  156 </span><span class="spaces"></span><span class="istickedoff">errorCodeText EcFrameTooLarge   = &quot;frame-too-large&quot;</span>
+<span class="lineno">  157 </span><span class="spaces"></span><span class="istickedoff">errorCodeText EcReplayFailed    = &quot;replay-failed&quot;</span>
+<span class="lineno">  158 </span><span class="spaces"></span><span class="istickedoff">errorCodeText EcReplayAborted   = &quot;replay-aborted&quot;</span>
+<span class="lineno">  159 </span><span class="spaces"></span><span class="istickedoff">errorCodeText EcInternal        = &quot;internal&quot;</span></span>
+<span class="lineno">  160 </span>
+<span class="lineno">  161 </span>-- | Mirror of 'PureClaw.Frontend.API.toTranscriptEntryInfo' — we re-encode
+<span class="lineno">  162 </span>-- entries through 'TranscriptEntryInfo' so the WS @entry@ event has the
+<span class="lineno">  163 </span>-- same camelCase shape as the HTTP GET response.
+<span class="lineno">  164 </span>toEntryInfo :: TranscriptEntry -&gt; TranscriptEntryInfo
+<span class="lineno">  165 </span><span class="decl"><span class="istickedoff">toEntryInfo e = TranscriptEntryInfo</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">{ _tei_id        = _te_id e</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">, _tei_timestamp = _te_timestamp e</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="istickedoff">, _tei_direction = case _te_direction e of</span>
+<span class="lineno">  169 </span><span class="spaces">      </span><span class="istickedoff">Request  -&gt; &quot;request&quot;</span>
+<span class="lineno">  170 </span><span class="spaces">      </span><span class="istickedoff">Response -&gt; &quot;response&quot;</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">, _tei_payload   = _te_payload e</span>
+<span class="lineno">  172 </span><span class="spaces">  </span><span class="istickedoff">, _tei_harness   = _te_harness e</span>
+<span class="lineno">  173 </span><span class="spaces">  </span><span class="istickedoff">, _tei_model     = _te_model e</span>
+<span class="lineno">  174 </span><span class="spaces">    </span><span class="istickedoff">-- Everything-visible: carry the byte-faithful disk line. For an</span>
+<span class="lineno">  175 </span><span class="spaces">    </span><span class="istickedoff">-- over-cap (capPayload-truncated) entry this is the truncated line</span>
+<span class="lineno">  176 </span><span class="spaces">    </span><span class="istickedoff">-- WITH @&quot;truncated&quot;: true@ plainly visible; reload (REST → disk)</span>
+<span class="lineno">  177 </span><span class="spaces">    </span><span class="istickedoff">-- yields the full line. Nothing is hidden silently.</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="istickedoff">, _tei_raw       = encodeEntryRaw e</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>encodeActivity :: ActivityKind -&gt; Value
+<span class="lineno">  182 </span><span class="decl"><span class="istickedoff">encodeActivity (AkEntryAt t) =</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">object [ &quot;kind&quot; .= (&quot;entry-at&quot; :: Text), &quot;timestamp&quot; .= t ]</span>
+<span class="lineno">  184 </span><span class="spaces"></span><span class="istickedoff">encodeActivity (AkHarnessStatus s) =</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">object [ &quot;kind&quot; .= (&quot;harness-status&quot; :: Text), &quot;status&quot; .= s ]</span>
+<span class="lineno">  186 </span><span class="spaces"></span><span class="istickedoff">encodeActivity (AkSessionCreated meta) =</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">object [ &quot;kind&quot; .= (&quot;session-created&quot; :: Text), &quot;session&quot; .= meta ]</span></span>
+<span class="lineno">  188 </span>
+<span class="lineno">  189 </span>-- | Encode a 'ServerEvent' to JSON.
+<span class="lineno">  190 </span>encodeServerEvent :: ServerEvent -&gt; Value
+<span class="lineno">  191 </span><span class="decl"><span class="istickedoff">encodeServerEvent (SeHello pv started) = object</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot;            .= (&quot;hello&quot; :: Text)</span>
+<span class="lineno">  193 </span><span class="spaces">  </span><span class="istickedoff">, &quot;protocolVersion&quot; .= pv</span>
+<span class="lineno">  194 </span><span class="spaces">  </span><span class="istickedoff">, &quot;serverStartedAt&quot; .= T.pack (iso8601Show started)</span>
+<span class="lineno">  195 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  196 </span><span class="spaces"></span><span class="istickedoff">encodeServerEvent (SeEntry sid entry) = object</span>
+<span class="lineno">  197 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot;      .= (&quot;entry&quot; :: Text)</span>
+<span class="lineno">  198 </span><span class="spaces">  </span><span class="istickedoff">, &quot;sessionId&quot; .= unSessionId sid</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">, &quot;entry&quot;     .= toEntryInfo entry</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  201 </span><span class="spaces"></span><span class="istickedoff">encodeServerEvent (SeEntryUpdate sid entry) = object</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot;      .= (&quot;entry-update&quot; :: Text)</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">, &quot;sessionId&quot; .= unSessionId sid</span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="istickedoff">, &quot;entry&quot;     .= toEntryInfo entry</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  206 </span><span class="spaces"></span><span class="istickedoff">encodeServerEvent (SeActivity sid kind) = object</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot;      .= (&quot;activity&quot; :: Text)</span>
+<span class="lineno">  208 </span><span class="spaces">  </span><span class="istickedoff">, &quot;sessionId&quot; .= unSessionId sid</span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="istickedoff">, &quot;activity&quot;  .= encodeActivity kind</span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  211 </span><span class="spaces"></span><span class="istickedoff">encodeServerEvent (SeReplayEnd sid mLast) = object</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot;                .= (&quot;replay-end&quot; :: Text)</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">, &quot;sessionId&quot;           .= unSessionId sid</span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">, &quot;lastReplayedEntryId&quot; .= mLast</span>
+<span class="lineno">  215 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  216 </span><span class="spaces"></span><span class="istickedoff">encodeServerEvent SeOverflow = object [ &quot;type&quot; .= (&quot;overflow&quot; :: Text) ]</span>
+<span class="lineno">  217 </span><span class="spaces"></span><span class="istickedoff">encodeServerEvent (SeError code msg) = object</span>
+<span class="lineno">  218 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;type&quot;    .= (&quot;error&quot; :: Text)</span>
+<span class="lineno">  219 </span><span class="spaces">  </span><span class="istickedoff">, &quot;code&quot;    .= errorCodeText code</span>
+<span class="lineno">  220 </span><span class="spaces">  </span><span class="istickedoff">, &quot;message&quot; .= msg</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  222 </span>
+<span class="lineno">  223 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON ServerEvent</span></span></span></span></span></span></span></span> where
+<span class="lineno">  224 </span>  <span class="decl"><span class="nottickedoff">toJSON = encodeServerEvent</span></span>
+<span class="lineno">  225 </span>
+<span class="lineno">  226 </span>-- | Outcome of a 'decodeClientOp' attempt. Stays a sum so callers can
+<span class="lineno">  227 </span>-- distinguish &quot;JSON didn't parse&quot; from &quot;JSON parsed but the op was
+<span class="lineno">  228 </span>-- unknown&quot; (D29 vs D36).
+<span class="lineno">  229 </span>data DecodeResult
+<span class="lineno">  230 </span>  = DrOk !ClientOp
+<span class="lineno">  231 </span>  | DrInvalidFrame
+<span class="lineno">  232 </span>  | DrInvalidOp
+<span class="lineno">  233 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  234 </span>
+<span class="lineno">  235 </span>-- | Two-phase parse: structural JSON decode, then op-discriminant parse.
+<span class="lineno">  236 </span>decodeClientOp :: LBS.ByteString -&gt; DecodeResult
+<span class="lineno">  237 </span><span class="decl"><span class="istickedoff">decodeClientOp bs = case Aeson.eitherDecode bs of</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="istickedoff">Left _      -&gt; DrInvalidFrame</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="istickedoff">Right value -&gt; case Aeson.parseEither parseFocus (value :: Value) of</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">Right v   -&gt; DrOk v</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">Left err</span>
+<span class="lineno">  242 </span><span class="spaces">      </span><span class="istickedoff">| &quot;INVALID_OP_TAG&quot; `T.isInfixOf` T.pack err -&gt; DrInvalidOp</span>
+<span class="lineno">  243 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>                                 -&gt; DrInvalidFrame</span>
+<span class="lineno">  244 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  245 </span><span class="spaces">    </span><span class="istickedoff">-- Tag failures with a non-natural sentinel that's unlikely to collide</span>
+<span class="lineno">  246 </span><span class="spaces">    </span><span class="istickedoff">-- with Aeson's generic decode errors. The match above lifts the tag</span>
+<span class="lineno">  247 </span><span class="spaces">    </span><span class="istickedoff">-- out of the prefixed error message.</span>
+<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">parseFocus :: Value -&gt; Aeson.Parser ClientOp</span>
+<span class="lineno">  249 </span><span class="spaces">    </span><span class="istickedoff">parseFocus = withObject <span class="nottickedoff">&quot;ClientOp&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  250 </span><span class="spaces">      </span><span class="istickedoff">op &lt;- o .: &quot;op&quot; :: Aeson.Parser Text</span>
+<span class="lineno">  251 </span><span class="spaces">      </span><span class="istickedoff">case op of</span>
+<span class="lineno">  252 </span><span class="spaces">        </span><span class="istickedoff">&quot;focus&quot; -&gt; do</span>
+<span class="lineno">  253 </span><span class="spaces">          </span><span class="istickedoff">msid   &lt;- o .:? &quot;sessionId&quot;</span>
+<span class="lineno">  254 </span><span class="spaces">          </span><span class="istickedoff">msince &lt;- o .:? &quot;since&quot;</span>
+<span class="lineno">  255 </span><span class="spaces">          </span><span class="istickedoff">pure (CoFocus (fmap SessionId msid) msince)</span>
+<span class="lineno">  256 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; fail &quot;INVALID_OP_TAG&quot;</span></span>
+<span class="lineno">  257 </span>
+<span class="lineno">  258 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON ClientOp</span></span></span></span> where
+<span class="lineno">  259 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;ClientOp&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  260 </span><span class="spaces">    </span><span class="istickedoff">op &lt;- o .: &quot;op&quot; :: Aeson.Parser Text</span>
+<span class="lineno">  261 </span><span class="spaces">    </span><span class="istickedoff">case op of</span>
+<span class="lineno">  262 </span><span class="spaces">      </span><span class="istickedoff">&quot;focus&quot; -&gt; do</span>
+<span class="lineno">  263 </span><span class="spaces">        </span><span class="istickedoff">msid   &lt;- o .:? &quot;sessionId&quot;</span>
+<span class="lineno">  264 </span><span class="spaces">        </span><span class="istickedoff">msince &lt;- o .:? &quot;since&quot;</span>
+<span class="lineno">  265 </span><span class="spaces">        </span><span class="istickedoff">pure (CoFocus (fmap SessionId msid) msince)</span>
+<span class="lineno">  266 </span><span class="spaces">      </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">fail (&quot;unknown-op: &quot; &lt;&gt; T.unpack op)</span></span></span>
+<span class="lineno">  267 </span>
+<span class="lineno">  268 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  269 </span>-- Origin matching
+<span class="lineno">  270 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  271 </span>
+<span class="lineno">  272 </span>-- | Lowercase the scheme and host components of an origin string; strip a
+<span class="lineno">  273 </span>-- trailing slash. Port is left as-is.
+<span class="lineno">  274 </span>normalizeOrigin :: Text -&gt; Text
+<span class="lineno">  275 </span><span class="decl"><span class="istickedoff">normalizeOrigin t = dropTrailingSlash (lowerSchemeHost t)</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  277 </span><span class="spaces">    </span><span class="istickedoff">dropTrailingSlash s</span>
+<span class="lineno">  278 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlyfalse">T.null s</span>          = <span class="nottickedoff">s</span></span>
+<span class="lineno">  279 </span><span class="spaces">      </span><span class="istickedoff">| T.last s == '/'   = T.init s</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>         = s</span>
+<span class="lineno">  281 </span><span class="spaces">    </span><span class="istickedoff">lowerSchemeHost s =</span>
+<span class="lineno">  282 </span><span class="spaces">      </span><span class="istickedoff">case T.breakOn &quot;://&quot; s of</span>
+<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">(scheme, rest) | <span class="tickonlytrue">T.isPrefixOf &quot;://&quot; rest</span> -&gt;</span>
+<span class="lineno">  284 </span><span class="spaces">          </span><span class="istickedoff">let body = T.drop 3 rest</span>
+<span class="lineno">  285 </span><span class="spaces">              </span><span class="istickedoff">(host, port) = T.breakOn &quot;:&quot; body</span>
+<span class="lineno">  286 </span><span class="spaces">          </span><span class="istickedoff">in T.toLower scheme &lt;&gt; &quot;://&quot; &lt;&gt; T.toLower host &lt;&gt; port</span>
+<span class="lineno">  287 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">T.toLower s</span></span></span>
+<span class="lineno">  288 </span>
+<span class="lineno">  289 </span>-- | Exact-match origin lookup against a /list of normalized origins/.
+<span class="lineno">  290 </span>-- Empty allowlist denies everything.
+<span class="lineno">  291 </span>originAllowed :: [Text] -&gt; Text -&gt; Bool
+<span class="lineno">  292 </span><span class="decl"><span class="istickedoff">originAllowed []      _      = False</span>
+<span class="lineno">  293 </span><span class="spaces"></span><span class="istickedoff">originAllowed allowed origin = origin `elem` map normalizeOrigin allowed</span></span>
+<span class="lineno">  294 </span>
+<span class="lineno">  295 </span>-- | Accept the given (already-normalized) origin if it matches the configured
+<span class="lineno">  296 </span>-- allowlist OR matches the Host-reflected origin — i.e. the
+<span class="lineno">  297 </span>-- @scheme://Host-header@ the request itself arrived on.
+<span class="lineno">  298 </span>--
+<span class="lineno">  299 </span>-- The Host-reflection relaxation lets a user open the URL from a LAN IP,
+<span class="lineno">  300 </span>-- shared link, or alternative interface (anything that resolves to the
+<span class="lineno">  301 </span>-- bound address) without enumerating each one in @_fc_allowedOrigins@.
+<span class="lineno">  302 </span>-- It does NOT broaden the threat surface beyond what the HTTP API already
+<span class="lineno">  303 </span>-- accepts: any client able to reach the configured bind address can hit
+<span class="lineno">  304 </span>-- the HTTP routes today, and Host-reflection makes the WS endpoint match
+<span class="lineno">  305 </span>-- that posture.
+<span class="lineno">  306 </span>--
+<span class="lineno">  307 </span>-- It does still block the drive-by case the strict allowlist was added for:
+<span class="lineno">  308 </span>-- a malicious page at @attacker.com@ gets neither the allowlist match nor
+<span class="lineno">  309 </span>-- the Host-reflection match (its Origin won't equal the server's Host
+<span class="lineno">  310 </span>-- header — the server's Host header is the address the BROWSER connected
+<span class="lineno">  311 </span>-- to, which is by construction the legit server, not the attacker).
+<span class="lineno">  312 </span>originAcceptable :: Maybe Text -&gt; [Text] -&gt; Text -&gt; Bool
+<span class="lineno">  313 </span><span class="decl"><span class="istickedoff">originAcceptable mHostReflected allowed origin =</span>
+<span class="lineno">  314 </span><span class="spaces">     </span><span class="istickedoff">originAllowed allowed origin</span>
+<span class="lineno">  315 </span><span class="spaces">  </span><span class="istickedoff">|| maybe False ((== origin) . normalizeOrigin) mHostReflected</span></span>
+<span class="lineno">  316 </span>
+<span class="lineno">  317 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  318 </span>-- StreamGuard
+<span class="lineno">  319 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  320 </span>
+<span class="lineno">  321 </span>-- | Atomically increment the per-origin counter, returning 'True' if the
+<span class="lineno">  322 </span>-- counter was strictly below '_streamGuard_maxPerOrigin' before the
+<span class="lineno">  323 </span>-- increment. The caller must invoke 'releaseClaim' exactly once for each
+<span class="lineno">  324 </span>-- successful claim.
+<span class="lineno">  325 </span>tryClaim :: StreamGuard -&gt; Text -&gt; STM Bool
+<span class="lineno">  326 </span><span class="decl"><span class="istickedoff">tryClaim g origin = do</span>
+<span class="lineno">  327 </span><span class="spaces">  </span><span class="istickedoff">m &lt;- readTVar (_streamGuard_perOrigin g)</span>
+<span class="lineno">  328 </span><span class="spaces">  </span><span class="istickedoff">let current = Map.findWithDefault 0 origin m</span>
+<span class="lineno">  329 </span><span class="spaces">  </span><span class="istickedoff">if current &gt;= _streamGuard_maxPerOrigin g</span>
+<span class="lineno">  330 </span><span class="spaces">    </span><span class="istickedoff">then pure False</span>
+<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  332 </span><span class="spaces">      </span><span class="istickedoff">writeTVar (_streamGuard_perOrigin g) (Map.insert origin (current + 1) m)</span>
+<span class="lineno">  333 </span><span class="spaces">      </span><span class="istickedoff">pure True</span></span>
+<span class="lineno">  334 </span>
+<span class="lineno">  335 </span>-- | Decrement (or remove) the per-origin counter. Idempotent against a
+<span class="lineno">  336 </span>-- key with count 0.
+<span class="lineno">  337 </span>releaseClaim :: StreamGuard -&gt; Text -&gt; STM ()
+<span class="lineno">  338 </span><span class="decl"><span class="istickedoff">releaseClaim g origin = modifyTVar' (_streamGuard_perOrigin g) (Map.update dec origin)</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  340 </span><span class="spaces">    </span><span class="istickedoff">dec n | n &lt;= 1    = Nothing</span>
+<span class="lineno">  341 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Just (n - 1)</span></span>
+<span class="lineno">  342 </span>
+<span class="lineno">  343 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  344 </span>-- Server lifetime constant (process-global)
+<span class="lineno">  345 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  346 </span>
+<span class="lineno">  347 </span>-- | Per-process @serverStartedAt@ marker. Captured once at first access
+<span class="lineno">  348 </span>-- so restarts (a fresh process) flip the value, letting clients detect a
+<span class="lineno">  349 </span>-- new server (D37). 'unsafePerformIO' is appropriate — value is initialised
+<span class="lineno">  350 </span>-- once and read many times; no IO escapes.
+<span class="lineno">  351 </span>serverStartedAt :: UTCTime
+<span class="lineno">  352 </span><span class="decl"><span class="istickedoff">serverStartedAt = unsafePerformIO getCurrentTime</span></span>
+<span class="lineno">  353 </span>{-# NOINLINE serverStartedAt #-}
+<span class="lineno">  354 </span>
+<span class="lineno">  355 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  356 </span>-- Inbound-frame size cap
+<span class="lineno">  357 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  358 </span>
+<span class="lineno">  359 </span>-- | Cap on inbound WS data-message size, in bytes (D13).
+<span class="lineno">  360 </span>maxInboundBytes :: Int
+<span class="lineno">  361 </span><span class="decl"><span class="istickedoff">maxInboundBytes = 4 * 1024</span></span>
+<span class="lineno">  362 </span>
+<span class="lineno">  363 </span>-- | Cap on inbound @since@ token length (D27).
+<span class="lineno">  364 </span>maxSinceLength :: Int
+<span class="lineno">  365 </span><span class="decl"><span class="istickedoff">maxSinceLength = 64</span></span>
+<span class="lineno">  366 </span>
+<span class="lineno">  367 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  368 </span>-- Connection state
+<span class="lineno">  369 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  370 </span>
+<span class="lineno">  371 </span>-- | Per-WS-connection mutable state.
+<span class="lineno">  372 </span>data ConnState = ConnState
+<span class="lineno">  373 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_conn_focus</span></span></span>       :: !(IORef (Maybe SessionId))
+<span class="lineno">  374 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_conn_origin</span></span></span>      :: !Text
+<span class="lineno">  375 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_conn_originRaw</span></span></span>   :: !Text
+<span class="lineno">  376 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_conn_replayMode</span></span></span>  :: !(IORef (Maybe SessionId))
+<span class="lineno">  377 </span>    -- ^ When @Just sid@, the writer buffers 'EntryRecorded' events for
+<span class="lineno">  378 </span>    -- @sid@ instead of forwarding them. @Nothing@ means live mode.
+<span class="lineno">  379 </span>    --
+<span class="lineno">  380 </span>    -- (Stored in an IORef because the WS handler is single-threaded
+<span class="lineno">  381 </span>    -- per-connection; the reader thread sets it under STM only when
+<span class="lineno">  382 </span>    -- aborting a replay mid-flight (D40), where the buffer drain and
+<span class="lineno">  383 </span>    -- the flag flip must observe one consistent moment.)
+<span class="lineno">  384 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_conn_replayBuf</span></span></span>   :: !(IORef [TranscriptEntry])
+<span class="lineno">  385 </span>  }
+<span class="lineno">  386 </span>
+<span class="lineno">  387 </span>mkConnState :: Text -&gt; Text -&gt; IO ConnState
+<span class="lineno">  388 </span><span class="decl"><span class="istickedoff">mkConnState origin originRaw = do</span>
+<span class="lineno">  389 </span><span class="spaces">  </span><span class="istickedoff">focus      &lt;- newIORef <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  390 </span><span class="spaces">  </span><span class="istickedoff">replayMode &lt;- newIORef Nothing</span>
+<span class="lineno">  391 </span><span class="spaces">  </span><span class="istickedoff">replayBuf  &lt;- newIORef <span class="nottickedoff">[]</span></span>
+<span class="lineno">  392 </span><span class="spaces">  </span><span class="istickedoff">pure ConnState</span>
+<span class="lineno">  393 </span><span class="spaces">    </span><span class="istickedoff">{ _conn_focus      = focus</span>
+<span class="lineno">  394 </span><span class="spaces">    </span><span class="istickedoff">, _conn_origin     = origin</span>
+<span class="lineno">  395 </span><span class="spaces">    </span><span class="istickedoff">, _conn_originRaw  = originRaw</span>
+<span class="lineno">  396 </span><span class="spaces">    </span><span class="istickedoff">, _conn_replayMode = replayMode</span>
+<span class="lineno">  397 </span><span class="spaces">    </span><span class="istickedoff">, _conn_replayBuf  = replayBuf</span>
+<span class="lineno">  398 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  399 </span>
+<span class="lineno">  400 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  401 </span>-- streamApp
+<span class="lineno">  402 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  403 </span>
+<span class="lineno">  404 </span>-- | The WS server-app. Returns a 'WS.ServerApp' suitable for composition
+<span class="lineno">  405 </span>-- via 'Network.Wai.Handler.WebSockets.websocketsOr'. The list of allowed
+<span class="lineno">  406 </span>-- origins is supplied by the caller (Server.hs reads it out of
+<span class="lineno">  407 </span>-- @_fc_allowedOrigins@; tests inject their own).
+<span class="lineno">  408 </span>streamApp :: [Text] -&gt; FrontendEnv -&gt; WS.ServerApp
+<span class="lineno">  409 </span><span class="decl"><span class="istickedoff">streamApp allowed env pending = do</span>
+<span class="lineno">  410 </span><span class="spaces">  </span><span class="istickedoff">let <span class="nottickedoff">logger = _fe_logger env</span></span>
+<span class="lineno">  411 </span><span class="spaces">  </span><span class="istickedoff">case (_fe_broker env, _fe_streamGuard env) of</span>
+<span class="lineno">  412 </span><span class="spaces">    </span><span class="istickedoff">(Just broker, Just guard) -&gt;</span>
+<span class="lineno">  413 </span><span class="spaces">      </span><span class="istickedoff">handleUpgrade allowed env broker guard pending</span>
+<span class="lineno">  414 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  415 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn logger &quot;WS upgrade rejected: streaming disabled&quot;</span></span>
+<span class="lineno">  416 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">WS.rejectRequestWith pending (rejection 503 &quot;streaming disabled&quot;)</span></span></span>
+<span class="lineno">  417 </span>
+<span class="lineno">  418 </span>rejection :: Int -&gt; BS.ByteString -&gt; WS.RejectRequest
+<span class="lineno">  419 </span><span class="decl"><span class="istickedoff">rejection code msg = WS.defaultRejectRequest</span>
+<span class="lineno">  420 </span><span class="spaces">  </span><span class="istickedoff">{ WS.rejectCode    = code</span>
+<span class="lineno">  421 </span><span class="spaces">  </span><span class="istickedoff">, WS.rejectMessage = msg</span>
+<span class="lineno">  422 </span><span class="spaces">  </span><span class="istickedoff">, WS.rejectBody    = msg</span>
+<span class="lineno">  423 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  424 </span>
+<span class="lineno">  425 </span>-- | Handle a pending WS upgrade. Order:
+<span class="lineno">  426 </span>-- Origin allowlist → 'tryClaim' → broker subscribe → 'acceptRequest'.
+<span class="lineno">  427 </span>handleUpgrade
+<span class="lineno">  428 </span>  :: [Text]
+<span class="lineno">  429 </span>  -&gt; FrontendEnv
+<span class="lineno">  430 </span>  -&gt; StreamBroker
+<span class="lineno">  431 </span>  -&gt; StreamGuard
+<span class="lineno">  432 </span>  -&gt; WS.PendingConnection
+<span class="lineno">  433 </span>  -&gt; IO ()
+<span class="lineno">  434 </span><span class="decl"><span class="istickedoff">handleUpgrade allowed env broker guard pending = do</span>
+<span class="lineno">  435 </span><span class="spaces">  </span><span class="istickedoff">let logger        = _fe_logger env</span>
+<span class="lineno">  436 </span><span class="spaces">      </span><span class="istickedoff">req           = WS.pendingRequest pending</span>
+<span class="lineno">  437 </span><span class="spaces">      </span><span class="istickedoff">headers       = WS.requestHeaders req</span>
+<span class="lineno">  438 </span><span class="spaces">      </span><span class="istickedoff">mOriginBS     = lookup &quot;Origin&quot; headers</span>
+<span class="lineno">  439 </span><span class="spaces">      </span><span class="istickedoff">mHostHeader   = TE.decodeUtf8 &lt;$&gt; lookup &quot;Host&quot; headers</span>
+<span class="lineno">  440 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">hostRemote    = fromMaybe &quot;&lt;unknown&gt;&quot; mHostHeader</span></span>
+<span class="lineno">  441 </span><span class="spaces">      </span><span class="istickedoff">-- Host-reflected origin: scheme://&lt;Host header&gt;, with scheme matching</span>
+<span class="lineno">  442 </span><span class="spaces">      </span><span class="istickedoff">-- the upgrade's TLS state. Used by 'originAcceptable' to allow a</span>
+<span class="lineno">  443 </span><span class="spaces">      </span><span class="istickedoff">-- request whose Origin matches the address the request itself hit</span>
+<span class="lineno">  444 </span><span class="spaces">      </span><span class="istickedoff">-- (typically: localhost vs LAN IP, or any alternate interface the</span>
+<span class="lineno">  445 </span><span class="spaces">      </span><span class="istickedoff">-- user reached the server through).</span>
+<span class="lineno">  446 </span><span class="spaces">      </span><span class="istickedoff">scheme        = if <span class="tickonlyfalse">WS.requestSecure req</span> then <span class="nottickedoff">&quot;https&quot;</span> else &quot;http&quot;</span>
+<span class="lineno">  447 </span><span class="spaces">      </span><span class="istickedoff">mHostReflected = (\h -&gt; scheme &lt;&gt; &quot;://&quot; &lt;&gt; h) &lt;$&gt; mHostHeader</span>
+<span class="lineno">  448 </span><span class="spaces">  </span><span class="istickedoff">case mOriginBS of</span>
+<span class="lineno">  449 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  450 </span><span class="spaces">      </span><span class="istickedoff">_lh_logWarn logger $</span>
+<span class="lineno">  451 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">&quot;WS upgrade rejected: missing Origin (remote=&quot; &lt;&gt; hostRemote &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  452 </span><span class="spaces">      </span><span class="istickedoff">WS.rejectRequestWith pending (rejection 403 &quot;missing Origin&quot;)</span>
+<span class="lineno">  453 </span><span class="spaces">    </span><span class="istickedoff">Just rawBytes -&gt; do</span>
+<span class="lineno">  454 </span><span class="spaces">      </span><span class="istickedoff">let originRaw  = TE.decodeUtf8 rawBytes</span>
+<span class="lineno">  455 </span><span class="spaces">          </span><span class="istickedoff">normalized = normalizeOrigin originRaw</span>
+<span class="lineno">  456 </span><span class="spaces">      </span><span class="istickedoff">if not (originAcceptable mHostReflected allowed normalized)</span>
+<span class="lineno">  457 </span><span class="spaces">        </span><span class="istickedoff">then do</span>
+<span class="lineno">  458 </span><span class="spaces">          </span><span class="istickedoff">_lh_logWarn logger $</span>
+<span class="lineno">  459 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;WS upgrade rejected: Origin not in allowlist and does not match Host (origin=&quot;</span></span>
+<span class="lineno">  460 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; originRaw &lt;&gt; &quot;, host=&quot; &lt;&gt; hostRemote &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  461 </span><span class="spaces">          </span><span class="istickedoff">WS.rejectRequestWith pending (rejection 403 &quot;Origin not allowed&quot;)</span>
+<span class="lineno">  462 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  463 </span><span class="spaces">          </span><span class="istickedoff">claimed &lt;- atomically (tryClaim guard normalized)</span>
+<span class="lineno">  464 </span><span class="spaces">          </span><span class="istickedoff">if not claimed</span>
+<span class="lineno">  465 </span><span class="spaces">            </span><span class="istickedoff">then do</span>
+<span class="lineno">  466 </span><span class="spaces">              </span><span class="istickedoff">_lh_logWarn logger $</span>
+<span class="lineno">  467 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;WS upgrade rejected: per-origin cap reached (origin=&quot;</span></span>
+<span class="lineno">  468 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; originRaw &lt;&gt; &quot;, host=&quot; &lt;&gt; hostRemote &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  469 </span><span class="spaces">              </span><span class="istickedoff">WS.rejectRequestWith pending</span>
+<span class="lineno">  470 </span><span class="spaces">                </span><span class="istickedoff">(rejection 503 &quot;per-origin cap reached&quot;)</span>
+<span class="lineno">  471 </span><span class="spaces">            </span><span class="istickedoff">else do</span>
+<span class="lineno">  472 </span><span class="spaces">              </span><span class="istickedoff">subResult &lt;- _streamBroker_subscribe broker</span>
+<span class="lineno">  473 </span><span class="spaces">              </span><span class="istickedoff">case subResult of</span>
+<span class="lineno">  474 </span><span class="spaces">                </span><span class="istickedoff">Left SubscriberCapReached -&gt; do</span>
+<span class="lineno">  475 </span><span class="spaces">                  </span><span class="istickedoff">atomically (releaseClaim guard normalized)</span>
+<span class="lineno">  476 </span><span class="spaces">                  </span><span class="istickedoff">_lh_logWarn logger $</span>
+<span class="lineno">  477 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">&quot;WS upgrade rejected: broker cap reached (origin=&quot;</span></span>
+<span class="lineno">  478 </span><span class="spaces">                      </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; originRaw &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  479 </span><span class="spaces">                  </span><span class="istickedoff">WS.rejectRequestWith pending</span>
+<span class="lineno">  480 </span><span class="spaces">                    </span><span class="istickedoff">(rejection 503 &quot;global cap reached&quot;)</span>
+<span class="lineno">  481 </span><span class="spaces">                </span><span class="istickedoff">Right sub -&gt;</span>
+<span class="lineno">  482 </span><span class="spaces">                  </span><span class="istickedoff">bracket</span>
+<span class="lineno">  483 </span><span class="spaces">                    </span><span class="istickedoff">(do</span>
+<span class="lineno">  484 </span><span class="spaces">                       </span><span class="istickedoff">conn &lt;- WS.acceptRequest pending</span>
+<span class="lineno">  485 </span><span class="spaces">                       </span><span class="istickedoff">cs   &lt;- mkConnState normalized originRaw</span>
+<span class="lineno">  486 </span><span class="spaces">                       </span><span class="istickedoff">pure (conn, cs))</span>
+<span class="lineno">  487 </span><span class="spaces">                    </span><span class="istickedoff">(\_ -&gt; do</span>
+<span class="lineno">  488 </span><span class="spaces">                       </span><span class="istickedoff">atomically (releaseClaim guard normalized)</span>
+<span class="lineno">  489 </span><span class="spaces">                       </span><span class="istickedoff">_sub_cancel sub)</span>
+<span class="lineno">  490 </span><span class="spaces">                    </span><span class="istickedoff">(uncurry (runConnection env sub))</span></span>
+<span class="lineno">  491 </span>
+<span class="lineno">  492 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  493 </span>-- Per-connection runner
+<span class="lineno">  494 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  495 </span>
+<span class="lineno">  496 </span>-- | Once the upgrade has succeeded, send the hello, install the ping
+<span class="lineno">  497 </span>-- thread, and run the reader/writer race. Any escaped exception is
+<span class="lineno">  498 </span>-- caught, logged at error level, surfaced as @{code:\&quot;internal\&quot;}@,
+<span class="lineno">  499 </span>-- and the connection is closed (D33).
+<span class="lineno">  500 </span>runConnection
+<span class="lineno">  501 </span>  :: FrontendEnv
+<span class="lineno">  502 </span>  -&gt; Subscription
+<span class="lineno">  503 </span>  -&gt; WS.Connection
+<span class="lineno">  504 </span>  -&gt; ConnState
+<span class="lineno">  505 </span>  -&gt; IO ()
+<span class="lineno">  506 </span><span class="decl"><span class="istickedoff">runConnection env sub conn cs = do</span>
+<span class="lineno">  507 </span><span class="spaces">  </span><span class="istickedoff">let <span class="nottickedoff">logger = _fe_logger env</span></span>
+<span class="lineno">  508 </span><span class="spaces">  </span><span class="istickedoff">handle <span class="nottickedoff">(escapeHandler logger)</span> $ do</span>
+<span class="lineno">  509 </span><span class="spaces">    </span><span class="istickedoff">sendHello conn</span>
+<span class="lineno">  510 </span><span class="spaces">    </span><span class="istickedoff">-- Push initial sidebar lists so the client renders without waiting</span>
+<span class="lineno">  511 </span><span class="spaces">    </span><span class="istickedoff">-- for the first mutation or a fallback HTTP poll.</span>
+<span class="lineno">  512 </span><span class="spaces">    </span><span class="istickedoff">case _fe_broker env of</span>
+<span class="lineno">  513 </span><span class="spaces">      </span><span class="istickedoff">Just _broker -&gt; do</span>
+<span class="lineno">  514 </span><span class="spaces">        </span><span class="istickedoff">snapshot &lt;- computeListsSnapshot env</span>
+<span class="lineno">  515 </span><span class="spaces">        </span><span class="istickedoff">WS.sendTextData conn (Aeson.encode snapshot)</span>
+<span class="lineno">  516 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  517 </span><span class="spaces">    </span><span class="istickedoff">WS.withPingThread <span class="nottickedoff">conn</span> pingInterval <span class="nottickedoff">(pure ())</span> $</span>
+<span class="lineno">  518 </span><span class="spaces">      </span><span class="istickedoff">Async.race_ (readerLoop env conn cs)</span>
+<span class="lineno">  519 </span><span class="spaces">                  </span><span class="istickedoff">(writerLoop sub conn cs)</span>
+<span class="lineno">  520 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  521 </span><span class="spaces">    </span><span class="istickedoff">escapeHandler :: LogHandle -&gt; SomeException -&gt; IO ()</span>
+<span class="lineno">  522 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">escapeHandler logger e</span></span>
+<span class="lineno">  523 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">| Just AsyncCancelled &lt;- fromException e = Exception.throwIO e</span></span>
+<span class="lineno">  524 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">| Just (WS.CloseRequest {}) &lt;- fromException e = pure ()</span></span>
+<span class="lineno">  525 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">| Just WS.ConnectionClosed &lt;- fromException e = pure ()</span></span>
+<span class="lineno">  526 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">| otherwise = do</span></span>
+<span class="lineno">  527 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">_lh_logError logger $</span></span>
+<span class="lineno">  528 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;WS connection internal error (origin=&quot; &lt;&gt; _conn_originRaw cs</span></span>
+<span class="lineno">  529 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot;): &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  530 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- try @SomeException</span></span>
+<span class="lineno">  531 </span><span class="spaces">                 </span><span class="istickedoff"><span class="nottickedoff">(sendEvent conn (SeError EcInternal (T.pack (show e))))</span></span>
+<span class="lineno">  532 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure ()</span></span></span>
+<span class="lineno">  533 </span>
+<span class="lineno">  534 </span>-- | Ping every 25 s; the websockets lib's pong timeout (10 s) closes the
+<span class="lineno">  535 </span>-- socket if the peer goes silent (D32). Logged via the bracket exit path
+<span class="lineno">  536 </span>-- in 'handleUpgrade'.
+<span class="lineno">  537 </span>pingInterval :: Int
+<span class="lineno">  538 </span><span class="decl"><span class="istickedoff">pingInterval = 25</span></span>
+<span class="lineno">  539 </span>
+<span class="lineno">  540 </span>sendHello :: WS.Connection -&gt; IO ()
+<span class="lineno">  541 </span><span class="decl"><span class="istickedoff">sendHello conn = sendEvent conn (SeHello &quot;v1&quot; serverStartedAt)</span></span>
+<span class="lineno">  542 </span>
+<span class="lineno">  543 </span>sendEvent :: WS.Connection -&gt; ServerEvent -&gt; IO ()
+<span class="lineno">  544 </span><span class="decl"><span class="istickedoff">sendEvent conn ev = WS.sendTextData conn (Aeson.encode (encodeServerEvent ev))</span></span>
+<span class="lineno">  545 </span>
+<span class="lineno">  546 </span>sendError :: WS.Connection -&gt; ErrorCode -&gt; Text -&gt; IO ()
+<span class="lineno">  547 </span><span class="decl"><span class="istickedoff">sendError conn code msg = sendEvent conn (SeError code msg)</span></span>
+<span class="lineno">  548 </span>
+<span class="lineno">  549 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  550 </span>-- Reader loop
+<span class="lineno">  551 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  552 </span>
+<span class="lineno">  553 </span>-- | Read inbound frames forever. Each frame is bounded at 4 KB; oversize
+<span class="lineno">  554 </span>-- frames close the connection. Malformed JSON or unknown ops surface as
+<span class="lineno">  555 </span>-- in-band errors without closing.
+<span class="lineno">  556 </span>readerLoop :: FrontendEnv -&gt; WS.Connection -&gt; ConnState -&gt; IO ()
+<span class="lineno">  557 </span><span class="decl"><span class="istickedoff">readerLoop env conn cs = loop</span>
+<span class="lineno">  558 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  559 </span><span class="spaces">    </span><span class="istickedoff">logger = _fe_logger env</span>
+<span class="lineno">  560 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  561 </span><span class="spaces">      </span><span class="istickedoff">msg &lt;- try @SomeException (WS.receiveDataMessage conn)</span>
+<span class="lineno">  562 </span><span class="spaces">      </span><span class="istickedoff">case msg of</span>
+<span class="lineno">  563 </span><span class="spaces">        </span><span class="istickedoff">Left e</span>
+<span class="lineno">  564 </span><span class="spaces">          </span><span class="istickedoff">| Just AsyncCancelled &lt;- fromException e -&gt; <span class="nottickedoff">Exception.throwIO e</span></span>
+<span class="lineno">  565 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; pure <span class="nottickedoff">()</span> -- closed</span>
+<span class="lineno">  566 </span><span class="spaces">        </span><span class="istickedoff">Right (WS.Text bs _) -&gt; handleData bs &gt;&gt; loop</span>
+<span class="lineno">  567 </span><span class="spaces">        </span><span class="istickedoff">Right (WS.Binary _)  -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  568 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn logger &quot;WS rejecting binary frame&quot;</span></span>
+<span class="lineno">  569 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">sendError conn EcInvalidFrame &quot;binary frames not supported&quot;</span></span>
+<span class="lineno">  570 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">loop</span></span>
+<span class="lineno">  571 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  572 </span><span class="spaces">    </span><span class="istickedoff">handleData :: LBS.ByteString -&gt; IO ()</span>
+<span class="lineno">  573 </span><span class="spaces">    </span><span class="istickedoff">handleData bs</span>
+<span class="lineno">  574 </span><span class="spaces">      </span><span class="istickedoff">| LBS.length bs &gt; fromIntegral maxInboundBytes = do</span>
+<span class="lineno">  575 </span><span class="spaces">          </span><span class="istickedoff">_lh_logWarn logger <span class="nottickedoff">&quot;WS frame-too-large: closing&quot;</span></span>
+<span class="lineno">  576 </span><span class="spaces">          </span><span class="istickedoff">sendError conn EcFrameTooLarge &quot;inbound frame exceeded 4 KB&quot;</span>
+<span class="lineno">  577 </span><span class="spaces">          </span><span class="istickedoff">WS.sendClose conn (&quot;frame too large&quot; :: BS.ByteString)</span>
+<span class="lineno">  578 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = case decodeClientOp bs of</span>
+<span class="lineno">  579 </span><span class="spaces">          </span><span class="istickedoff">DrInvalidFrame -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  580 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn logger $ &quot;WS invalid frame: &quot;</span></span>
+<span class="lineno">  581 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; TE.decodeUtf8 (BS.take 100 (LBS.toStrict bs))</span></span>
+<span class="lineno">  582 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">sendError conn EcInvalidFrame &quot;malformed JSON&quot;</span></span>
+<span class="lineno">  583 </span><span class="spaces">          </span><span class="istickedoff">DrInvalidOp -&gt;</span>
+<span class="lineno">  584 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">sendError conn EcInvalidOp &quot;unknown op&quot;</span></span>
+<span class="lineno">  585 </span><span class="spaces">          </span><span class="istickedoff">DrOk (CoFocus mSid mSince) -&gt;</span>
+<span class="lineno">  586 </span><span class="spaces">            </span><span class="istickedoff">handleFocus env conn cs mSid mSince</span></span>
+<span class="lineno">  587 </span>
+<span class="lineno">  588 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  589 </span>-- Focus / replay
+<span class="lineno">  590 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  591 </span>
+<span class="lineno">  592 </span>-- | Handle a @focus@ op. If @since@ is present and valid, run the replay
+<span class="lineno">  593 </span>-- snapshot algorithm; otherwise just update the focus IORef.
+<span class="lineno">  594 </span>handleFocus
+<span class="lineno">  595 </span>  :: FrontendEnv
+<span class="lineno">  596 </span>  -&gt; WS.Connection
+<span class="lineno">  597 </span>  -&gt; ConnState
+<span class="lineno">  598 </span>  -&gt; Maybe SessionId
+<span class="lineno">  599 </span>  -&gt; Maybe Text
+<span class="lineno">  600 </span>  -&gt; IO ()
+<span class="lineno">  601 </span><span class="decl"><span class="istickedoff">handleFocus env conn cs mSid mSince =</span>
+<span class="lineno">  602 </span><span class="spaces">  </span><span class="istickedoff">case mSid of</span>
+<span class="lineno">  603 </span><span class="spaces">    </span><span class="istickedoff">Just (SessionId raw) | not (isValidSessionId raw) -&gt;</span>
+<span class="lineno">  604 </span><span class="spaces">      </span><span class="istickedoff">sendError conn EcSessionNotFound (&quot;invalid session id: &quot; &lt;&gt; raw)</span>
+<span class="lineno">  605 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; case mSince of</span>
+<span class="lineno">  606 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; setLiveFocus</span>
+<span class="lineno">  607 </span><span class="spaces">      </span><span class="istickedoff">Just s | <span class="tickonlyfalse">T.length s &gt; maxSinceLength</span> -&gt;</span>
+<span class="lineno">  608 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">sendError conn EcInvalidFrame &quot;since exceeds 64 characters&quot;</span></span>
+<span class="lineno">  609 </span><span class="spaces">      </span><span class="istickedoff">Just sinceTok -&gt; case mSid of</span>
+<span class="lineno">  610 </span><span class="spaces">        </span><span class="istickedoff">Nothing  -&gt; <span class="nottickedoff">sendError conn EcInvalidFrame &quot;since requires sessionId&quot;</span></span>
+<span class="lineno">  611 </span><span class="spaces">        </span><span class="istickedoff">Just sid -&gt; do</span>
+<span class="lineno">  612 </span><span class="spaces">          </span><span class="istickedoff">startReplay env conn cs sid sinceTok</span>
+<span class="lineno">  613 </span><span class="spaces">          </span><span class="istickedoff">sendActivitySnapshot env <span class="nottickedoff">conn</span> sid</span>
+<span class="lineno">  614 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  615 </span><span class="spaces">    </span><span class="istickedoff">setLiveFocus = do</span>
+<span class="lineno">  616 </span><span class="spaces">      </span><span class="istickedoff">abortInflightReplay <span class="nottickedoff">conn</span> cs</span>
+<span class="lineno">  617 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_conn_focus cs) mSid</span>
+<span class="lineno">  618 </span><span class="spaces">      </span><span class="istickedoff">forM_ mSid (sendActivitySnapshot env conn)</span></span>
+<span class="lineno">  619 </span>
+<span class="lineno">  620 </span>-- | If the broker has a recorded 'HarnessActivity' for this session, push
+<span class="lineno">  621 </span>-- it to the freshly-focused client. Without this, a tab that connects
+<span class="lineno">  622 </span>-- /while/ a provider request is in flight never sees the in-progress
+<span class="lineno">  623 </span>-- 'HarnessThinking' event (it was published before the subscriber existed)
+<span class="lineno">  624 </span>-- and the thinking indicator stays dark until the request completes.
+<span class="lineno">  625 </span>sendActivitySnapshot :: FrontendEnv -&gt; WS.Connection -&gt; SessionId -&gt; IO ()
+<span class="lineno">  626 </span><span class="decl"><span class="istickedoff">sendActivitySnapshot env conn sid = case _fe_broker env of</span>
+<span class="lineno">  627 </span><span class="spaces">  </span><span class="istickedoff">Nothing     -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  628 </span><span class="spaces">  </span><span class="istickedoff">Just broker -&gt; do</span>
+<span class="lineno">  629 </span><span class="spaces">    </span><span class="istickedoff">mAct &lt;- _streamBroker_currentActivity broker sid</span>
+<span class="lineno">  630 </span><span class="spaces">    </span><span class="istickedoff">forM_ mAct $ \act -&gt;</span>
+<span class="lineno">  631 </span><span class="spaces">      </span><span class="istickedoff">sendEvent conn (SeActivity sid (AkHarnessStatus act))</span></span>
+<span class="lineno">  632 </span>
+<span class="lineno">  633 </span>-- | Abort any in-flight replay. If a replay was in progress, emit
+<span class="lineno">  634 </span>-- @replay-aborted@ and clear the buffer (D40).
+<span class="lineno">  635 </span>abortInflightReplay :: WS.Connection -&gt; ConnState -&gt; IO ()
+<span class="lineno">  636 </span><span class="decl"><span class="istickedoff">abortInflightReplay conn cs = do</span>
+<span class="lineno">  637 </span><span class="spaces">  </span><span class="istickedoff">prev &lt;- readIORef (_conn_replayMode cs)</span>
+<span class="lineno">  638 </span><span class="spaces">  </span><span class="istickedoff">case prev of</span>
+<span class="lineno">  639 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  640 </span><span class="spaces">    </span><span class="istickedoff">Just _  -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  641 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">writeIORef (_conn_replayMode cs) Nothing</span></span>
+<span class="lineno">  642 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">writeIORef (_conn_replayBuf cs) []</span></span>
+<span class="lineno">  643 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- try @SomeException</span></span>
+<span class="lineno">  644 </span><span class="spaces">             </span><span class="istickedoff"><span class="nottickedoff">(sendError conn EcReplayAborted &quot;focus changed mid-replay&quot;)</span></span>
+<span class="lineno">  645 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure ()</span></span></span>
+<span class="lineno">  646 </span>
+<span class="lineno">  647 </span>-- | Snapshot-based replay algorithm:
+<span class="lineno">  648 </span>--   1. Mark replay-mode for the session; writer starts buffering.
+<span class="lineno">  649 </span>--   2. Update focus IORef.
+<span class="lineno">  650 </span>--   3. Read transcript file (slice after @since@).
+<span class="lineno">  651 </span>--   4. Send each file entry as @entry@.
+<span class="lineno">  652 </span>--   5. Clear replay-mode; drain buffer, dedup against file ids, send.
+<span class="lineno">  653 </span>--   6. Emit @replay-end@.
+<span class="lineno">  654 </span>-- On any I/O error during step 3, clear state and emit @replay-failed@
+<span class="lineno">  655 </span>-- (D28) — the client falls back to HTTP GET.
+<span class="lineno">  656 </span>startReplay
+<span class="lineno">  657 </span>  :: FrontendEnv
+<span class="lineno">  658 </span>  -&gt; WS.Connection
+<span class="lineno">  659 </span>  -&gt; ConnState
+<span class="lineno">  660 </span>  -&gt; SessionId
+<span class="lineno">  661 </span>  -&gt; Text
+<span class="lineno">  662 </span>  -&gt; IO ()
+<span class="lineno">  663 </span><span class="decl"><span class="istickedoff">startReplay env conn cs sid sinceId = do</span>
+<span class="lineno">  664 </span><span class="spaces">  </span><span class="istickedoff">abortInflightReplay <span class="nottickedoff">conn</span> cs</span>
+<span class="lineno">  665 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_conn_replayMode cs) (Just sid)</span>
+<span class="lineno">  666 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_conn_replayBuf cs) []</span>
+<span class="lineno">  667 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_conn_focus cs) <span class="nottickedoff">(Just sid)</span></span>
+<span class="lineno">  668 </span><span class="spaces">  </span><span class="istickedoff">let logger = _fe_logger env</span>
+<span class="lineno">  669 </span><span class="spaces">      </span><span class="istickedoff">path   = _fe_sessionsDir env &lt;&gt; &quot;/&quot; &lt;&gt; T.unpack (unSessionId sid) &lt;&gt; &quot;/transcript.jsonl&quot;</span>
+<span class="lineno">  670 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try @SomeException (readReplaySlice path sinceId)</span>
+<span class="lineno">  671 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  672 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt; do</span>
+<span class="lineno">  673 </span><span class="spaces">      </span><span class="istickedoff">_lh_logError logger $</span>
+<span class="lineno">  674 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">&quot;replay read failed (session=&quot; &lt;&gt; unSessionId sid &lt;&gt; &quot;): &quot;</span></span>
+<span class="lineno">  675 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  676 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_conn_replayMode cs) Nothing</span>
+<span class="lineno">  677 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_conn_replayBuf cs) <span class="nottickedoff">[]</span></span>
+<span class="lineno">  678 </span><span class="spaces">      </span><span class="istickedoff">sendError conn EcReplayFailed (T.pack (show e))</span>
+<span class="lineno">  679 </span><span class="spaces">    </span><span class="istickedoff">Right slice -&gt; do</span>
+<span class="lineno">  680 </span><span class="spaces">      </span><span class="istickedoff">forM_ slice $ \e -&gt; sendEvent conn (SeEntry sid e)</span>
+<span class="lineno">  681 </span><span class="spaces">      </span><span class="istickedoff">-- Drain buffer; if focus changed mid-replay, abortInflightReplay</span>
+<span class="lineno">  682 </span><span class="spaces">      </span><span class="istickedoff">-- already cleared state, and replayMode is Nothing now — skip.</span>
+<span class="lineno">  683 </span><span class="spaces">      </span><span class="istickedoff">currentMode &lt;- readIORef (_conn_replayMode cs)</span>
+<span class="lineno">  684 </span><span class="spaces">      </span><span class="istickedoff">case currentMode of</span>
+<span class="lineno">  685 </span><span class="spaces">        </span><span class="istickedoff">Just sid' | <span class="tickonlytrue">sid' == sid</span> -&gt; do</span>
+<span class="lineno">  686 </span><span class="spaces">          </span><span class="istickedoff">buf &lt;- atomicModifyIORef' (_conn_replayBuf cs) ([],)</span>
+<span class="lineno">  687 </span><span class="spaces">          </span><span class="istickedoff">writeIORef (_conn_replayMode cs) Nothing</span>
+<span class="lineno">  688 </span><span class="spaces">          </span><span class="istickedoff">let <span class="nottickedoff">dedup   = Set.fromList (map _te_id slice)</span></span>
+<span class="lineno">  689 </span><span class="spaces">              </span><span class="istickedoff">residue = filter <span class="nottickedoff">(\e -&gt; not (Set.member (_te_id e) dedup))</span> buf</span>
+<span class="lineno">  690 </span><span class="spaces">          </span><span class="istickedoff">forM_ residue $ <span class="nottickedoff">\e -&gt; sendEvent conn (SeEntry sid e)</span></span>
+<span class="lineno">  691 </span><span class="spaces">          </span><span class="istickedoff">let lastId = case (reverse residue, reverse slice) of</span>
+<span class="lineno">  692 </span><span class="spaces">                </span><span class="istickedoff">(e:_, _) -&gt; <span class="nottickedoff">Just (_te_id e)</span></span>
+<span class="lineno">  693 </span><span class="spaces">                </span><span class="istickedoff">(_, e:_) -&gt; Just (_te_id e)</span>
+<span class="lineno">  694 </span><span class="spaces">                </span><span class="istickedoff">_        -&gt; <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  695 </span><span class="spaces">          </span><span class="istickedoff">sendEvent conn (SeReplayEnd sid lastId)</span>
+<span class="lineno">  696 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">pure ()</span></span></span>  -- focus changed mid-replay; abort path already fired
+<span class="lineno">  697 </span>
+<span class="lineno">  698 </span>-- | Read JSONL file at @path@, returning entries strictly after @since@.
+<span class="lineno">  699 </span>readReplaySlice :: FilePath -&gt; Text -&gt; IO [TranscriptEntry]
+<span class="lineno">  700 </span><span class="decl"><span class="istickedoff">readReplaySlice path sinceId = do</span>
+<span class="lineno">  701 </span><span class="spaces">  </span><span class="istickedoff">raw &lt;- try @SomeException (LBS.readFile path)</span>
+<span class="lineno">  702 </span><span class="spaces">  </span><span class="istickedoff">case raw of</span>
+<span class="lineno">  703 </span><span class="spaces">    </span><span class="istickedoff">Left e</span>
+<span class="lineno">  704 </span><span class="spaces">      </span><span class="istickedoff">| Just ioErr &lt;- fromException e, <span class="tickonlyfalse">isDoesNotExistError ioErr</span> -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  705 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; Exception.throwIO e</span>
+<span class="lineno">  706 </span><span class="spaces">    </span><span class="istickedoff">Right contents -&gt; do</span>
+<span class="lineno">  707 </span><span class="spaces">      </span><span class="istickedoff">let raws    = filter (not . LBS.null) (LBS.split 0x0A contents)</span>
+<span class="lineno">  708 </span><span class="spaces">          </span><span class="istickedoff">entries = [ x | l &lt;- raws, Just x &lt;- [Aeson.decode l] ]</span>
+<span class="lineno">  709 </span><span class="spaces">      </span><span class="istickedoff">pure (sliceAfter sinceId entries)</span>
+<span class="lineno">  710 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  711 </span><span class="spaces">    </span><span class="istickedoff">sliceAfter &quot;&quot; es = <span class="nottickedoff">es</span></span>
+<span class="lineno">  712 </span><span class="spaces">    </span><span class="istickedoff">sliceAfter s  es = drop 1 (dropWhile (\e -&gt; _te_id e /= s) es)</span></span>
+<span class="lineno">  713 </span>
+<span class="lineno">  714 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  715 </span>-- Writer loop
+<span class="lineno">  716 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  717 </span>
+<span class="lineno">  718 </span>-- | Drain broker events; filter &amp; forward to the WS peer. The reader
+<span class="lineno">  719 </span>-- thread updates the focus IORef and the replay-mode IORef; the writer
+<span class="lineno">  720 </span>-- consults both for every event.
+<span class="lineno">  721 </span>writerLoop :: Subscription -&gt; WS.Connection -&gt; ConnState -&gt; IO ()
+<span class="lineno">  722 </span><span class="decl"><span class="istickedoff">writerLoop sub conn cs = loop</span>
+<span class="lineno">  723 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  724 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  725 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- atomically nextSignal</span>
+<span class="lineno">  726 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  727 </span><span class="spaces">        </span><span class="istickedoff">Left () -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  728 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">sendEvent conn SeOverflow</span></span>
+<span class="lineno">  729 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">WS.sendClose conn (&quot;overflow&quot; :: BS.ByteString)</span></span>
+<span class="lineno">  730 </span><span class="spaces">        </span><span class="istickedoff">Right ev -&gt; do</span>
+<span class="lineno">  731 </span><span class="spaces">          </span><span class="istickedoff">handleEvent ev</span>
+<span class="lineno">  732 </span><span class="spaces">          </span><span class="istickedoff">loop</span>
+<span class="lineno">  733 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  734 </span><span class="spaces">    </span><span class="istickedoff">nextSignal :: STM (Either () BrokerEvent)</span>
+<span class="lineno">  735 </span><span class="spaces">    </span><span class="istickedoff">nextSignal =</span>
+<span class="lineno">  736 </span><span class="spaces">      </span><span class="istickedoff">(do</span>
+<span class="lineno">  737 </span><span class="spaces">        </span><span class="istickedoff">b &lt;- readTVar (_sub_overflow sub)</span>
+<span class="lineno">  738 </span><span class="spaces">        </span><span class="istickedoff">if <span class="tickonlyfalse">b</span> then <span class="nottickedoff">pure (Left ())</span> else retry)</span>
+<span class="lineno">  739 </span><span class="spaces">      </span><span class="istickedoff">`orElse`</span>
+<span class="lineno">  740 </span><span class="spaces">      </span><span class="istickedoff">(Right &lt;$&gt; readTBQueue (_sub_queue sub))</span>
+<span class="lineno">  741 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  742 </span><span class="spaces">    </span><span class="istickedoff">handleEvent (EntryRecorded sid entry) = do</span>
+<span class="lineno">  743 </span><span class="spaces">      </span><span class="istickedoff">replaying &lt;- readIORef (_conn_replayMode cs)</span>
+<span class="lineno">  744 </span><span class="spaces">      </span><span class="istickedoff">focus     &lt;- readIORef (_conn_focus cs)</span>
+<span class="lineno">  745 </span><span class="spaces">      </span><span class="istickedoff">case replaying of</span>
+<span class="lineno">  746 </span><span class="spaces">        </span><span class="istickedoff">Just rsid | <span class="nottickedoff">rsid == sid</span> -&gt;</span>
+<span class="lineno">  747 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">atomicModifyIORef' (_conn_replayBuf cs) (\xs -&gt; (xs ++ [entry], ()))</span></span>
+<span class="lineno">  748 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; case focus of</span>
+<span class="lineno">  749 </span><span class="spaces">          </span><span class="istickedoff">Just fsid | fsid == sid -&gt; sendEvent conn (SeEntry sid entry)</span>
+<span class="lineno">  750 </span><span class="spaces">          </span><span class="istickedoff">_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  751 </span><span class="spaces">    </span><span class="istickedoff">handleEvent (EntryUpdated sid entry) = do</span>
+<span class="lineno">  752 </span><span class="spaces">      </span><span class="istickedoff">replaying &lt;- readIORef (_conn_replayMode cs)</span>
+<span class="lineno">  753 </span><span class="spaces">      </span><span class="istickedoff">focus     &lt;- readIORef (_conn_focus cs)</span>
+<span class="lineno">  754 </span><span class="spaces">      </span><span class="istickedoff">case focus of</span>
+<span class="lineno">  755 </span><span class="spaces">        </span><span class="istickedoff">Just fsid | fsid == sid -&gt; case replaying of</span>
+<span class="lineno">  756 </span><span class="spaces">          </span><span class="istickedoff">Just rsid | <span class="nottickedoff">rsid == sid</span> -&gt; <span class="nottickedoff">pure ()</span>  -- drop during replay; re-sent next tick</span>
+<span class="lineno">  757 </span><span class="spaces">          </span><span class="istickedoff">_                       -&gt; sendEvent conn (SeEntryUpdate sid entry)</span>
+<span class="lineno">  758 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  759 </span><span class="spaces">    </span><span class="istickedoff">handleEvent (ActivityChanged sid (SaEntryAt t)) =</span>
+<span class="lineno">  760 </span><span class="spaces">      </span><span class="istickedoff">sendEvent conn (SeActivity sid (AkEntryAt t))</span>
+<span class="lineno">  761 </span><span class="spaces">    </span><span class="istickedoff">handleEvent (ActivityChanged sid (SaHarnessStatus s)) =</span>
+<span class="lineno">  762 </span><span class="spaces">      </span><span class="istickedoff">sendEvent conn (SeActivity sid (AkHarnessStatus s))</span>
+<span class="lineno">  763 </span><span class="spaces">    </span><span class="istickedoff">handleEvent (ActivityChanged sid (SaSessionCreated meta)) =</span>
+<span class="lineno">  764 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">sendEvent conn (SeActivity sid (AkSessionCreated meta))</span></span>
+<span class="lineno">  765 </span><span class="spaces">    </span><span class="istickedoff">handleEvent (ListsSnapshot v) =</span>
+<span class="lineno">  766 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">WS.sendTextData conn (Aeson.encode v)</span></span></span>
+<span class="lineno">  767 </span>
+
+</pre>
+</body>
+</html>

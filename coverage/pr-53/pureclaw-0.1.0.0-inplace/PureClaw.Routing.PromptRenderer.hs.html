@@ -1,0 +1,185 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.PromptRenderer
+<span class="lineno">    3 </span>-- Description : Channel-aware spawn-prompt UX (Tabbed Chat WU9, A4 \/ A6).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- When the dispatcher needs to ask the user which 'TabKind' to spawn
+<span class="lineno">    6 </span>-- (because '/tab new' was issued without a kind argument and
+<span class="lineno">    7 </span>-- '_rc_defaultKind' is unset), it emits a short prompt via the channel.
+<span class="lineno">    8 </span>-- Different channels render this differently:
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>--   * Telegram surfaces an inline-keyboard with one button per supported
+<span class="lineno">   11 </span>--     kind ('ai', 'harness', 'shell', 'ssh', 'tmux').
+<span class="lineno">   12 </span>--   * Signal \/ CLI surface a plain-text reply enumerating the same
+<span class="lineno">   13 </span>--     options as numbered choices.
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- WU9 ships a single channel-dispatched renderer:
+<span class="lineno">   16 </span>-- 'mkDefaultPromptRenderer' picks the right format based on the
+<span class="lineno">   17 </span>-- supplied 'ChannelHandle'\'s capability hint ('_ch_streaming'); tests
+<span class="lineno">   18 </span>-- inject 'mkTextPromptRenderer' directly when they want to assert on a
+<span class="lineno">   19 </span>-- specific rendering.
+<span class="lineno">   20 </span>--
+<span class="lineno">   21 </span>-- == Why a record, not a typeclass
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- Mirrors the Handle pattern used elsewhere in PureClaw — concrete IO
+<span class="lineno">   24 </span>-- actions are easier to substitute in tests than typeclass dictionaries
+<span class="lineno">   25 </span>-- and produce no orphan-instance surface.
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- == Buffered payload (A6)
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- When '/N &lt;payload&gt;' is issued for a missing index with no default
+<span class="lineno">   30 </span>-- kind, the dispatcher buffers @payload@ alongside the prompt so the
+<span class="lineno">   31 </span>-- (later) kind-selection turn can enqueue @payload@ on the freshly
+<span class="lineno">   32 </span>-- spawned tab. The 'PromptRenderer' carries enough information for the
+<span class="lineno">   33 </span>-- channel to round-trip the index AND the payload back to the
+<span class="lineno">   34 </span>-- dispatcher in the subsequent user reply — for v1 we surface the
+<span class="lineno">   35 </span>-- index \/ payload in the prompt text so the user can re-issue
+<span class="lineno">   36 </span>-- '/tab new &lt;kind&gt; &lt;payload&gt;' verbatim. A v1.5+ refinement may add a
+<span class="lineno">   37 </span>-- proper callback-data layer; the renderer interface admits it without
+<span class="lineno">   38 </span>-- a breaking change.
+<span class="lineno">   39 </span>--
+<span class="lineno">   40 </span>-- See @docs\/tabbed-chat.md@ §&quot;Auto-spawn behavior (A-series)&quot; for the
+<span class="lineno">   41 </span>-- A4 \/ A6 contract and §&quot;Channel emission via ChannelOut writer&quot; for
+<span class="lineno">   42 </span>-- the dispatcher-side emission rules.
+<span class="lineno">   43 </span>module PureClaw.Routing.PromptRenderer
+<span class="lineno">   44 </span>  ( -- * Renderer
+<span class="lineno">   45 </span>    PromptRenderer (..)
+<span class="lineno">   46 </span>    -- * Default renderers
+<span class="lineno">   47 </span>  , mkDefaultPromptRenderer
+<span class="lineno">   48 </span>  , mkTextPromptRenderer
+<span class="lineno">   49 </span>  , mkInlineKeyboardPromptRenderer
+<span class="lineno">   50 </span>    -- * Helpers
+<span class="lineno">   51 </span>  , renderKindsAsText
+<span class="lineno">   52 </span>  ) where
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>import Data.Text (Text)
+<span class="lineno">   55 </span>import Data.Text qualified as T
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>import PureClaw.Handles.Channel (ChannelHandle (..))
+<span class="lineno">   58 </span>import PureClaw.Handles.Tab (TabIndex, unTabIndex)
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>-- | A record-of-actions abstraction over per-channel spawn-prompt
+<span class="lineno">   62 </span>-- rendering.
+<span class="lineno">   63 </span>--
+<span class="lineno">   64 </span>-- '_pr_renderSpawnPrompt' takes the requested tab index and an
+<span class="lineno">   65 </span>-- optional buffered payload (the @Just txt@ form of A6, where the
+<span class="lineno">   66 </span>-- user typed @\/N \&lt;txt\&gt;@) and returns the user-visible 'Text' to
+<span class="lineno">   67 </span>-- enqueue as a dispatcher banner.
+<span class="lineno">   68 </span>--
+<span class="lineno">   69 </span>-- The renderer does NOT itself touch the channel — the caller (the
+<span class="lineno">   70 </span>-- AutoSpawn module in WU9) drives 'PureClaw.Routing.Dispatcher's
+<span class="lineno">   71 </span>-- @emitDispatcherBanner@ with the rendered string. Keeping the
+<span class="lineno">   72 </span>-- rendering pure-text means tests can pin the exact wording without
+<span class="lineno">   73 </span>-- intercepting channel I\/O.
+<span class="lineno">   74 </span>newtype PromptRenderer = PromptRenderer
+<span class="lineno">   75 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_renderSpawnPrompt</span></span></span> :: TabIndex -&gt; Maybe Text -&gt; Text
+<span class="lineno">   76 </span>  }
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | Dispatch on the supplied 'ChannelHandle' to pick the renderer
+<span class="lineno">   80 </span>-- that best matches the channel's capabilities.
+<span class="lineno">   81 </span>--
+<span class="lineno">   82 </span>-- The current heuristic is intentionally coarse: a channel reporting
+<span class="lineno">   83 </span>-- '_ch_streaming = True' is treated as a CLI surface (text reply); a
+<span class="lineno">   84 </span>-- channel reporting '_ch_streaming = False' is treated as a Telegram-
+<span class="lineno">   85 </span>-- style surface (inline-keyboard prompt). Real Signal\/Telegram
+<span class="lineno">   86 </span>-- implementations also report '_ch_streaming = False', so both get the
+<span class="lineno">   87 </span>-- inline-keyboard rendering by default — which degrades gracefully to
+<span class="lineno">   88 </span>-- text when the channel layer cannot honour the markup.
+<span class="lineno">   89 </span>--
+<span class="lineno">   90 </span>-- WU11 may refine this dispatch (e.g. by adding a explicit channel-kind
+<span class="lineno">   91 </span>-- discriminator to 'ChannelHandle'); for WU9 the heuristic is
+<span class="lineno">   92 </span>-- sufficient to flip the A4 \/ A6 DoDs green.
+<span class="lineno">   93 </span>mkDefaultPromptRenderer :: ChannelHandle -&gt; PromptRenderer
+<span class="lineno">   94 </span><span class="decl"><span class="istickedoff">mkDefaultPromptRenderer ch</span>
+<span class="lineno">   95 </span><span class="spaces">  </span><span class="istickedoff">| _ch_streaming ch = mkTextPromptRenderer</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>        = mkInlineKeyboardPromptRenderer</span></span>
+<span class="lineno">   97 </span>
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>-- | A plain-text renderer suitable for CLI \/ Signal: enumerates the
+<span class="lineno">  100 </span>-- supported tab kinds as numbered choices.
+<span class="lineno">  101 </span>--
+<span class="lineno">  102 </span>-- The wording is:
+<span class="lineno">  103 </span>--
+<span class="lineno">  104 </span>-- @
+<span class="lineno">  105 </span>-- Spawn /N as which kind? Reply with: /tab new \&lt;kind\&gt; [\&lt;args\&gt;]
+<span class="lineno">  106 </span>-- where \&lt;kind\&gt; is one of: ai, harness, shell, ssh, tmux
+<span class="lineno">  107 </span>-- @
+<span class="lineno">  108 </span>--
+<span class="lineno">  109 </span>-- @\/N@ in the first half is informational — it shows the user the
+<span class="lineno">  110 </span>-- slot the spawn will land at. The user does NOT type the index when
+<span class="lineno">  111 </span>-- replying (tmux packing model — see @docs\/tabbed-chat.md@).
+<span class="lineno">  112 </span>--
+<span class="lineno">  113 </span>-- When a buffered payload is present (A6), the prompt appends a
+<span class="lineno">  114 </span>-- secondary line so the user can re-issue the full command verbatim.
+<span class="lineno">  115 </span>mkTextPromptRenderer :: PromptRenderer
+<span class="lineno">  116 </span><span class="decl"><span class="istickedoff">mkTextPromptRenderer = PromptRenderer renderTextPrompt</span></span>
+<span class="lineno">  117 </span>
+<span class="lineno">  118 </span>renderTextPrompt :: TabIndex -&gt; Maybe Text -&gt; Text
+<span class="lineno">  119 </span><span class="decl"><span class="istickedoff">renderTextPrompt idx mPayload =</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">let nTxt = tShowIdx idx</span>
+<span class="lineno">  121 </span><span class="spaces">      </span><span class="istickedoff">header =</span>
+<span class="lineno">  122 </span><span class="spaces">        </span><span class="istickedoff">&quot;Spawn /&quot; &lt;&gt; nTxt</span>
+<span class="lineno">  123 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; &quot; as which kind? Reply with: /tab new &lt;kind&gt; [&lt;args&gt;]&quot;</span>
+<span class="lineno">  124 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; &quot; where &lt;kind&gt; is one of: &quot;</span>
+<span class="lineno">  125 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; renderKindsAsText</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">payloadLine = case mPayload of</span>
+<span class="lineno">  127 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; &quot;&quot;</span>
+<span class="lineno">  128 </span><span class="spaces">        </span><span class="istickedoff">Just p  -&gt; &quot;\nBuffered text: &quot; &lt;&gt; p</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">in header &lt;&gt; payloadLine</span></span>
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | A renderer that emits a Telegram-friendly text body. v1 surfaces
+<span class="lineno">  132 </span>-- the inline-keyboard hint as plain text (the channel's underlying
+<span class="lineno">  133 </span>-- 'sendMessage' API discards the markup gracefully); WU11 may upgrade
+<span class="lineno">  134 </span>-- the rendering once 'ChannelHandle' carries an inline-keyboard seam.
+<span class="lineno">  135 </span>--
+<span class="lineno">  136 </span>-- The text body is intentionally compact (≤ 200 chars even with a
+<span class="lineno">  137 </span>-- buffered payload) so it fits well in a mobile chat bubble.
+<span class="lineno">  138 </span>mkInlineKeyboardPromptRenderer :: PromptRenderer
+<span class="lineno">  139 </span><span class="decl"><span class="istickedoff">mkInlineKeyboardPromptRenderer = PromptRenderer renderInlineKeyboardPrompt</span></span>
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>renderInlineKeyboardPrompt :: TabIndex -&gt; Maybe Text -&gt; Text
+<span class="lineno">  142 </span><span class="decl"><span class="istickedoff">renderInlineKeyboardPrompt idx mPayload =</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">let nTxt = tShowIdx idx</span>
+<span class="lineno">  144 </span><span class="spaces">      </span><span class="istickedoff">header =</span>
+<span class="lineno">  145 </span><span class="spaces">        </span><span class="istickedoff">&quot;Choose a kind for /&quot; &lt;&gt; nTxt</span>
+<span class="lineno">  146 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; &quot;: [ai] [harness] [shell] [ssh] [tmux] — &quot;</span>
+<span class="lineno">  147 </span><span class="spaces">          </span><span class="istickedoff">&lt;&gt; &quot;reply /tab new &lt;kind&gt;&quot;</span>
+<span class="lineno">  148 </span><span class="spaces">      </span><span class="istickedoff">payloadLine = case mPayload of</span>
+<span class="lineno">  149 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; &quot;&quot;</span>
+<span class="lineno">  150 </span><span class="spaces">        </span><span class="istickedoff">Just p  -&gt; &quot;\nBuffered text: &quot; &lt;&gt; p</span>
+<span class="lineno">  151 </span><span class="spaces">  </span><span class="istickedoff">in header &lt;&gt; payloadLine</span></span>
+<span class="lineno">  152 </span>
+<span class="lineno">  153 </span>-- | Comma-separated list of the supported tab-kind keywords. Used by
+<span class="lineno">  154 </span>-- the text renderer; exposed so tests can pin the exact wording.
+<span class="lineno">  155 </span>renderKindsAsText :: Text
+<span class="lineno">  156 </span><span class="decl"><span class="istickedoff">renderKindsAsText = T.intercalate &quot;, &quot; [&quot;ai&quot;, &quot;harness&quot;, &quot;shell&quot;, &quot;ssh&quot;, &quot;tmux&quot;]</span></span>
+<span class="lineno">  157 </span>
+<span class="lineno">  158 </span>-- | Format a 'TabIndex' as the user-facing decimal string. Internal
+<span class="lineno">  159 </span>-- helper that mirrors the dispatcher's own 'tShowIdx' (kept local to
+<span class="lineno">  160 </span>-- avoid an import cycle into 'Dispatcher').
+<span class="lineno">  161 </span>tShowIdx :: TabIndex -&gt; Text
+<span class="lineno">  162 </span><span class="decl"><span class="istickedoff">tShowIdx = T.pack . show . unTabIndex</span></span>
+
+</pre>
+</body>
+</html>

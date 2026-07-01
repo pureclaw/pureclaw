@@ -1,0 +1,159 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Channels.Telegram
+<span class="lineno">    2 </span>  ( -- * Telegram channel
+<span class="lineno">    3 </span>    TelegramChannel (..)
+<span class="lineno">    4 </span>  , TelegramConfig (..)
+<span class="lineno">    5 </span>  , mkTelegramChannel
+<span class="lineno">    6 </span>    -- * Message parsing
+<span class="lineno">    7 </span>  , parseTelegramUpdate
+<span class="lineno">    8 </span>  , TelegramUpdate (..)
+<span class="lineno">    9 </span>  , TelegramMessage (..)
+<span class="lineno">   10 </span>  , TelegramChat (..)
+<span class="lineno">   11 </span>  , TelegramUser (..)
+<span class="lineno">   12 </span>  ) where
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import Control.Concurrent.STM
+<span class="lineno">   15 </span>import Data.Aeson
+<span class="lineno">   16 </span>import Data.Text (Text)
+<span class="lineno">   17 </span>import Data.Text qualified as T
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>import PureClaw.Channels.Class
+<span class="lineno">   20 </span>import PureClaw.Core.Errors
+<span class="lineno">   21 </span>import PureClaw.Core.Types
+<span class="lineno">   22 </span>import PureClaw.Handles.Channel
+<span class="lineno">   23 </span>import PureClaw.Handles.Log
+<span class="lineno">   24 </span>import PureClaw.Handles.Network
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>-- | Configuration for Telegram channel.
+<span class="lineno">   27 </span>data TelegramConfig = TelegramConfig
+<span class="lineno">   28 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tc_botToken</span></span></span> :: Text
+<span class="lineno">   29 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tc_apiBase</span></span></span>  :: Text
+<span class="lineno">   30 </span>  }
+<span class="lineno">   31 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | A Telegram channel backed by a message queue. Updates are pushed
+<span class="lineno">   34 </span>-- into the queue (e.g. from a webhook endpoint) and the agent loop
+<span class="lineno">   35 </span>-- pulls them out via 'receive'. Responses are sent via the Telegram
+<span class="lineno">   36 </span>-- Bot API using the provided 'NetworkHandle'.
+<span class="lineno">   37 </span>data TelegramChannel = TelegramChannel
+<span class="lineno">   38 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tch_config</span></span></span>  :: TelegramConfig
+<span class="lineno">   39 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_inbox</span></span></span>   :: TQueue TelegramUpdate
+<span class="lineno">   40 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tch_network</span></span></span> :: NetworkHandle
+<span class="lineno">   41 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tch_log</span></span></span>     :: LogHandle
+<span class="lineno">   42 </span>  }
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>-- | Create a Telegram channel with an empty inbox.
+<span class="lineno">   45 </span>mkTelegramChannel :: TelegramConfig -&gt; NetworkHandle -&gt; LogHandle -&gt; IO TelegramChannel
+<span class="lineno">   46 </span><span class="decl"><span class="istickedoff">mkTelegramChannel config nh lh = do</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">inbox &lt;- newTQueueIO</span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">pure TelegramChannel</span>
+<span class="lineno">   49 </span><span class="spaces">    </span><span class="istickedoff">{ _tch_config  = <span class="nottickedoff">config</span></span>
+<span class="lineno">   50 </span><span class="spaces">    </span><span class="istickedoff">, _tch_inbox   = inbox</span>
+<span class="lineno">   51 </span><span class="spaces">    </span><span class="istickedoff">, _tch_network = <span class="nottickedoff">nh</span></span>
+<span class="lineno">   52 </span><span class="spaces">    </span><span class="istickedoff">, _tch_log     = lh</span>
+<span class="lineno">   53 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>instance Channel TelegramChannel where
+<span class="lineno">   56 </span>  <span class="decl"><span class="istickedoff">toHandle tc = ChannelHandle</span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">{ _ch_receive   = receiveUpdate tc</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">, _ch_send      = sendMessage tc</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="istickedoff">, _ch_sendError = sendTelegramError tc</span>
+<span class="lineno">   60 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Block until a Telegram update arrives in the queue.
+<span class="lineno">   63 </span>receiveUpdate :: TelegramChannel -&gt; IO IncomingMessage
+<span class="lineno">   64 </span><span class="decl"><span class="istickedoff">receiveUpdate tc = do</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">update &lt;- atomically $ readTQueue (_tch_inbox tc)</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">let msg = _tu_message update</span>
+<span class="lineno">   67 </span><span class="spaces">      </span><span class="istickedoff">userId = T.pack (show (_tu_id (_tm_from msg)))</span>
+<span class="lineno">   68 </span><span class="spaces">      </span><span class="istickedoff">content = _tm_text msg</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">pure IncomingMessage</span>
+<span class="lineno">   70 </span><span class="spaces">    </span><span class="istickedoff">{ _im_userId  = UserId userId</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">, _im_content = content</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>-- | Send a message to the chat that the last update came from.
+<span class="lineno">   75 </span>-- In a full implementation this would POST to the Telegram sendMessage API.
+<span class="lineno">   76 </span>-- For now, logs the outgoing message.
+<span class="lineno">   77 </span>sendMessage :: TelegramChannel -&gt; OutgoingMessage -&gt; IO ()
+<span class="lineno">   78 </span><span class="decl"><span class="istickedoff">sendMessage tc msg =</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="istickedoff">_lh_logInfo (_tch_log tc) $ <span class="nottickedoff">&quot;Telegram send: &quot; &lt;&gt; _om_content msg</span></span></span>
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>-- | Send an error to the Telegram chat.
+<span class="lineno">   82 </span>sendTelegramError :: TelegramChannel -&gt; PublicError -&gt; IO ()
+<span class="lineno">   83 </span><span class="decl"><span class="istickedoff">sendTelegramError tc err =</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">_lh_logWarn (_tch_log tc) $ <span class="nottickedoff">&quot;Telegram error: &quot; &lt;&gt; T.pack (show err)</span></span></span>
+<span class="lineno">   85 </span>
+<span class="lineno">   86 </span>-- | A Telegram Update object (simplified).
+<span class="lineno">   87 </span>data TelegramUpdate = TelegramUpdate
+<span class="lineno">   88 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tu_updateId</span></span></span> :: Int
+<span class="lineno">   89 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tu_message</span></span></span>  :: TelegramMessage
+<span class="lineno">   90 </span>  }
+<span class="lineno">   91 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   92 </span>
+<span class="lineno">   93 </span>-- | A Telegram Message object (simplified).
+<span class="lineno">   94 </span>data TelegramMessage = TelegramMessage
+<span class="lineno">   95 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tm_messageId</span></span></span> :: Int
+<span class="lineno">   96 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tm_from</span></span></span>      :: TelegramUser
+<span class="lineno">   97 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tm_chat</span></span></span>      :: TelegramChat
+<span class="lineno">   98 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tm_text</span></span></span>      :: Text
+<span class="lineno">   99 </span>  }
+<span class="lineno">  100 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>-- | A Telegram Chat object (simplified).
+<span class="lineno">  103 </span>data TelegramChat = TelegramChat
+<span class="lineno">  104 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tcht_id</span></span></span>   :: Int
+<span class="lineno">  105 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tcht_type</span></span></span> :: Text
+<span class="lineno">  106 </span>  }
+<span class="lineno">  107 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  108 </span>
+<span class="lineno">  109 </span>-- | A Telegram User object (simplified).
+<span class="lineno">  110 </span>data TelegramUser = TelegramUser
+<span class="lineno">  111 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tu_id</span></span></span>        :: Int
+<span class="lineno">  112 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_tu_firstName</span></span></span> :: Text
+<span class="lineno">  113 </span>  }
+<span class="lineno">  114 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  115 </span>
+<span class="lineno">  116 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramUpdate</span></span></span></span> where
+<span class="lineno">  117 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramUpdate&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  118 </span><span class="spaces">    </span><span class="istickedoff">TelegramUpdate &lt;$&gt; o .: &quot;update_id&quot; &lt;*&gt; o .: &quot;message&quot;</span></span>
+<span class="lineno">  119 </span>
+<span class="lineno">  120 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramMessage</span></span></span></span> where
+<span class="lineno">  121 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramMessage&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  122 </span><span class="spaces">    </span><span class="istickedoff">TelegramMessage &lt;$&gt; o .: &quot;message_id&quot; &lt;*&gt; o .: &quot;from&quot; &lt;*&gt; o .: &quot;chat&quot; &lt;*&gt; o .: &quot;text&quot;</span></span>
+<span class="lineno">  123 </span>
+<span class="lineno">  124 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramChat</span></span></span></span> where
+<span class="lineno">  125 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramChat&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  126 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">TelegramChat</span> &lt;$&gt; o .: &quot;id&quot; &lt;*&gt; o .: &quot;type&quot;</span></span>
+<span class="lineno">  127 </span>
+<span class="lineno">  128 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON TelegramUser</span></span></span></span> where
+<span class="lineno">  129 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TelegramUser&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  130 </span><span class="spaces">    </span><span class="istickedoff">TelegramUser &lt;$&gt; o .: &quot;id&quot; &lt;*&gt; o .: &quot;first_name&quot;</span></span>
+<span class="lineno">  131 </span>
+<span class="lineno">  132 </span>-- | Parse a JSON value as a Telegram update.
+<span class="lineno">  133 </span>parseTelegramUpdate :: Value -&gt; Either String TelegramUpdate
+<span class="lineno">  134 </span><span class="decl"><span class="istickedoff">parseTelegramUpdate v = case fromJSON v of</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">Error err   -&gt; Left <span class="nottickedoff">err</span></span>
+<span class="lineno">  136 </span><span class="spaces">  </span><span class="istickedoff">Success upd -&gt; Right upd</span></span>
+
+</pre>
+</body>
+</html>

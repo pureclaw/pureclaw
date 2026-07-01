@@ -1,0 +1,419 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tabs.Types
+<span class="lineno">    3 </span>-- Description : First-class tab registry — core value types &amp; pure operations.
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- A /tab/ is a pure binding over ground truth: it names a 'TabRef' (a live
+<span class="lineno">    6 </span>-- 'SessionId' or 'HarnessId'), the slot it currently occupies, a friendly
+<span class="lineno">    7 </span>-- label, and a liveness 'TabStatus'. The ordered collection of tabs is a
+<span class="lineno">    8 </span>-- 'TabList' that maintains two invariants:
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>--   * __I1 (contiguity)__ — the slots of a 'TabList' are exactly
+<span class="lineno">   11 </span>--     @[0 .. n-1]@ at all times. 'removeSlot' compacts (tmux-window style):
+<span class="lineno">   12 </span>--     every tab above the removed slot shifts down by one.
+<span class="lineno">   13 </span>--   * __I2 (uniqueness)__ — no two tabs bind the same 'TabRef'. 'appendTab'
+<span class="lineno">   14 </span>--     of an already-bound ref is rejected with @'Left' ('AlreadyBound' i)@,
+<span class="lineno">   15 </span>--     reporting the ref's /current/ slot.
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- There is also a hard cap of 36 slots (@0..35@), matching the validated
+<span class="lineno">   18 </span>-- 'TabIndex' range. Appending past it returns @'Left' 'SlotsFull'@.
+<span class="lineno">   19 </span>--
+<span class="lineno">   20 </span>-- This module is pure (no IO). The thin IORef handle that mutates a 'TabList'
+<span class="lineno">   21 </span>-- lives in &quot;PureClaw.Tabs&quot;. The 0–35 'TabIndex' arithmetic is reused from
+<span class="lineno">   22 </span>-- &quot;PureClaw.Handles.Tab&quot; ('TabIndex'\/'mkTabIndex'\/'unTabIndex') rather than
+<span class="lineno">   23 </span>-- redefined, so there is a single validated index type across the codebase.
+<span class="lineno">   24 </span>--
+<span class="lineno">   25 </span>-- See the Tabs-as-View refactor (GitHub #79) for the design context.
+<span class="lineno">   26 </span>module PureClaw.Tabs.Types
+<span class="lineno">   27 </span>  ( -- * Tab binding
+<span class="lineno">   28 </span>    TabRef (..)
+<span class="lineno">   29 </span>  , TabStatus (..)
+<span class="lineno">   30 </span>  , Tab (..)
+<span class="lineno">   31 </span>    -- * Ordered tab list (invariants I1\/I2)
+<span class="lineno">   32 </span>  , TabList
+<span class="lineno">   33 </span>  , TabsError (..)
+<span class="lineno">   34 </span>  , emptyTabs
+<span class="lineno">   35 </span>  , toList
+<span class="lineno">   36 </span>  , appendTab
+<span class="lineno">   37 </span>  , removeSlot
+<span class="lineno">   38 </span>  , lookupSlot
+<span class="lineno">   39 </span>  , lookupRef
+<span class="lineno">   40 </span>  , setStatus
+<span class="lineno">   41 </span>  , rebindSlot
+<span class="lineno">   42 </span>    -- * Cap
+<span class="lineno">   43 </span>  , maxTabSlots
+<span class="lineno">   44 </span>    -- * Per-conversation cursors &amp; relay (I3)
+<span class="lineno">   45 </span>  , ConversationKey
+<span class="lineno">   46 </span>  , RelayMode (..)
+<span class="lineno">   47 </span>  , CursorState (..)
+<span class="lineno">   48 </span>  , emptyCursors
+<span class="lineno">   49 </span>  , setCursor
+<span class="lineno">   50 </span>  , clearCursor
+<span class="lineno">   51 </span>  , resolveCursorSlot
+<span class="lineno">   52 </span>  , conversationsOn
+<span class="lineno">   53 </span>  , pruneDangling
+<span class="lineno">   54 </span>  , relayModeFor
+<span class="lineno">   55 </span>    -- * @\/tab@ command ADTs (parsed form; shared by the dispatcher seam)
+<span class="lineno">   56 </span>  , TabKindArg (..)
+<span class="lineno">   57 </span>  , ForceMode (..)
+<span class="lineno">   58 </span>  , TabSlashCommand (..)
+<span class="lineno">   59 </span>  ) where
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>import Data.List.NonEmpty (NonEmpty)
+<span class="lineno">   62 </span>import Data.List.NonEmpty qualified as NE
+<span class="lineno">   63 </span>import Data.Map.Strict (Map)
+<span class="lineno">   64 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   65 </span>import Data.Text (Text)
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>import PureClaw.Core.Types (ChannelKind, ConversationId, SessionId)
+<span class="lineno">   68 </span>import PureClaw.Handles.Tab (TabIndex, mkTabIndex, unTabIndex)
+<span class="lineno">   69 </span>import PureClaw.Harness.Registry (HarnessId)
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   72 </span>-- TabRef / TabStatus / Tab
+<span class="lineno">   73 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>-- | The ground-truth entity a tab binds to: either an LLM-backed
+<span class="lineno">   76 </span>-- 'SessionId' or an external 'HarnessId'. A tab is a /view/ over one of
+<span class="lineno">   77 </span>-- these; it owns no lifecycle of its own.
+<span class="lineno">   78 </span>data TabRef
+<span class="lineno">   79 </span>  = BoundSession !SessionId
+<span class="lineno">   80 </span>  | BoundHarness !HarnessId
+<span class="lineno">   81 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>-- | Liveness of a tab's bound ground truth.
+<span class="lineno">   84 </span>--
+<span class="lineno">   85 </span>-- * 'Live' — the bound session\/harness is believed alive; messages route.
+<span class="lineno">   86 </span>-- * 'Dead' — the bound harness has exited (a tombstone). The tab persists
+<span class="lineno">   87 </span>--   in the list (visible in @\/tabs@) until it is explicitly removed; routing
+<span class="lineno">   88 </span>--   to a 'Dead' tab is handled by the dispatcher (deferred warning + drop).
+<span class="lineno">   89 </span>data TabStatus
+<span class="lineno">   90 </span>  = Live
+<span class="lineno">   91 </span>  | Dead
+<span class="lineno">   92 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>-- | A single tab: a pure binding over ground truth.
+<span class="lineno">   95 </span>data Tab = Tab
+<span class="lineno">   96 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tab_slot</span></span></span>   :: !TabIndex
+<span class="lineno">   97 </span>    -- ^ The tab's position in the 'TabList'. Maintained contiguous (I1);
+<span class="lineno">   98 </span>    --   never set directly by callers — derived by 'appendTab'\/'removeSlot'.
+<span class="lineno">   99 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tab_ref</span></span></span>    :: !TabRef
+<span class="lineno">  100 </span>    -- ^ The bound ground-truth entity (unique across the list, I2).
+<span class="lineno">  101 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tab_status</span></span></span> :: !TabStatus
+<span class="lineno">  102 </span>    -- ^ Liveness of the binding.
+<span class="lineno">  103 </span>  }
+<span class="lineno">  104 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  105 </span>
+<span class="lineno">  106 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  107 </span>-- TabList
+<span class="lineno">  108 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  109 </span>
+<span class="lineno">  110 </span>-- | An ordered list of tabs maintaining invariants I1 (contiguous slots
+<span class="lineno">  111 </span>-- @[0..n-1]@) and I2 (unique 'TabRef's). The constructor is not exported;
+<span class="lineno">  112 </span>-- all mutation goes through the smart operations below, which preserve the
+<span class="lineno">  113 </span>-- invariants by construction.
+<span class="lineno">  114 </span>newtype TabList = TabList [Tab]
+<span class="lineno">  115 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>-- | Why a 'TabList' mutation was rejected.
+<span class="lineno">  118 </span>data TabsError
+<span class="lineno">  119 </span>  = SlotsFull
+<span class="lineno">  120 </span>    -- ^ All 36 slots are occupied; the next append would be slot 36.
+<span class="lineno">  121 </span>  | AlreadyBound !TabIndex
+<span class="lineno">  122 </span>    -- ^ The 'TabRef' is already bound; the payload is its /current/ slot.
+<span class="lineno">  123 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>-- | The hard slot cap. Slots are @0 .. 'maxTabSlots' - 1@ (i.e. 36 slots,
+<span class="lineno">  126 </span>-- matching the validated 'TabIndex' range used elsewhere).
+<span class="lineno">  127 </span>maxTabSlots :: Int
+<span class="lineno">  128 </span><span class="decl"><span class="istickedoff">maxTabSlots = 36</span></span>
+<span class="lineno">  129 </span>
+<span class="lineno">  130 </span>-- | The empty tab list.
+<span class="lineno">  131 </span>emptyTabs :: TabList
+<span class="lineno">  132 </span><span class="decl"><span class="istickedoff">emptyTabs = TabList []</span></span>
+<span class="lineno">  133 </span>
+<span class="lineno">  134 </span>-- | The tabs in slot order (slot @0@ first). Total; never partial.
+<span class="lineno">  135 </span>toList :: TabList -&gt; [Tab]
+<span class="lineno">  136 </span><span class="decl"><span class="istickedoff">toList (TabList ts) = ts</span></span>
+<span class="lineno">  137 </span>
+<span class="lineno">  138 </span>-- | Append a new tab binding @ref@ at the next free slot.
+<span class="lineno">  139 </span>--
+<span class="lineno">  140 </span>-- * If @ref@ is already bound, returns @'Left' ('AlreadyBound' i)@ where @i@
+<span class="lineno">  141 </span>--   is its current slot (I2 — no duplicate refs).
+<span class="lineno">  142 </span>-- * If all 36 slots are taken, returns @'Left' 'SlotsFull'@.
+<span class="lineno">  143 </span>-- * Otherwise the new tab lands at slot @length@ (preserving I1) with status
+<span class="lineno">  144 </span>--   'Live', and the new slot index is returned alongside the updated list.
+<span class="lineno">  145 </span>--
+<span class="lineno">  146 </span>-- Tabs no longer carry a friendly label of their own — a tab's display title
+<span class="lineno">  147 </span>-- derives from its bound session (or a harness label fallback) at render time.
+<span class="lineno">  148 </span>appendTab :: TabRef -&gt; TabList -&gt; Either TabsError (TabIndex, TabList)
+<span class="lineno">  149 </span><span class="decl"><span class="istickedoff">appendTab ref tl@(TabList ts) =</span>
+<span class="lineno">  150 </span><span class="spaces">  </span><span class="istickedoff">case lookupRef ref tl of</span>
+<span class="lineno">  151 </span><span class="spaces">    </span><span class="istickedoff">Just i  -&gt; Left (AlreadyBound i)</span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  153 </span><span class="spaces">      </span><span class="istickedoff">let n = length ts</span>
+<span class="lineno">  154 </span><span class="spaces">      </span><span class="istickedoff">in if n &gt;= maxTabSlots</span>
+<span class="lineno">  155 </span><span class="spaces">           </span><span class="istickedoff">then Left SlotsFull</span>
+<span class="lineno">  156 </span><span class="spaces">           </span><span class="istickedoff">else</span>
+<span class="lineno">  157 </span><span class="spaces">             </span><span class="istickedoff">-- @0 &lt;= n &lt; 36@ here, so slot @n@ is valid. Append the new tab</span>
+<span class="lineno">  158 </span><span class="spaces">             </span><span class="istickedoff">-- (with a provisional slot 'reindex' overwrites) and 'reindex' to</span>
+<span class="lineno">  159 </span><span class="spaces">             </span><span class="istickedoff">-- stamp contiguous slots @0..n@ (I1). The new tab is last, so its</span>
+<span class="lineno">  160 </span><span class="spaces">             </span><span class="istickedoff">-- slot is the last stamped index, read back via 'NE.last'.</span>
+<span class="lineno">  161 </span><span class="spaces">             </span><span class="istickedoff">let placed = NE.fromList (reindex (ts ++ [Tab firstSlot ref Live]))</span>
+<span class="lineno">  162 </span><span class="spaces">             </span><span class="istickedoff">in Right (_tab_slot (NE.last placed), TabList (NE.toList placed))</span></span>
+<span class="lineno">  163 </span>
+<span class="lineno">  164 </span>-- | The infinite stream of valid slots @0, 1, 2, …@ as a 'NonEmpty'. Built
+<span class="lineno">  165 </span>-- via the comprehension-filter trick so the impossible @'mkTabIndex' n ==
+<span class="lineno">  166 </span>-- Nothing@ (n negative) case introduces no uncoverable alternative; the
+<span class="lineno">  167 </span>-- 'NonEmpty' shape makes 'firstSlot' total (no partial 'head').
+<span class="lineno">  168 </span>slotStream :: NonEmpty TabIndex
+<span class="lineno">  169 </span><span class="decl"><span class="istickedoff">slotStream = NE.fromList [ s | n &lt;- [0 :: Int ..], Just s &lt;- [mkTabIndex n] ]</span></span>
+<span class="lineno">  170 </span>
+<span class="lineno">  171 </span>-- | The first slot (@0@), used as the provisional slot for a freshly-appended
+<span class="lineno">  172 </span>-- tab before 'reindex' stamps the real one.
+<span class="lineno">  173 </span>firstSlot :: TabIndex
+<span class="lineno">  174 </span><span class="decl"><span class="istickedoff">firstSlot = NE.head slotStream</span></span>
+<span class="lineno">  175 </span>
+<span class="lineno">  176 </span>-- | Remove the tab at @slot@ (if present) and compact: every tab above the
+<span class="lineno">  177 </span>-- removed slot shifts down by one, so the result still satisfies I1. A no-op
+<span class="lineno">  178 </span>-- when no tab occupies @slot@.
+<span class="lineno">  179 </span>removeSlot :: TabIndex -&gt; TabList -&gt; TabList
+<span class="lineno">  180 </span><span class="decl"><span class="istickedoff">removeSlot slot (TabList ts) =</span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="istickedoff">TabList (reindex (filter ((/= unTabIndex slot) . unTabIndex . _tab_slot) ts))</span></span>
+<span class="lineno">  182 </span>
+<span class="lineno">  183 </span>-- | Re-stamp a list of tabs with contiguous slots @0..n-1@ in their current
+<span class="lineno">  184 </span>-- order. Used after a removal to restore I1. Total: 'slotStream' supplies a
+<span class="lineno">  185 </span>-- valid 'TabIndex' for every position, so 'zipWith' stamps every tab.
+<span class="lineno">  186 </span>reindex :: [Tab] -&gt; [Tab]
+<span class="lineno">  187 </span><span class="decl"><span class="istickedoff">reindex = zipWith (\s t -&gt; t { _tab_slot = s }) (NE.toList slotStream)</span></span>
+<span class="lineno">  188 </span>
+<span class="lineno">  189 </span>-- | Look up the tab currently at @slot@.
+<span class="lineno">  190 </span>lookupSlot :: TabIndex -&gt; TabList -&gt; Maybe Tab
+<span class="lineno">  191 </span><span class="decl"><span class="istickedoff">lookupSlot slot (TabList ts) =</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="istickedoff">case filter ((== unTabIndex slot) . unTabIndex . _tab_slot) ts of</span>
+<span class="lineno">  193 </span><span class="spaces">    </span><span class="istickedoff">(t : _) -&gt; Just t</span>
+<span class="lineno">  194 </span><span class="spaces">    </span><span class="istickedoff">[]      -&gt; Nothing</span></span>
+<span class="lineno">  195 </span>
+<span class="lineno">  196 </span>-- | Look up the slot currently occupied by @ref@ (I2 guarantees at most one).
+<span class="lineno">  197 </span>lookupRef :: TabRef -&gt; TabList -&gt; Maybe TabIndex
+<span class="lineno">  198 </span><span class="decl"><span class="istickedoff">lookupRef ref (TabList ts) =</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">case filter ((== ref) . _tab_ref) ts of</span>
+<span class="lineno">  200 </span><span class="spaces">    </span><span class="istickedoff">(t : _) -&gt; Just (_tab_slot t)</span>
+<span class="lineno">  201 </span><span class="spaces">    </span><span class="istickedoff">[]      -&gt; Nothing</span></span>
+<span class="lineno">  202 </span>
+<span class="lineno">  203 </span>-- | Set the 'TabStatus' of the tab bound to @ref@. A no-op when @ref@ is not
+<span class="lineno">  204 </span>-- bound. Slots are unaffected.
+<span class="lineno">  205 </span>setStatus :: TabRef -&gt; TabStatus -&gt; TabList -&gt; TabList
+<span class="lineno">  206 </span><span class="decl"><span class="istickedoff">setStatus ref status (TabList ts) =</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">TabList (map upd ts)</span>
+<span class="lineno">  208 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  209 </span><span class="spaces">    </span><span class="istickedoff">upd t =</span>
+<span class="lineno">  210 </span><span class="spaces">      </span><span class="istickedoff">if _tab_ref t == ref</span>
+<span class="lineno">  211 </span><span class="spaces">        </span><span class="istickedoff">then t { _tab_status = status }</span>
+<span class="lineno">  212 </span><span class="spaces">        </span><span class="istickedoff">else t</span></span>
+<span class="lineno">  213 </span>
+<span class="lineno">  214 </span>-- | Rebind the tab at @slot@ to a new @ref@, /in place/ — the slot, and the
+<span class="lineno">  215 </span>-- slots of every other tab, are unchanged (I1 preserved). The rebound tab's
+<span class="lineno">  216 </span>-- status is reset to 'Live'. This backs @\/new@'s &quot;reset the active tab to a
+<span class="lineno">  217 </span>-- fresh session&quot; semantics (design §6.1).
+<span class="lineno">  218 </span>--
+<span class="lineno">  219 </span>-- The new @ref@ is dedup-checked against I2:
+<span class="lineno">  220 </span>--
+<span class="lineno">  221 </span>--   * If @ref@ is already bound to a /different/ slot, the rebind is rejected
+<span class="lineno">  222 </span>--     with @'Left' ('AlreadyBound' i)@ (@i@ = that other slot) and the list is
+<span class="lineno">  223 </span>--     unchanged.
+<span class="lineno">  224 </span>--   * Rebinding a slot to the ref it /already/ holds is allowed — it is just a
+<span class="lineno">  225 </span>--     relabel (and a status reset) in place.
+<span class="lineno">  226 </span>--
+<span class="lineno">  227 </span>-- If no tab occupies @slot@, this is a no-op returning the list unchanged
+<span class="lineno">  228 </span>-- (@'Right'@) — callers that already verified an active tab never hit this,
+<span class="lineno">  229 </span>-- but it keeps the function total.
+<span class="lineno">  230 </span>rebindSlot :: TabIndex -&gt; TabRef -&gt; TabList -&gt; Either TabsError TabList
+<span class="lineno">  231 </span><span class="decl"><span class="istickedoff">rebindSlot slot ref tl@(TabList ts) =</span>
+<span class="lineno">  232 </span><span class="spaces">  </span><span class="istickedoff">case lookupSlot slot tl of</span>
+<span class="lineno">  233 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; Right tl</span>
+<span class="lineno">  234 </span><span class="spaces">    </span><span class="istickedoff">Just _  -&gt;</span>
+<span class="lineno">  235 </span><span class="spaces">      </span><span class="istickedoff">case lookupRef ref tl of</span>
+<span class="lineno">  236 </span><span class="spaces">        </span><span class="istickedoff">Just other | other /= slot -&gt; Left (AlreadyBound other)</span>
+<span class="lineno">  237 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt; Right (TabList (map upd ts))</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  239 </span><span class="spaces">    </span><span class="istickedoff">upd t =</span>
+<span class="lineno">  240 </span><span class="spaces">      </span><span class="istickedoff">if unTabIndex (_tab_slot t) == unTabIndex slot</span>
+<span class="lineno">  241 </span><span class="spaces">        </span><span class="istickedoff">then t { _tab_ref = ref, _tab_status = Live }</span>
+<span class="lineno">  242 </span><span class="spaces">        </span><span class="istickedoff">else t</span></span>
+<span class="lineno">  243 </span>
+<span class="lineno">  244 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  245 </span>-- Per-conversation cursors &amp; relay (I3)
+<span class="lineno">  246 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  247 </span>
+<span class="lineno">  248 </span>-- | The identity of a conversation: its originating 'ChannelKind' paired with
+<span class="lineno">  249 </span>-- a server-derived 'ConversationId'. Two messages sharing a key belong to the
+<span class="lineno">  250 </span>-- same conversation and therefore share a tab cursor and a 'RelayMode'.
+<span class="lineno">  251 </span>type ConversationKey = (ChannelKind, ConversationId)
+<span class="lineno">  252 </span>
+<span class="lineno">  253 </span>-- | How a conversation's output relay fans tab output out to it. Persisted
+<span class="lineno">  254 </span>-- per 'ConversationKey'; the global default lives in config (see the
+<span class="lineno">  255 </span>-- Tabs-as-View design §9.3).
+<span class="lineno">  256 </span>--
+<span class="lineno">  257 </span>-- * 'FocusedOnly' (default) — only the conversation's focused tab is relayed.
+<span class="lineno">  258 </span>-- * 'ActivityDigest' — focused tab full; other live tabs get an activity ping.
+<span class="lineno">  259 </span>-- * 'Firehose' — full content from all live tabs.
+<span class="lineno">  260 </span>data RelayMode
+<span class="lineno">  261 </span>  = FocusedOnly
+<span class="lineno">  262 </span>  | ActivityDigest
+<span class="lineno">  263 </span>  | Firehose
+<span class="lineno">  264 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  265 </span>
+<span class="lineno">  266 </span>-- | The per-conversation routing state the dispatcher owns: which 'TabRef'
+<span class="lineno">  267 </span>-- each conversation is focused on ('_cs_cursors'), and any per-conversation
+<span class="lineno">  268 </span>-- 'RelayMode' override ('_cs_relay'). Both maps are keyed by 'ConversationKey'.
+<span class="lineno">  269 </span>--
+<span class="lineno">  270 </span>-- Cursors key by 'TabRef', not by slot — this is invariant __I3__: a cursor
+<span class="lineno">  271 </span>-- survives slot compaction ('removeSlot') because it names ground truth, not a
+<span class="lineno">  272 </span>-- position. 'resolveCursorSlot' resolves the ref to its /current/ slot at read
+<span class="lineno">  273 </span>-- time.
+<span class="lineno">  274 </span>data CursorState = CursorState
+<span class="lineno">  275 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_cursors</span></span></span> :: !(Map ConversationKey TabRef)
+<span class="lineno">  276 </span>    -- ^ The 'TabRef' each conversation is currently focused on.
+<span class="lineno">  277 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_relay</span></span></span>   :: !(Map ConversationKey RelayMode)
+<span class="lineno">  278 </span>    -- ^ Per-conversation 'RelayMode' overrides (absent ⇒ use the global default).
+<span class="lineno">  279 </span>  }
+<span class="lineno">  280 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  281 </span>
+<span class="lineno">  282 </span>-- | The empty cursor state: no cursors, no relay overrides.
+<span class="lineno">  283 </span>emptyCursors :: CursorState
+<span class="lineno">  284 </span><span class="decl"><span class="istickedoff">emptyCursors = CursorState Map.empty Map.empty</span></span>
+<span class="lineno">  285 </span>
+<span class="lineno">  286 </span>-- | Focus a conversation on a 'TabRef', replacing any prior cursor for that key.
+<span class="lineno">  287 </span>-- The relay map is untouched.
+<span class="lineno">  288 </span>setCursor :: ConversationKey -&gt; TabRef -&gt; CursorState -&gt; CursorState
+<span class="lineno">  289 </span><span class="decl"><span class="istickedoff">setCursor k ref cs = cs { _cs_cursors = Map.insert k ref (_cs_cursors cs) }</span></span>
+<span class="lineno">  290 </span>
+<span class="lineno">  291 </span>-- | Drop a conversation's cursor (a no-op if it had none). The relay map is
+<span class="lineno">  292 </span>-- untouched.
+<span class="lineno">  293 </span>clearCursor :: ConversationKey -&gt; CursorState -&gt; CursorState
+<span class="lineno">  294 </span><span class="decl"><span class="istickedoff">clearCursor k cs = cs { _cs_cursors = Map.delete k (_cs_cursors cs) }</span></span>
+<span class="lineno">  295 </span>
+<span class="lineno">  296 </span>-- | Resolve a conversation's cursor to the slot its bound 'TabRef' currently
+<span class="lineno">  297 </span>-- occupies (__I3__). Returns 'Nothing' when the key has no cursor or when the
+<span class="lineno">  298 </span>-- cursor's ref is no longer present in the 'TabList' (a dangling cursor).
+<span class="lineno">  299 </span>resolveCursorSlot :: ConversationKey -&gt; CursorState -&gt; TabList -&gt; Maybe TabIndex
+<span class="lineno">  300 </span><span class="decl"><span class="istickedoff">resolveCursorSlot k cs tl =</span>
+<span class="lineno">  301 </span><span class="spaces">  </span><span class="istickedoff">case Map.lookup k (_cs_cursors cs) of</span>
+<span class="lineno">  302 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt; Nothing</span>
+<span class="lineno">  303 </span><span class="spaces">    </span><span class="istickedoff">Just ref -&gt; lookupRef ref tl</span></span>
+<span class="lineno">  304 </span>
+<span class="lineno">  305 </span>-- | All conversation keys whose cursor is focused on the given 'TabRef'.
+<span class="lineno">  306 </span>conversationsOn :: TabRef -&gt; CursorState -&gt; [ConversationKey]
+<span class="lineno">  307 </span><span class="decl"><span class="istickedoff">conversationsOn ref cs =</span>
+<span class="lineno">  308 </span><span class="spaces">  </span><span class="istickedoff">[ k | (k, r) &lt;- Map.toList (_cs_cursors cs), r == ref ]</span></span>
+<span class="lineno">  309 </span>
+<span class="lineno">  310 </span>-- | Drop every cursor whose 'TabRef' is no longer present in the 'TabList'.
+<span class="lineno">  311 </span>-- Valid cursors and the entire relay map are preserved.
+<span class="lineno">  312 </span>pruneDangling :: TabList -&gt; CursorState -&gt; CursorState
+<span class="lineno">  313 </span><span class="decl"><span class="istickedoff">pruneDangling tl cs =</span>
+<span class="lineno">  314 </span><span class="spaces">  </span><span class="istickedoff">cs { _cs_cursors = Map.filter present (_cs_cursors cs) }</span>
+<span class="lineno">  315 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  316 </span><span class="spaces">    </span><span class="istickedoff">present ref = case lookupRef ref tl of</span>
+<span class="lineno">  317 </span><span class="spaces">      </span><span class="istickedoff">Just _  -&gt; True</span>
+<span class="lineno">  318 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; False</span></span>
+<span class="lineno">  319 </span>
+<span class="lineno">  320 </span>-- | The 'RelayMode' for a conversation: its per-conversation override if one is
+<span class="lineno">  321 </span>-- set, otherwise the supplied global default.
+<span class="lineno">  322 </span>relayModeFor :: ConversationKey -&gt; RelayMode -&gt; CursorState -&gt; RelayMode
+<span class="lineno">  323 </span><span class="decl"><span class="istickedoff">relayModeFor k def cs = Map.findWithDefault def k (_cs_relay cs)</span></span>
+<span class="lineno">  324 </span>
+<span class="lineno">  325 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  326 </span>-- @/tab@ command ADTs (parsed form)
+<span class="lineno">  327 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  328 </span>
+<span class="lineno">  329 </span>-- | A redacted enumeration of @TabKind@ as it appears in the @/tab new@
+<span class="lineno">  330 </span>-- command. Local to this module to avoid an import cycle through
+<span class="lineno">  331 </span>-- 'PureClaw.Handles.Tab' (which imports this module for 'SlashCommand'
+<span class="lineno">  332 </span>-- in its 'TabUnsupportedCommand' constructor). WU2 introduces this type
+<span class="lineno">  333 </span>-- alongside the @/tab@ command family; downstream WUs that need a
+<span class="lineno">  334 </span>-- 'PureClaw.Handles.Tab.TabKind' translate via a trivial total
+<span class="lineno">  335 </span>-- conversion at the handler layer (WU9).
+<span class="lineno">  336 </span>data TabKindArg
+<span class="lineno">  337 </span>  = TkaAi
+<span class="lineno">  338 </span>  | TkaProvider
+<span class="lineno">  339 </span>  | TkaHarness
+<span class="lineno">  340 </span>  | TkaShell
+<span class="lineno">  341 </span>  | TkaSsh
+<span class="lineno">  342 </span>  | TkaTmux
+<span class="lineno">  343 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Bounded</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  344 </span>
+<span class="lineno">  345 </span>-- | Whether @/tab close N@ was passed the @--force@ flag.
+<span class="lineno">  346 </span>--
+<span class="lineno">  347 </span>-- For @KindAi@ tabs, @ForceYes@ skips the session archive on close
+<span class="lineno">  348 </span>-- (transcript deleted from disk). For non-AI tabs the close path is
+<span class="lineno">  349 </span>-- already destructive so the flag is a no-op semantically — the
+<span class="lineno">  350 </span>-- distinction is preserved here so 'executeSlashCommand' (WU9) can
+<span class="lineno">  351 </span>-- still echo what the user asked for.
+<span class="lineno">  352 </span>data ForceMode
+<span class="lineno">  353 </span>  = ForceNo
+<span class="lineno">  354 </span>  | ForceYes
+<span class="lineno">  355 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Bounded</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  356 </span>
+<span class="lineno">  357 </span>-- | The @/tab@ command family (introduced by WU2 of Tabbed Chat #51).
+<span class="lineno">  358 </span>--
+<span class="lineno">  359 </span>-- Tab indices are stored as plain 'Int' rather than as
+<span class="lineno">  360 </span>-- 'PureClaw.Handles.Tab.TabIndex' to avoid an import cycle. The parser
+<span class="lineno">  361 </span>-- ('PureClaw.Routing.Parse.parseInput') validates the index against
+<span class="lineno">  362 </span>-- @_rc_maxTabs@ via @mkTabIndex@ before constructing these values, so
+<span class="lineno">  363 </span>-- callers may treat the contained 'Int' as well-formed for the
+<span class="lineno">  364 </span>-- configured cap; downstream handlers (WU9) are still expected to
+<span class="lineno">  365 </span>-- re-wrap via @mkTabIndex@ when crossing into 'TabIndex'-typed APIs.
+<span class="lineno">  366 </span>--
+<span class="lineno">  367 </span>-- @TabResumeCmd@ carries the validated 'SessionId' produced by
+<span class="lineno">  368 </span>-- @mkSessionId@ (WU2 smart constructor).
+<span class="lineno">  369 </span>--
+<span class="lineno">  370 </span>-- /tmux-style packing update:/ @TabNewCmd@ no longer carries an
+<span class="lineno">  371 </span>-- explicit target index — new tabs are always allocated at the lowest
+<span class="lineno">  372 </span>-- free slot. The constructor's payload is therefore just the optional
+<span class="lineno">  373 </span>-- kind keyword and the optional argument-text remainder.
+<span class="lineno">  374 </span>data TabSlashCommand
+<span class="lineno">  375 </span>  = TabNewCmd !(Maybe TabKindArg) !(Maybe Text)
+<span class="lineno">  376 </span>    -- ^ @\/tab new [\&lt;kind\&gt; [\&lt;arg-text\&gt;]]@. Index is allocated at
+<span class="lineno">  377 </span>    --   the lowest free slot by the handler (tmux-style packing). The
+<span class="lineno">  378 </span>    --   second field is the remainder of the line after the kind,
+<span class="lineno">  379 </span>    --   captured as a single 'Text' for the handler to split further.
+<span class="lineno">  380 </span>  | TabListCmd
+<span class="lineno">  381 </span>    -- ^ @\/tab list@ (and the @\/tabs@ alias).
+<span class="lineno">  382 </span>  | TabCloseCmd !Int !ForceMode
+<span class="lineno">  383 </span>    -- ^ @\/tab close \&lt;N\&gt; [--force]@. Remaining tabs are renumbered
+<span class="lineno">  384 </span>    --   down by one starting at @N+1@ so the registry is always packed
+<span class="lineno">  385 </span>    --   in the lowest slots (tmux @renumber-windows on@ model).
+<span class="lineno">  386 </span>  | TabFocusCmd !Int
+<span class="lineno">  387 </span>    -- ^ @\/tab focus \&lt;N\&gt;@ (functional alias of @\/N@).
+<span class="lineno">  388 </span>  | TabResumeCmd !SessionId
+<span class="lineno">  389 </span>    -- ^ @\/tab resume \&lt;session-id\&gt;@. Validation lives in
+<span class="lineno">  390 </span>    --   @mkSessionId@; rejection surfaces as
+<span class="lineno">  391 </span>    --   @ParseErrorInvalidSessionId@.
+<span class="lineno">  392 </span>  | TabRenameCmd !Int !Text
+<span class="lineno">  393 </span>    -- ^ @\/tab rename \&lt;N\&gt; \&lt;name\&gt;@. Parser captures the requested
+<span class="lineno">  394 </span>    --   name verbatim; @sanitizeTabName@ runs at handler time per
+<span class="lineno">  395 </span>    --   S10 so the user sees the rejection reason when applicable.
+<span class="lineno">  396 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+
+</pre>
+</body>
+</html>

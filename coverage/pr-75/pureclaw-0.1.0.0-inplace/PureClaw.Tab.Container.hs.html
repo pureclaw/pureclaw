@@ -1,0 +1,189 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tab.Container
+<span class="lineno">    3 </span>-- Description : Container exec security and argv construction (WU-10).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- Pure helpers for the container backend factory arm:
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>--   * 'containerArgsDenylist' — dangerous container flags that must not
+<span class="lineno">    8 </span>--     appear in user-supplied harness args.
+<span class="lineno">    9 </span>--   * 'checkContainerArgs' — validate args against the denylist.
+<span class="lineno">   10 </span>--   * 'containerEngineBinary' — map 'ContainerEngine' to binary name.
+<span class="lineno">   11 </span>--   * 'flavourToBinary' — map 'HarnessFlavour' to binary name.
+<span class="lineno">   12 </span>--   * 'buildContainerExecArgv' — construct the full exec argv.
+<span class="lineno">   13 </span>--   * 'validateCwd' — pure path-traversal guard for '_h_cwd'.
+<span class="lineno">   14 </span>module PureClaw.Tab.Container
+<span class="lineno">   15 </span>  ( -- * Args denylist
+<span class="lineno">   16 </span>    containerArgsDenylist
+<span class="lineno">   17 </span>  , ContainerArgsError (..)
+<span class="lineno">   18 </span>  , checkContainerArgs
+<span class="lineno">   19 </span>    -- * Argv construction
+<span class="lineno">   20 </span>  , containerEngineBinary
+<span class="lineno">   21 </span>  , flavourToBinary
+<span class="lineno">   22 </span>  , buildContainerExecArgv
+<span class="lineno">   23 </span>    -- * Cwd validation
+<span class="lineno">   24 </span>  , CwdError (..)
+<span class="lineno">   25 </span>  , validateCwd
+<span class="lineno">   26 </span>  ) where
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>import Data.Text (Text)
+<span class="lineno">   29 </span>import Data.Text qualified as T
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>import PureClaw.Session.Kind
+<span class="lineno">   32 </span>  ( ContainerEngine (..)
+<span class="lineno">   33 </span>  , ContainerSpec (..)
+<span class="lineno">   34 </span>  , HarnessFlavour (..)
+<span class="lineno">   35 </span>  , unContainerTarget
+<span class="lineno">   36 </span>  )
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   40 </span>-- Args denylist (S9)
+<span class="lineno">   41 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>-- | Container flags that pose a security risk. Any flag in '_h_args'
+<span class="lineno">   44 </span>-- matching one of these strings causes the container factory arm to
+<span class="lineno">   45 </span>-- reject the spawn.
+<span class="lineno">   46 </span>containerArgsDenylist :: [Text]
+<span class="lineno">   47 </span><span class="decl"><span class="istickedoff">containerArgsDenylist =</span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;--privileged&quot;</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--cap-add&quot;</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--security-opt&quot;</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--device&quot;</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--pid=host&quot;</span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--network=host&quot;</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--userns=host&quot;</span>
+<span class="lineno">   55 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--uts=host&quot;</span>
+<span class="lineno">   56 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--ipc=host&quot;</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">, &quot;-v&quot;</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--volume&quot;</span>
+<span class="lineno">   59 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--mount&quot;</span>
+<span class="lineno">   60 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Why container args were rejected.
+<span class="lineno">   63 </span>data ContainerArgsError
+<span class="lineno">   64 </span>  = DeniedFlag !Text
+<span class="lineno">   65 </span>    -- ^ A flag from 'containerArgsDenylist' was found in '_h_args'.
+<span class="lineno">   66 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>-- | Check a list of user-supplied args against 'containerArgsDenylist'.
+<span class="lineno">   69 </span>-- Returns the first denied flag found, if any.
+<span class="lineno">   70 </span>checkContainerArgs :: [Text] -&gt; Either ContainerArgsError ()
+<span class="lineno">   71 </span><span class="decl"><span class="istickedoff">checkContainerArgs args =</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="istickedoff">case filter (`elem` containerArgsDenylist) args of</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">[]    -&gt; Right ()</span>
+<span class="lineno">   74 </span><span class="spaces">    </span><span class="istickedoff">(f:_) -&gt; Left (DeniedFlag f)</span></span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   78 </span>-- Engine binary mapping
+<span class="lineno">   79 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>-- | Map a 'ContainerEngine' to the binary name used in the exec argv.
+<span class="lineno">   82 </span>containerEngineBinary :: ContainerEngine -&gt; Text
+<span class="lineno">   83 </span><span class="decl"><span class="istickedoff">containerEngineBinary Docker  = &quot;docker&quot;</span>
+<span class="lineno">   84 </span><span class="spaces"></span><span class="istickedoff">containerEngineBinary Podman  = &quot;podman&quot;</span>
+<span class="lineno">   85 </span><span class="spaces"></span><span class="istickedoff">containerEngineBinary Kubectl = &quot;kubectl&quot;</span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>
+<span class="lineno">   88 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   89 </span>-- Flavour binary mapping
+<span class="lineno">   90 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>-- | Map a 'HarnessFlavour' to the binary name invoked inside the
+<span class="lineno">   93 </span>-- container. This is the program that appears after the @--@ separator
+<span class="lineno">   94 </span>-- in the container exec argv.
+<span class="lineno">   95 </span>flavourToBinary :: HarnessFlavour -&gt; Text
+<span class="lineno">   96 </span><span class="decl"><span class="istickedoff">flavourToBinary HClaudeCode = &quot;claude&quot;</span>
+<span class="lineno">   97 </span><span class="spaces"></span><span class="istickedoff">flavourToBinary HCodex      = &quot;codex&quot;</span>
+<span class="lineno">   98 </span><span class="spaces"></span><span class="istickedoff">flavourToBinary HOpenCode   = &quot;opencode&quot;</span>
+<span class="lineno">   99 </span><span class="spaces"></span><span class="istickedoff">flavourToBinary HHermes     = &quot;hermes&quot;</span>
+<span class="lineno">  100 </span><span class="spaces"></span><span class="istickedoff">flavourToBinary HPureClaw   = &quot;pureclaw&quot;</span>
+<span class="lineno">  101 </span><span class="spaces"></span><span class="istickedoff">flavourToBinary (HCustom n) = n</span></span>
+<span class="lineno">  102 </span>
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  105 </span>-- Argv construction (S9)
+<span class="lineno">  106 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  107 </span>
+<span class="lineno">  108 </span>-- | Build the explicit exec argv for a container backend.
+<span class="lineno">  109 </span>--
+<span class="lineno">  110 </span>-- Structure:
+<span class="lineno">  111 </span>-- @[engine_binary, &quot;exec&quot;, &quot;-it&quot;, target, &quot;--&quot;, harness_binary] ++ args@
+<span class="lineno">  112 </span>--
+<span class="lineno">  113 </span>-- The @--@ separator is MANDATORY to prevent argument injection: without
+<span class="lineno">  114 </span>-- it, a malicious target or harness args could be interpreted as flags
+<span class="lineno">  115 </span>-- to the container engine.
+<span class="lineno">  116 </span>buildContainerExecArgv :: ContainerSpec -&gt; HarnessFlavour -&gt; [Text] -&gt; [Text]
+<span class="lineno">  117 </span><span class="decl"><span class="istickedoff">buildContainerExecArgv cs flavour harnessArgs =</span>
+<span class="lineno">  118 </span><span class="spaces">  </span><span class="istickedoff">[ containerEngineBinary (_cs_engine cs)</span>
+<span class="lineno">  119 </span><span class="spaces">  </span><span class="istickedoff">, &quot;exec&quot;</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">, &quot;-it&quot;</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">, unContainerTarget (_cs_target cs)</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">, &quot;--&quot;</span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">, flavourToBinary flavour</span>
+<span class="lineno">  124 </span><span class="spaces">  </span><span class="istickedoff">] &lt;&gt; harnessArgs</span></span>
+<span class="lineno">  125 </span>
+<span class="lineno">  126 </span>
+<span class="lineno">  127 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  128 </span>-- Cwd validation (S10)
+<span class="lineno">  129 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | Why a cwd path was rejected.
+<span class="lineno">  132 </span>data CwdError
+<span class="lineno">  133 </span>  = CwdPathTraversal
+<span class="lineno">  134 </span>    -- ^ The path contains @..@ components (path traversal).
+<span class="lineno">  135 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  136 </span>
+<span class="lineno">  137 </span>-- | Pure validation of '_h_cwd'. Rejects paths containing @..@
+<span class="lineno">  138 </span>-- components (which could escape the intended working directory).
+<span class="lineno">  139 </span>-- Returns the validated 'FilePath' when present and valid, or 'Nothing'
+<span class="lineno">  140 </span>-- when no cwd was specified.
+<span class="lineno">  141 </span>--
+<span class="lineno">  142 </span>-- This is a lightweight pure check that catches the most common
+<span class="lineno">  143 </span>-- traversal attack. The full 'mkSafePath' IO validation (which follows
+<span class="lineno">  144 </span>-- symlinks and canonicalises) is performed at spawn time by the factory
+<span class="lineno">  145 </span>-- arm when a 'WorkspaceRoot' is available.
+<span class="lineno">  146 </span>validateCwd :: Maybe Text -&gt; Either CwdError (Maybe FilePath)
+<span class="lineno">  147 </span><span class="decl"><span class="istickedoff">validateCwd Nothing  = Right Nothing</span>
+<span class="lineno">  148 </span><span class="spaces"></span><span class="istickedoff">validateCwd (Just t) =</span>
+<span class="lineno">  149 </span><span class="spaces">  </span><span class="istickedoff">let path = T.unpack t</span>
+<span class="lineno">  150 </span><span class="spaces">  </span><span class="istickedoff">in if hasParentTraversal path</span>
+<span class="lineno">  151 </span><span class="spaces">       </span><span class="istickedoff">then Left CwdPathTraversal</span>
+<span class="lineno">  152 </span><span class="spaces">       </span><span class="istickedoff">else Right (Just path)</span></span>
+<span class="lineno">  153 </span>
+<span class="lineno">  154 </span>-- | Check if a path contains @..@ components that could traverse upward.
+<span class="lineno">  155 </span>hasParentTraversal :: FilePath -&gt; Bool
+<span class="lineno">  156 </span><span class="decl"><span class="istickedoff">hasParentTraversal path =</span>
+<span class="lineno">  157 </span><span class="spaces">  </span><span class="istickedoff">let components = splitPath path</span>
+<span class="lineno">  158 </span><span class="spaces">  </span><span class="istickedoff">in &quot;..&quot; `elem` components</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  160 </span><span class="spaces">    </span><span class="istickedoff">-- Simple split on '/' — sufficient for the pure traversal check.</span>
+<span class="lineno">  161 </span><span class="spaces">    </span><span class="istickedoff">splitPath :: FilePath -&gt; [String]</span>
+<span class="lineno">  162 </span><span class="spaces">    </span><span class="istickedoff">splitPath = go []</span>
+<span class="lineno">  163 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  164 </span><span class="spaces">        </span><span class="istickedoff">go acc [] = [reverse acc]</span>
+<span class="lineno">  165 </span><span class="spaces">        </span><span class="istickedoff">go acc ('/':rest) = reverse acc : go [] rest</span>
+<span class="lineno">  166 </span><span class="spaces">        </span><span class="istickedoff">go acc (c:rest) = go (c:acc) rest</span></span>
+
+</pre>
+</body>
+</html>

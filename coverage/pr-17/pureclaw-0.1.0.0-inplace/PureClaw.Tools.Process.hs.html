@@ -1,0 +1,186 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Process
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    processTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Data.Aeson
+<span class="lineno">    7 </span>import Data.Aeson.Types
+<span class="lineno">    8 </span>import Data.ByteString.Char8 qualified as BS8
+<span class="lineno">    9 </span>import Data.Text (Text)
+<span class="lineno">   10 </span>import Data.Text qualified as T
+<span class="lineno">   11 </span>import System.Exit
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import PureClaw.Handles.Process
+<span class="lineno">   14 </span>import PureClaw.Providers.Class
+<span class="lineno">   15 </span>import PureClaw.Security.Command
+<span class="lineno">   16 </span>import PureClaw.Security.Policy
+<span class="lineno">   17 </span>import PureClaw.Tools.Registry
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>-- | Create a process tool for background command management.
+<span class="lineno">   20 </span>-- Supports: spawn, list, poll, kill, write_stdin.
+<span class="lineno">   21 </span>processTool :: SecurityPolicy -&gt; ProcessHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   22 </span><span class="decl"><span class="istickedoff">processTool policy ph = (def, handler)</span>
+<span class="lineno">   23 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   24 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   25 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;process&quot;</span>
+<span class="lineno">   26 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">&quot;Manage background processes. Actions: spawn (start a background command), list (show all), poll (check status and output), kill (terminate), write_stdin (send input).&quot;</span></span>
+<span class="lineno">   27 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   28 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   29 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   30 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;action&quot; .= object</span></span>
+<span class="lineno">   31 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   32 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;enum&quot; .= ([&quot;spawn&quot;, &quot;list&quot;, &quot;poll&quot;, &quot;kill&quot;, &quot;write_stdin&quot;] :: [Text])</span></span>
+<span class="lineno">   33 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The action to perform&quot; :: Text)</span></span>
+<span class="lineno">   34 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   35 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;command&quot; .= object</span></span>
+<span class="lineno">   36 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   37 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The command to run (for spawn)&quot; :: Text)</span></span>
+<span class="lineno">   38 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   39 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;id&quot; .= object</span></span>
+<span class="lineno">   40 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;integer&quot; :: Text)</span></span>
+<span class="lineno">   41 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Process ID (for poll, kill, write_stdin)&quot; :: Text)</span></span>
+<span class="lineno">   42 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   43 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;input&quot; .= object</span></span>
+<span class="lineno">   44 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   45 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Input to send to stdin (for write_stdin)&quot; :: Text)</span></span>
+<span class="lineno">   46 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   47 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   48 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;action&quot;] :: [Text])</span></span>
+<span class="lineno">   49 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   50 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   51 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   52 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   53 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseAction input of</span>
+<span class="lineno">   54 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">T.pack err</span>, True)</span>
+<span class="lineno">   55 </span><span class="spaces">        </span><span class="istickedoff">Right action -&gt; dispatch action input</span>
+<span class="lineno">   56 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">dispatch :: Text -&gt; Value -&gt; IO (Text, Bool)</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;spawn&quot; input =</span>
+<span class="lineno">   59 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseSpawn input of</span>
+<span class="lineno">   60 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   61 </span><span class="spaces">        </span><span class="istickedoff">Right cmd -&gt; doSpawn cmd</span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;list&quot; _ = doList</span>
+<span class="lineno">   63 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;poll&quot; input =</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseId input of</span>
+<span class="lineno">   65 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="istickedoff">Right pid -&gt; doPoll pid</span>
+<span class="lineno">   67 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;kill&quot; input =</span>
+<span class="lineno">   68 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseId input of</span>
+<span class="lineno">   69 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   70 </span><span class="spaces">        </span><span class="istickedoff">Right pid -&gt; doKill pid</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">dispatch &quot;write_stdin&quot; input =</span>
+<span class="lineno">   72 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseWriteStdin input of</span>
+<span class="lineno">   73 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   74 </span><span class="spaces">        </span><span class="istickedoff">Right (pid, bytes) -&gt; doWriteStdin pid <span class="nottickedoff">bytes</span></span>
+<span class="lineno">   75 </span><span class="spaces">    </span><span class="istickedoff">dispatch action _ = pure (&quot;Unknown action: &quot; &lt;&gt; action, True)</span>
+<span class="lineno">   76 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   77 </span><span class="spaces">    </span><span class="istickedoff">doSpawn :: Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">   78 </span><span class="spaces">    </span><span class="istickedoff">doSpawn cmd = do</span>
+<span class="lineno">   79 </span><span class="spaces">      </span><span class="istickedoff">let parts = T.words cmd</span>
+<span class="lineno">   80 </span><span class="spaces">      </span><span class="istickedoff">case parts of</span>
+<span class="lineno">   81 </span><span class="spaces">        </span><span class="istickedoff">[] -&gt; pure (<span class="nottickedoff">&quot;Empty command&quot;</span>, True)</span>
+<span class="lineno">   82 </span><span class="spaces">        </span><span class="istickedoff">(prog:args) -&gt;</span>
+<span class="lineno">   83 </span><span class="spaces">          </span><span class="istickedoff">case authorize policy (T.unpack prog) <span class="nottickedoff">args</span> of</span>
+<span class="lineno">   84 </span><span class="spaces">            </span><span class="istickedoff">Left (CommandNotAllowed c) -&gt;</span>
+<span class="lineno">   85 </span><span class="spaces">              </span><span class="istickedoff">pure (&quot;Command not allowed: &quot; &lt;&gt; c, True)</span>
+<span class="lineno">   86 </span><span class="spaces">            </span><span class="istickedoff">Left CommandInAutonomyDeny -&gt;</span>
+<span class="lineno">   87 </span><span class="spaces">              </span><span class="istickedoff">pure (&quot;All commands denied by security policy&quot;, True)</span>
+<span class="lineno">   88 </span><span class="spaces">            </span><span class="istickedoff">Right authorized -&gt; do</span>
+<span class="lineno">   89 </span><span class="spaces">              </span><span class="istickedoff">pid &lt;- _ph_spawn ph <span class="nottickedoff">authorized</span></span>
+<span class="lineno">   90 </span><span class="spaces">              </span><span class="istickedoff">pure (&quot;Started process &quot; &lt;&gt; T.pack (show (unProcessId pid)), False)</span>
+<span class="lineno">   91 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   92 </span><span class="spaces">    </span><span class="istickedoff">doList :: IO (Text, Bool)</span>
+<span class="lineno">   93 </span><span class="spaces">    </span><span class="istickedoff">doList = do</span>
+<span class="lineno">   94 </span><span class="spaces">      </span><span class="istickedoff">procs &lt;- _ph_list ph</span>
+<span class="lineno">   95 </span><span class="spaces">      </span><span class="istickedoff">if null procs</span>
+<span class="lineno">   96 </span><span class="spaces">        </span><span class="istickedoff">then pure (&quot;No background processes&quot;, False)</span>
+<span class="lineno">   97 </span><span class="spaces">        </span><span class="istickedoff">else pure (formatList procs, False)</span>
+<span class="lineno">   98 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">doPoll :: Int -&gt; IO (Text, Bool)</span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">doPoll pid = do</span>
+<span class="lineno">  101 </span><span class="spaces">      </span><span class="istickedoff">status &lt;- _ph_poll ph <span class="nottickedoff">(ProcessId pid)</span></span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">case status of</span>
+<span class="lineno">  103 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; pure (&quot;Process &quot; &lt;&gt; T.pack (show pid) &lt;&gt; &quot; not found&quot;, True)</span>
+<span class="lineno">  104 </span><span class="spaces">        </span><span class="istickedoff">Just (ProcessRunning stdout stderr) -&gt;</span>
+<span class="lineno">  105 </span><span class="spaces">          </span><span class="istickedoff">let out = T.pack (BS8.unpack stdout)</span>
+<span class="lineno">  106 </span><span class="spaces">              </span><span class="istickedoff">err = T.pack (BS8.unpack stderr)</span>
+<span class="lineno">  107 </span><span class="spaces">          </span><span class="istickedoff">in pure (&quot;Status: running\n&quot; &lt;&gt; formatOutput out err, False)</span>
+<span class="lineno">  108 </span><span class="spaces">        </span><span class="istickedoff">Just (ProcessDone exitCode stdout stderr) -&gt;</span>
+<span class="lineno">  109 </span><span class="spaces">          </span><span class="istickedoff">let out = T.pack (BS8.unpack stdout)</span>
+<span class="lineno">  110 </span><span class="spaces">              </span><span class="istickedoff">err = T.pack (BS8.unpack stderr)</span>
+<span class="lineno">  111 </span><span class="spaces">              </span><span class="istickedoff">exitInfo = case exitCode of</span>
+<span class="lineno">  112 </span><span class="spaces">                </span><span class="istickedoff">ExitSuccess   -&gt; &quot;0&quot;</span>
+<span class="lineno">  113 </span><span class="spaces">                </span><span class="istickedoff">ExitFailure n -&gt; <span class="nottickedoff">T.pack (show n)</span></span>
+<span class="lineno">  114 </span><span class="spaces">          </span><span class="istickedoff">in pure (&quot;Status: done (exit &quot; &lt;&gt; exitInfo &lt;&gt; &quot;)\n&quot; &lt;&gt; formatOutput out err, False)</span>
+<span class="lineno">  115 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  116 </span><span class="spaces">    </span><span class="istickedoff">doKill :: Int -&gt; IO (Text, Bool)</span>
+<span class="lineno">  117 </span><span class="spaces">    </span><span class="istickedoff">doKill pid = do</span>
+<span class="lineno">  118 </span><span class="spaces">      </span><span class="istickedoff">ok &lt;- _ph_kill ph <span class="nottickedoff">(ProcessId pid)</span></span>
+<span class="lineno">  119 </span><span class="spaces">      </span><span class="istickedoff">if ok</span>
+<span class="lineno">  120 </span><span class="spaces">        </span><span class="istickedoff">then pure (&quot;Killed process &quot; &lt;&gt; T.pack (show pid), False)</span>
+<span class="lineno">  121 </span><span class="spaces">        </span><span class="istickedoff">else pure (&quot;Process &quot; &lt;&gt; T.pack (show pid) &lt;&gt; &quot; not found&quot;, True)</span>
+<span class="lineno">  122 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  123 </span><span class="spaces">    </span><span class="istickedoff">doWriteStdin :: Int -&gt; Text -&gt; IO (Text, Bool)</span>
+<span class="lineno">  124 </span><span class="spaces">    </span><span class="istickedoff">doWriteStdin pid input = do</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">ok &lt;- _ph_writeStdin ph <span class="nottickedoff">(ProcessId pid)</span> <span class="nottickedoff">(BS8.pack (T.unpack input))</span></span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlytrue">ok</span></span>
+<span class="lineno">  127 </span><span class="spaces">        </span><span class="istickedoff">then pure (&quot;Sent input to process &quot; &lt;&gt; T.pack (show pid), False)</span>
+<span class="lineno">  128 </span><span class="spaces">        </span><span class="istickedoff">else <span class="nottickedoff">pure (&quot;Process &quot; &lt;&gt; T.pack (show pid) &lt;&gt; &quot; not found or not running&quot;, True)</span></span>
+<span class="lineno">  129 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  130 </span><span class="spaces">    </span><span class="istickedoff">formatList :: [ProcessInfo] -&gt; Text</span>
+<span class="lineno">  131 </span><span class="spaces">    </span><span class="istickedoff">formatList = T.intercalate &quot;\n&quot; . map formatInfo</span>
+<span class="lineno">  132 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  133 </span><span class="spaces">    </span><span class="istickedoff">formatInfo :: ProcessInfo -&gt; Text</span>
+<span class="lineno">  134 </span><span class="spaces">    </span><span class="istickedoff">formatInfo pi' =</span>
+<span class="lineno">  135 </span><span class="spaces">      </span><span class="istickedoff">let status = if _pi_running pi'</span>
+<span class="lineno">  136 </span><span class="spaces">            </span><span class="istickedoff">then &quot;running&quot;</span>
+<span class="lineno">  137 </span><span class="spaces">            </span><span class="istickedoff">else case _pi_exitCode pi' of</span>
+<span class="lineno">  138 </span><span class="spaces">              </span><span class="istickedoff">Just ExitSuccess   -&gt; &quot;done (exit 0)&quot;</span>
+<span class="lineno">  139 </span><span class="spaces">              </span><span class="istickedoff">Just (ExitFailure n) -&gt; <span class="nottickedoff">&quot;done (exit &quot; &lt;&gt; T.pack (show n) &lt;&gt; &quot;)&quot;</span></span>
+<span class="lineno">  140 </span><span class="spaces">              </span><span class="istickedoff">Nothing            -&gt; <span class="nottickedoff">&quot;unknown&quot;</span></span>
+<span class="lineno">  141 </span><span class="spaces">      </span><span class="istickedoff">in &quot;[&quot; &lt;&gt; T.pack (show (unProcessId (_pi_id pi'))) &lt;&gt; &quot;] &quot;</span>
+<span class="lineno">  142 </span><span class="spaces">         </span><span class="istickedoff">&lt;&gt; _pi_command pi' &lt;&gt; &quot; — &quot; &lt;&gt; status</span>
+<span class="lineno">  143 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  144 </span><span class="spaces">    </span><span class="istickedoff">formatOutput :: Text -&gt; Text -&gt; Text</span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="istickedoff">formatOutput out err =</span>
+<span class="lineno">  146 </span><span class="spaces">      </span><span class="istickedoff">let parts = filter (not . T.null)</span>
+<span class="lineno">  147 </span><span class="spaces">            </span><span class="istickedoff">[ if <span class="tickonlyfalse">T.null out</span> then <span class="nottickedoff">&quot;&quot;</span> else &quot;stdout:\n&quot; &lt;&gt; out</span>
+<span class="lineno">  148 </span><span class="spaces">            </span><span class="istickedoff">, if <span class="tickonlytrue">T.null err</span> then &quot;&quot; else <span class="nottickedoff">&quot;stderr:\n&quot; &lt;&gt; err</span></span>
+<span class="lineno">  149 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">  150 </span><span class="spaces">      </span><span class="istickedoff">in if <span class="tickonlyfalse">null parts</span> then <span class="nottickedoff">&quot;(no output)&quot;</span> else T.intercalate <span class="nottickedoff">&quot;\n&quot;</span> parts</span>
+<span class="lineno">  151 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="istickedoff">parseAction :: Value -&gt; Parser Text</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="istickedoff">parseAction = withObject <span class="nottickedoff">&quot;ProcessInput&quot;</span> $ \o -&gt; o .: &quot;action&quot;</span>
+<span class="lineno">  154 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  155 </span><span class="spaces">    </span><span class="istickedoff">parseSpawn :: Value -&gt; Parser Text</span>
+<span class="lineno">  156 </span><span class="spaces">    </span><span class="istickedoff">parseSpawn = withObject <span class="nottickedoff">&quot;ProcessSpawnInput&quot;</span> $ \o -&gt; o .: &quot;command&quot;</span>
+<span class="lineno">  157 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  158 </span><span class="spaces">    </span><span class="istickedoff">parseId :: Value -&gt; Parser Int</span>
+<span class="lineno">  159 </span><span class="spaces">    </span><span class="istickedoff">parseId = withObject <span class="nottickedoff">&quot;ProcessIdInput&quot;</span> $ \o -&gt; o .: &quot;id&quot;</span>
+<span class="lineno">  160 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  161 </span><span class="spaces">    </span><span class="istickedoff">parseWriteStdin :: Value -&gt; Parser (Int, Text)</span>
+<span class="lineno">  162 </span><span class="spaces">    </span><span class="istickedoff">parseWriteStdin = withObject <span class="nottickedoff">&quot;ProcessWriteStdinInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  163 </span><span class="spaces">      </span><span class="istickedoff">(,) &lt;$&gt; o .: &quot;id&quot; &lt;*&gt; o .: &quot;input&quot;</span></span>
+
+</pre>
+</body>
+</html>

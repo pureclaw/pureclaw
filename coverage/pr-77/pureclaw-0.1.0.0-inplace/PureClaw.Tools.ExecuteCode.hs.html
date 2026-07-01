@@ -1,0 +1,148 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.ExecuteCode
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    executeCodeTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">    7 </span>import Data.Aeson
+<span class="lineno">    8 </span>import Data.Aeson.Types
+<span class="lineno">    9 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   10 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   11 </span>import Data.Text (Text)
+<span class="lineno">   12 </span>import Data.Text qualified as T
+<span class="lineno">   13 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   14 </span>import System.Exit
+<span class="lineno">   15 </span>import System.Process.Typed qualified as P
+<span class="lineno">   16 </span>import System.Timeout qualified as Timeout
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import PureClaw.Providers.Class
+<span class="lineno">   19 </span>import PureClaw.Security.Command
+<span class="lineno">   20 </span>import PureClaw.Security.Policy
+<span class="lineno">   21 </span>import PureClaw.Tools.Registry
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>-- | Create an execute_code tool that runs Python (or other language)
+<span class="lineno">   24 </span>-- code in a subprocess. The interpreter must be allowed by the
+<span class="lineno">   25 </span>-- security policy. Output is capped at 50KB stdout / 10KB stderr.
+<span class="lineno">   26 </span>executeCodeTool :: SecurityPolicy -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   27 </span><span class="decl"><span class="istickedoff">executeCodeTool policy = (def, handler)</span>
+<span class="lineno">   28 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   29 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   30 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;execute_code&quot;</span>
+<span class="lineno">   31 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">   32 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Execute code in a subprocess. The interpreter (python3, node, etc.)&quot;</span></span>
+<span class="lineno">   33 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;must be allowed by the security policy.&quot;</span></span>
+<span class="lineno">   34 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Code is passed via stdin. Output is capped at 50KB stdout / 10KB stderr.&quot;</span></span>
+<span class="lineno">   35 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Default timeout: 30 seconds (configurable up to 300s).&quot;</span></span>
+<span class="lineno">   36 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   37 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   38 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   39 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   40 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;code&quot; .= object</span></span>
+<span class="lineno">   41 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   42 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The code to execute&quot; :: Text)</span></span>
+<span class="lineno">   43 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   44 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;language&quot; .= object</span></span>
+<span class="lineno">   45 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   46 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Language/interpreter: python3, node, ruby, bash (default: python3)&quot; :: Text)</span></span>
+<span class="lineno">   47 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   48 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;timeout&quot; .= object</span></span>
+<span class="lineno">   49 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;integer&quot; :: Text)</span></span>
+<span class="lineno">   50 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Timeout in seconds (default: 30, max: 300)&quot; :: Text)</span></span>
+<span class="lineno">   51 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   52 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   53 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;code&quot;] :: [Text])</span></span>
+<span class="lineno">   54 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   55 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   56 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   58 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseCodeInput input of</span>
+<span class="lineno">   59 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">T.pack err</span>, True)</span>
+<span class="lineno">   60 </span><span class="spaces">        </span><span class="istickedoff">Right ci -&gt; runCode ci</span>
+<span class="lineno">   61 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">runCode :: CodeInput -&gt; IO (Text, Bool)</span>
+<span class="lineno">   63 </span><span class="spaces">    </span><span class="istickedoff">runCode ci = do</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">let interpreter = resolveInterpreter (_ci_language ci)</span>
+<span class="lineno">   65 </span><span class="spaces">          </span><span class="istickedoff">timeoutSec = min 300 (fromMaybe 30 (_ci_timeout ci))</span>
+<span class="lineno">   66 </span><span class="spaces">      </span><span class="istickedoff">case authorize policy (T.unpack interpreter) <span class="nottickedoff">[&quot;-&quot;]</span> of</span>
+<span class="lineno">   67 </span><span class="spaces">        </span><span class="istickedoff">Left (CommandNotAllowed _) -&gt;</span>
+<span class="lineno">   68 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure (&quot;Interpreter not allowed: &quot; &lt;&gt; interpreter</span></span>
+<span class="lineno">   69 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot;. Add it to --allow or set --autonomy full.&quot;, True)</span></span>
+<span class="lineno">   70 </span><span class="spaces">        </span><span class="istickedoff">Left CommandInAutonomyDeny -&gt;</span>
+<span class="lineno">   71 </span><span class="spaces">          </span><span class="istickedoff">pure (&quot;All commands denied by security policy&quot;, True)</span>
+<span class="lineno">   72 </span><span class="spaces">        </span><span class="istickedoff">Right _authorized -&gt; do</span>
+<span class="lineno">   73 </span><span class="spaces">          </span><span class="istickedoff">let config = P.setStdin (P.byteStringInput (BL.fromStrict (TE.encodeUtf8 (_ci_code ci))))</span>
+<span class="lineno">   74 </span><span class="spaces">                     </span><span class="istickedoff">$ P.setEnv safeEnv</span>
+<span class="lineno">   75 </span><span class="spaces">                     </span><span class="istickedoff">$ P.proc (T.unpack interpreter) [&quot;-&quot;]</span>
+<span class="lineno">   76 </span><span class="spaces">          </span><span class="istickedoff">worker &lt;- Async.async $ P.readProcess config</span>
+<span class="lineno">   77 </span><span class="spaces">          </span><span class="istickedoff">result &lt;- Timeout.timeout (timeoutSec * 1000000) (Async.wait worker)</span>
+<span class="lineno">   78 </span><span class="spaces">          </span><span class="istickedoff">case result of</span>
+<span class="lineno">   79 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">   80 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">Async.cancel worker</span></span>
+<span class="lineno">   81 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure (&quot;Code execution timed out after &quot; &lt;&gt; T.pack (show timeoutSec) &lt;&gt; &quot;s&quot;, True)</span></span>
+<span class="lineno">   82 </span><span class="spaces">            </span><span class="istickedoff">Just (exitCode, outLazy, errLazy) -&gt;</span>
+<span class="lineno">   83 </span><span class="spaces">              </span><span class="istickedoff">let outBs = BL.toStrict outLazy</span>
+<span class="lineno">   84 </span><span class="spaces">                  </span><span class="istickedoff">errBs = BL.toStrict errLazy</span>
+<span class="lineno">   85 </span><span class="spaces">                  </span><span class="istickedoff">out = truncateOutput 51200 (TE.decodeUtf8Lenient outBs)</span>
+<span class="lineno">   86 </span><span class="spaces">                  </span><span class="istickedoff">err = truncateOutput 10240 (TE.decodeUtf8Lenient errBs)</span>
+<span class="lineno">   87 </span><span class="spaces">                  </span><span class="istickedoff">exitInfo = case exitCode of</span>
+<span class="lineno">   88 </span><span class="spaces">                    </span><span class="istickedoff">ExitSuccess   -&gt; &quot;&quot;</span>
+<span class="lineno">   89 </span><span class="spaces">                    </span><span class="istickedoff">ExitFailure n -&gt; &quot;\nExit code: &quot; &lt;&gt; T.pack (show n)</span>
+<span class="lineno">   90 </span><span class="spaces">                  </span><span class="istickedoff">parts = filter (not . T.null) [out, err, exitInfo]</span>
+<span class="lineno">   91 </span><span class="spaces">                  </span><span class="istickedoff">combined = T.strip (T.intercalate <span class="nottickedoff">&quot;\n&quot;</span> parts)</span>
+<span class="lineno">   92 </span><span class="spaces">              </span><span class="istickedoff">in pure (if <span class="tickonlyfalse">T.null combined</span> then <span class="nottickedoff">&quot;(no output)&quot;</span> else combined,</span>
+<span class="lineno">   93 </span><span class="spaces">                       </span><span class="istickedoff">exitCode /= ExitSuccess)</span>
+<span class="lineno">   94 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter :: Maybe Text -&gt; Text</span>
+<span class="lineno">   96 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter Nothing          = &quot;python3&quot;</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just &quot;python&quot;)  = <span class="nottickedoff">&quot;python3&quot;</span></span>
+<span class="lineno">   98 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just &quot;python3&quot;) = <span class="nottickedoff">&quot;python3&quot;</span></span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just &quot;node&quot;)    = <span class="nottickedoff">&quot;node&quot;</span></span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just &quot;ruby&quot;)    = <span class="nottickedoff">&quot;ruby&quot;</span></span>
+<span class="lineno">  101 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just &quot;bash&quot;)    = &quot;bash&quot;</span>
+<span class="lineno">  102 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just &quot;sh&quot;)      = <span class="nottickedoff">&quot;sh&quot;</span></span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">resolveInterpreter (Just other)     = <span class="nottickedoff">other</span></span>
+<span class="lineno">  104 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  105 </span><span class="spaces">    </span><span class="istickedoff">truncateOutput :: Int -&gt; Text -&gt; Text</span>
+<span class="lineno">  106 </span><span class="spaces">    </span><span class="istickedoff">truncateOutput maxLen t</span>
+<span class="lineno">  107 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">T.length t &lt;= maxLen</span> = t</span>
+<span class="lineno">  108 </span><span class="spaces">      </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> = <span class="nottickedoff">T.take maxLen t &lt;&gt; &quot;\n[...truncated at &quot; &lt;&gt; T.pack (show maxLen) &lt;&gt; &quot; chars]&quot;</span></span></span>
+<span class="lineno">  109 </span>
+<span class="lineno">  110 </span>-- | Minimal safe environment for subprocesses.
+<span class="lineno">  111 </span>safeEnv :: [(String, String)]
+<span class="lineno">  112 </span><span class="decl"><span class="istickedoff">safeEnv = [(&quot;PATH&quot;, &quot;/usr/bin:/bin:/usr/local/bin&quot;)]</span></span>
+<span class="lineno">  113 </span>
+<span class="lineno">  114 </span>data CodeInput = CodeInput
+<span class="lineno">  115 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ci_code</span></span></span>     :: Text
+<span class="lineno">  116 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ci_language</span></span></span> :: Maybe Text
+<span class="lineno">  117 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ci_timeout</span></span></span>  :: Maybe Int
+<span class="lineno">  118 </span>  }
+<span class="lineno">  119 </span>
+<span class="lineno">  120 </span>parseCodeInput :: Value -&gt; Parser CodeInput
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">parseCodeInput = withObject <span class="nottickedoff">&quot;CodeInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">CodeInput</span>
+<span class="lineno">  123 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; o .:  &quot;code&quot;</span>
+<span class="lineno">  124 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;language&quot;</span>
+<span class="lineno">  125 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;timeout&quot;</span></span>
+
+</pre>
+</body>
+</html>

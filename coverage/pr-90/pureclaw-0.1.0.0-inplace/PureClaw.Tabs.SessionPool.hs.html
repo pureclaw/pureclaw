@@ -1,0 +1,172 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE BangPatterns #-}
+<span class="lineno">    2 </span>
+<span class="lineno">    3 </span>-- |
+<span class="lineno">    4 </span>-- Module      : PureClaw.Tabs.SessionPool
+<span class="lineno">    5 </span>-- Description : Refcounted SessionId -&gt; SessionHandle resource pool.
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- Since tabs no longer own session handles, and §6.5 sharing means two
+<span class="lineno">    8 </span>-- cursors may resolve the same 'SessionId', there must be exactly __one__
+<span class="lineno">    9 </span>-- resolved 'SessionHandle' per live 'SessionId'. This module owns that
+<span class="lineno">   10 </span>-- mapping as a refcounted pool: it opens a handle when a session is first
+<span class="lineno">   11 </span>-- 'acquire'd and closes it when the last holder 'release's it
+<span class="lineno">   12 </span>-- (superseding the old one-handle-per-tab assumption and the
+<span class="lineno">   13 </span>-- @_env_session@ single-session global).
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- The pool is __additive__: it is built and unit-tested here in isolation
+<span class="lineno">   16 </span>-- (WU5) with injected open/close seams ('PoolDeps'), and wired into the
+<span class="lineno">   17 </span>-- agent loop / 'AgentEnv' later (WU8). No real session IO happens in this
+<span class="lineno">   18 </span>-- module — the opener and closer are supplied by the caller.
+<span class="lineno">   19 </span>--
+<span class="lineno">   20 </span>-- == Concurrency
+<span class="lineno">   21 </span>--
+<span class="lineno">   22 </span>-- The internal @'Data.Map.Strict.Map' 'SessionId' (Int, 'SessionHandle')@
+<span class="lineno">   23 </span>-- (refcount + handle) lives behind an 'IORef' mutated only with
+<span class="lineno">   24 </span>-- 'atomicModifyIORef''. Crucially, /no IO runs inside the atomic section/:
+<span class="lineno">   25 </span>-- opening and closing a handle are real side effects, so they are
+<span class="lineno">   26 </span>-- performed __outside__ 'atomicModifyIORef''. 'acquire' uses a
+<span class="lineno">   27 </span>-- check-then-open-then-commit pattern:
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>--   1. Atomically: if the id is already present, bump its refcount and
+<span class="lineno">   30 </span>--      return the existing handle (no open needed).
+<span class="lineno">   31 </span>--   2. Otherwise open a fresh handle (IO, outside the lock), then
+<span class="lineno">   32 </span>--      atomically commit it __only if the slot is still empty__. If a
+<span class="lineno">   33 </span>--      racing thread inserted first, discard (close) our just-opened
+<span class="lineno">   34 </span>--      handle and adopt theirs (bumping its refcount).
+<span class="lineno">   35 </span>--
+<span class="lineno">   36 </span>-- 'release' atomically decrements; when the count reaches zero it removes
+<span class="lineno">   37 </span>-- the entry and hands the now-orphaned handle back to be closed outside
+<span class="lineno">   38 </span>-- the atomic section. Releasing an absent or already-zero id is a safe
+<span class="lineno">   39 </span>-- no-op (nothing to close).
+<span class="lineno">   40 </span>--
+<span class="lineno">   41 </span>-- See the Tabs-as-View refactor (GitHub #79) §13 for the design context.
+<span class="lineno">   42 </span>module PureClaw.Tabs.SessionPool
+<span class="lineno">   43 </span>  ( -- * Injected IO seams
+<span class="lineno">   44 </span>    PoolDeps (..)
+<span class="lineno">   45 </span>    -- * The pool
+<span class="lineno">   46 </span>  , SessionPool (..)
+<span class="lineno">   47 </span>  , newSessionPool
+<span class="lineno">   48 </span>    -- * Acquire / release
+<span class="lineno">   49 </span>  , acquire
+<span class="lineno">   50 </span>  , release
+<span class="lineno">   51 </span>  ) where
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef)
+<span class="lineno">   54 </span>import Data.Map.Strict (Map)
+<span class="lineno">   55 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>import PureClaw.Core.Types (SessionId)
+<span class="lineno">   58 </span>import PureClaw.Session.Handle (SessionHandle)
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | The injected session-IO seams. Real implementations open / close
+<span class="lineno">   61 </span>-- on-disk session handles; tests supply counting stubs so the pool's
+<span class="lineno">   62 </span>-- refcount machinery can be driven without touching the filesystem.
+<span class="lineno">   63 </span>data PoolDeps = PoolDeps
+<span class="lineno">   64 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pool_open</span></span></span>  :: SessionId -&gt; IO SessionHandle
+<span class="lineno">   65 </span>    -- ^ Open (resolve) a fresh 'SessionHandle' for a 'SessionId'. Called
+<span class="lineno">   66 </span>    -- at most once per live id — on the FIRST 'acquire'.
+<span class="lineno">   67 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pool_close</span></span></span> :: SessionHandle -&gt; IO ()
+<span class="lineno">   68 </span>    -- ^ Close a 'SessionHandle'. Called exactly once per live id — on the
+<span class="lineno">   69 </span>    -- LAST 'release' (refcount hits zero), and on the loser of an open
+<span class="lineno">   70 </span>    -- race (its redundant handle is discarded).
+<span class="lineno">   71 </span>  }
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>-- | The refcounted pool: a map from each live 'SessionId' to its current
+<span class="lineno">   74 </span>-- refcount and the single shared 'SessionHandle'. An id is present in the
+<span class="lineno">   75 </span>-- map iff its refcount is @&gt;= 1@; entries are removed when the count
+<span class="lineno">   76 </span>-- reaches zero, so absence is indistinguishable from &quot;never acquired&quot;.
+<span class="lineno">   77 </span>newtype SessionPool = SessionPool (IORef (Map SessionId (Int, SessionHandle)))
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | Create a fresh, empty pool.
+<span class="lineno">   80 </span>newSessionPool :: IO SessionPool
+<span class="lineno">   81 </span><span class="decl"><span class="istickedoff">newSessionPool = SessionPool &lt;$&gt; newIORef Map.empty</span></span>
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>-- | Acquire the shared 'SessionHandle' for a 'SessionId', opening it on
+<span class="lineno">   84 </span>-- the first acquire and bumping the refcount on every subsequent one.
+<span class="lineno">   85 </span>-- Two acquires of the same id always return the SAME handle.
+<span class="lineno">   86 </span>--
+<span class="lineno">   87 </span>-- The open (a real side effect) is performed outside the atomic section:
+<span class="lineno">   88 </span>-- we first try to bump an existing entry atomically; only if the id is
+<span class="lineno">   89 </span>-- absent do we open a new handle and then atomically commit it, closing a
+<span class="lineno">   90 </span>-- redundant handle if a concurrent acquire won the race.
+<span class="lineno">   91 </span>acquire :: PoolDeps -&gt; SessionPool -&gt; SessionId -&gt; IO SessionHandle
+<span class="lineno">   92 </span><span class="decl"><span class="istickedoff">acquire deps (SessionPool ref) sid = do</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">-- Step 1: fast path — bump an existing entry's refcount atomically.</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">mExisting &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">case Map.lookup sid m of</span>
+<span class="lineno">   96 </span><span class="spaces">      </span><span class="istickedoff">Just (n, h) -&gt; (bump sid n h m, Just h)</span>
+<span class="lineno">   97 </span><span class="spaces">      </span><span class="istickedoff">Nothing     -&gt; (m, Nothing)</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">case mExisting of</span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">Just h  -&gt; pure h</span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  101 </span><span class="spaces">      </span><span class="istickedoff">-- Step 2: id absent — open OUTSIDE the atomic section.</span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">fresh &lt;- _pool_open deps <span class="nottickedoff">sid</span></span>
+<span class="lineno">  103 </span><span class="spaces">      </span><span class="istickedoff">-- Step 3: commit only if still absent; otherwise adopt the winner's</span>
+<span class="lineno">  104 </span><span class="spaces">      </span><span class="istickedoff">-- handle (bumping it) and close our now-redundant fresh one.</span>
+<span class="lineno">  105 </span><span class="spaces">      </span><span class="istickedoff">(winner, redundant) &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  106 </span><span class="spaces">        </span><span class="istickedoff">case Map.lookup sid m of</span>
+<span class="lineno">  107 </span><span class="spaces">          </span><span class="istickedoff">Just (n, h) -&gt; (bump sid n h m, (h, Just <span class="nottickedoff">fresh</span>))</span>
+<span class="lineno">  108 </span><span class="spaces">          </span><span class="istickedoff">Nothing     -&gt; (bump sid 0 fresh m, (fresh, Nothing))</span>
+<span class="lineno">  109 </span><span class="spaces">      </span><span class="istickedoff">mapM_ (_pool_close deps) redundant</span>
+<span class="lineno">  110 </span><span class="spaces">      </span><span class="istickedoff">pure winner</span></span>
+<span class="lineno">  111 </span>
+<span class="lineno">  112 </span>-- | Strictly store @sid -&gt; (n + 1, h)@. The refcount and handle are forced
+<span class="lineno">  113 </span>-- (bang patterns) before insertion so the pool never accumulates a chain of
+<span class="lineno">  114 </span>-- refcount thunks and the stored handle is always in WHNF. Used both to add
+<span class="lineno">  115 </span>-- a brand-new entry (@n = 0@) and to increment an existing one.
+<span class="lineno">  116 </span>bump
+<span class="lineno">  117 </span>  :: SessionId
+<span class="lineno">  118 </span>  -&gt; Int
+<span class="lineno">  119 </span>  -&gt; SessionHandle
+<span class="lineno">  120 </span>  -&gt; Map SessionId (Int, SessionHandle)
+<span class="lineno">  121 </span>  -&gt; Map SessionId (Int, SessionHandle)
+<span class="lineno">  122 </span><span class="decl"><span class="istickedoff">bump sid !n !h = Map.insert sid (n + 1, h)</span></span>
+<span class="lineno">  123 </span>
+<span class="lineno">  124 </span>-- | Release one hold on a 'SessionId'. Decrements its refcount; when the
+<span class="lineno">  125 </span>-- count reaches zero the entry is removed and its handle closed. Releasing
+<span class="lineno">  126 </span>-- an id that is absent (never acquired, or already fully released) is a
+<span class="lineno">  127 </span>-- safe no-op: nothing is decremented and nothing is closed.
+<span class="lineno">  128 </span>--
+<span class="lineno">  129 </span>-- The close (a real side effect) is performed outside the atomic section.
+<span class="lineno">  130 </span>release :: PoolDeps -&gt; SessionPool -&gt; SessionId -&gt; IO ()
+<span class="lineno">  131 </span><span class="decl"><span class="istickedoff">release deps (SessionPool ref) sid = do</span>
+<span class="lineno">  132 </span><span class="spaces">  </span><span class="istickedoff">toClose &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  133 </span><span class="spaces">    </span><span class="istickedoff">case Map.lookup sid m of</span>
+<span class="lineno">  134 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; (m, Nothing)</span>
+<span class="lineno">  135 </span><span class="spaces">      </span><span class="istickedoff">Just (n, h)</span>
+<span class="lineno">  136 </span><span class="spaces">        </span><span class="istickedoff">| n &lt;= 1    -&gt; (Map.delete sid m, Just <span class="nottickedoff">h</span>)</span>
+<span class="lineno">  137 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; (unbump sid n h m, Nothing)</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="istickedoff">mapM_ (_pool_close deps) toClose</span></span>
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Strictly store @sid -&gt; (n - 1, h)@ for the not-last release. The decremented
+<span class="lineno">  141 </span>-- refcount and handle are forced before insertion (same rationale as 'bump').
+<span class="lineno">  142 </span>-- Only called on the @n &gt; 1@ path, so the result is always @&gt;= 1@.
+<span class="lineno">  143 </span>unbump
+<span class="lineno">  144 </span>  :: SessionId
+<span class="lineno">  145 </span>  -&gt; Int
+<span class="lineno">  146 </span>  -&gt; SessionHandle
+<span class="lineno">  147 </span>  -&gt; Map SessionId (Int, SessionHandle)
+<span class="lineno">  148 </span>  -&gt; Map SessionId (Int, SessionHandle)
+<span class="lineno">  149 </span><span class="decl"><span class="istickedoff">unbump sid !n !h = Map.insert sid (n - 1, <span class="nottickedoff">h</span>)</span></span>
+
+</pre>
+</body>
+</html>

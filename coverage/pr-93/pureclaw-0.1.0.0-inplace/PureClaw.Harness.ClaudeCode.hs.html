@@ -1,0 +1,971 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Harness.ClaudeCode
+<span class="lineno">    2 </span>  ( -- * Construction
+<span class="lineno">    3 </span>    mkClaudeCodeHarness
+<span class="lineno">    4 </span>  , mkClaudeCodeHarnessWith
+<span class="lineno">    5 </span>  , mkClaudeCodeHandleWithBaseline
+<span class="lineno">    6 </span>  , mkDiscoveredClaudeCodeHandle
+<span class="lineno">    7 </span>    -- * Adopt an existing external window (WU4)
+<span class="lineno">    8 </span>  , adoptExternalWindow
+<span class="lineno">    9 </span>    -- * Production name-based tmux IO (exported for fail-closed testing — WU8)
+<span class="lineno">   10 </span>  , realSendNamed
+<span class="lineno">   11 </span>  , realCaptureNamed
+<span class="lineno">   12 </span>  , realStatus
+<span class="lineno">   13 </span>    -- * Injectable dependencies (D4.2 / D4.3 seam)
+<span class="lineno">   14 </span>  , ClaudeCodeDeps (..)
+<span class="lineno">   15 </span>  , defaultClaudeCodeDeps
+<span class="lineno">   16 </span>    -- * Spawn arg construction (WU6 — exported for testing)
+<span class="lineno">   17 </span>  , claudeCodeExtraArgs
+<span class="lineno">   18 </span>  , hasUnsafeFlag
+<span class="lineno">   19 </span>    -- * Response extraction (exported for testing)
+<span class="lineno">   20 </span>  , extractLastResponse
+<span class="lineno">   21 </span>  , dropBaselineLines
+<span class="lineno">   22 </span>  , countCaptureLines
+<span class="lineno">   23 </span>  , isIdle
+<span class="lineno">   24 </span>  , isResponseMarker
+<span class="lineno">   25 </span>  , isUiBoundary
+<span class="lineno">   26 </span>  ) where
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>import Control.Concurrent
+<span class="lineno">   29 </span>import Control.Exception (try)
+<span class="lineno">   30 </span>import Control.Monad (unless, when)
+<span class="lineno">   31 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   32 </span>import Data.ByteString (ByteString)
+<span class="lineno">   33 </span>import Data.ByteString qualified as BS
+<span class="lineno">   34 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   35 </span>import Data.IORef
+<span class="lineno">   36 </span>import Data.List (find)
+<span class="lineno">   37 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   38 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   39 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   40 </span>import Data.Text (Text)
+<span class="lineno">   41 </span>import Data.Text qualified as T
+<span class="lineno">   42 </span>import Data.Time
+<span class="lineno">   43 </span>import Data.UUID qualified as UUID
+<span class="lineno">   44 </span>import Data.UUID.V4 qualified as UUID
+<span class="lineno">   45 </span>import System.Directory qualified as Dir
+<span class="lineno">   46 </span>import System.Posix.Files qualified as PFiles
+<span class="lineno">   47 </span>import System.Exit
+<span class="lineno">   48 </span>import System.FilePath ((&lt;/&gt;))
+<span class="lineno">   49 </span>import System.Process.Typed qualified as P
+<span class="lineno">   50 </span>import PureClaw.Handles.Harness
+<span class="lineno">   51 </span>import PureClaw.Handles.Transcript
+<span class="lineno">   52 </span>import PureClaw.Harness.Registry (HarnessId, HarnessRegistry)
+<span class="lineno">   53 </span>import PureClaw.Harness.Registry qualified as Reg
+<span class="lineno">   54 </span>import PureClaw.Harness.Tmux
+<span class="lineno">   55 </span>import PureClaw.Security.Adoption (AdoptedHarness, adoptedSession)
+<span class="lineno">   56 </span>import PureClaw.Security.Command
+<span class="lineno">   57 </span>import PureClaw.Security.Policy
+<span class="lineno">   58 </span>import PureClaw.Session.Kind
+<span class="lineno">   59 </span>  ( HarnessFlavour (..)
+<span class="lineno">   60 </span>  , HarnessSpec (..)
+<span class="lineno">   61 </span>  , SessionKind (..)
+<span class="lineno">   62 </span>  , TmuxConfig (..)
+<span class="lineno">   63 </span>  )
+<span class="lineno">   64 </span>import PureClaw.Session.Types (SessionMeta (..), newSessionId)
+<span class="lineno">   65 </span>import PureClaw.Core.Types (SessionId (..))
+<span class="lineno">   66 </span>import PureClaw.Transcript.Types
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   69 </span>-- Injectable dependencies
+<span class="lineno">   70 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | The injectable tmux\/identity operations a Claude Code harness needs.
+<span class="lineno">   73 </span>--
+<span class="lineno">   74 </span>-- This record is the dependency-injection seam for the spawn-identity sequence
+<span class="lineno">   75 </span>-- (D4.2) and the cached-coordinate, self-healing handle (D4.3): tests supply
+<span class="lineno">   76 </span>-- fakes that record calls and simulate a tmux \&quot;no such window\&quot; so the
+<span class="lineno">   77 </span>-- re-resolve path runs without a real tmux server. The production set is
+<span class="lineno">   78 </span>-- 'defaultClaudeCodeDeps'.
+<span class="lineno">   79 </span>--
+<span class="lineno">   80 </span>-- The name-based I\/O ops report /found/-vs-/not found/ so the handle can
+<span class="lineno">   81 </span>-- re-resolve its coordinate (a renamed\/moved window) by sweeping for its
+<span class="lineno">   82 </span>-- @\@pcl_id@ and retrying once (design §4 \/ K3).
+<span class="lineno">   83 </span>data ClaudeCodeDeps = ClaudeCodeDeps
+<span class="lineno">   84 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_newId</span></span></span>        :: IO HarnessId
+<span class="lineno">   85 </span>    -- ^ Generate a fresh 'HarnessId' (production: 'Reg.newHarnessId').
+<span class="lineno">   86 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_findClaude</span></span></span>   :: IO (Maybe FilePath)
+<span class="lineno">   87 </span>    -- ^ Locate the @claude@ binary (production: @findExecutable \&quot;claude\&quot;@).
+<span class="lineno">   88 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_checkTmux</span></span></span>    :: IO (Either HarnessError ())
+<span class="lineno">   89 </span>    -- ^ Confirm tmux is available (production: 'requireTmux').
+<span class="lineno">   90 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_addWindow</span></span></span>    :: TmuxSessionStatus -&gt; Text -&gt; Text -&gt; FilePath -&gt; [Text] -&gt; Maybe FilePath -&gt; IO (Either HarnessError ())
+<span class="lineno">   91 </span>    -- ^ Create the harness window:
+<span class="lineno">   92 </span>    --   @sessionStatus session windowName binary args workDir@. The status
+<span class="lineno">   93 </span>    --   (from '_ccd_startSession') tells the window step whether to reuse the
+<span class="lineno">   94 </span>    --   freshly created session's window 0 or append a new window (production:
+<span class="lineno">   95 </span>    --   'addHarnessWindowNamed').
+<span class="lineno">   96 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_startSession</span></span></span> :: Text -&gt; IO (Either HarnessError TmuxSessionStatus)
+<span class="lineno">   97 </span>    -- ^ Ensure the tmux session exists, reporting whether it was just created
+<span class="lineno">   98 </span>    --   or already existed (production: 'startTmuxSessionStatus').
+<span class="lineno">   99 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_setMarker</span></span></span>    :: Text -&gt; Text -&gt; Text -&gt; IO ()
+<span class="lineno">  100 </span>    -- ^ Stamp the @\@pcl_id@ marker: @session windowName uuidText@
+<span class="lineno">  101 </span>    --   (production: 'setWindowMarker').
+<span class="lineno">  102 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_renameWindow</span></span></span> :: Text -&gt; Text -&gt; Text -&gt; IO ()
+<span class="lineno">  103 </span>    -- ^ Rename a window: @session windowTarget newName@. The target may be a
+<span class="lineno">  104 </span>    --   window name OR an index (e.g. @&quot;0&quot;@). Adopt renames the user-picked
+<span class="lineno">  105 </span>    --   window BY INDEX to a safe canonical name so the @session:name@ targeting
+<span class="lineno">  106 </span>    --   used by every other op cannot misparse a @.@\/numeric name as
+<span class="lineno">  107 </span>    --   @index.pane@ (production: 'renameWindowNamed').
+<span class="lineno">  108 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_setRemain</span></span></span>    :: Text -&gt; Text -&gt; IO ()
+<span class="lineno">  109 </span>    -- ^ Set @remain-on-exit on@: @session windowName@ (production:
+<span class="lineno">  110 </span>    --   'setRemainOnExit').
+<span class="lineno">  111 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_panePidOf</span></span></span>    :: Text -&gt; Text -&gt; IO (Maybe Int)
+<span class="lineno">  112 </span>    -- ^ Read the pane shell PID for @session windowName@ from a sweep
+<span class="lineno">  113 </span>    --   (production: derive from 'readMarkers').
+<span class="lineno">  114 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_harnessPidOf</span></span></span> :: Int -&gt; Text -&gt; IO (Maybe Int)
+<span class="lineno">  115 </span>    -- ^ Derive the harness-process PID from a pane shell PID + flavour comm
+<span class="lineno">  116 </span>    --   (production: 'harnessPidOf').
+<span class="lineno">  117 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_sweep</span></span></span>        :: Text -&gt; IO [TmuxWindowRow]
+<span class="lineno">  118 </span>    -- ^ One server sweep of a session (production: 'readMarkers'). Used by the
+<span class="lineno">  119 </span>    --   re-resolve path to find a moved window by its @\@pcl_id@.
+<span class="lineno">  120 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_sendNamed</span></span></span>    :: Text -&gt; Text -&gt; ByteString -&gt; IO Bool
+<span class="lineno">  121 </span>    -- ^ Send input to @session windowName@; 'True' iff the window was found.
+<span class="lineno">  122 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_captureNamed</span></span></span> :: Text -&gt; Text -&gt; Int -&gt; IO (Maybe ByteString)
+<span class="lineno">  123 </span>    -- ^ Capture from @session windowName@; 'Nothing' iff the window was not
+<span class="lineno">  124 </span>    --   found ('Just' empty is a present-but-blank pane).
+<span class="lineno">  125 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_stopNamed</span></span></span>    :: Text -&gt; Text -&gt; IO ()
+<span class="lineno">  126 </span>    -- ^ Kill @session windowName@ (production: 'stopHarnessWindowNamed').
+<span class="lineno">  127 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ccd_status</span></span></span>       :: Text -&gt; Text -&gt; IO HarnessStatus
+<span class="lineno">  128 </span>    -- ^ Check liveness of @session windowName@.
+<span class="lineno">  129 </span>  }
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | The comm name of the flavour binary used for harness-PID derivation.
+<span class="lineno">  132 </span>claudeComm :: Text
+<span class="lineno">  133 </span><span class="decl"><span class="nottickedoff">claudeComm = &quot;claude&quot;</span></span>
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>-- | Production dependency set: every op wired to the real tmux primitives.
+<span class="lineno">  136 </span>-- All tmux subprocesses flow through the WU3 authorization seam
+<span class="lineno">  137 </span>-- ('authorizeTmuxCommand' \/ 'tmuxProc') — never a bare @P.proc tmux@.
+<span class="lineno">  138 </span>defaultClaudeCodeDeps :: ClaudeCodeDeps
+<span class="lineno">  139 </span><span class="decl"><span class="nottickedoff">defaultClaudeCodeDeps = ClaudeCodeDeps</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="nottickedoff">{ _ccd_newId        = Reg.newHarnessId</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_findClaude   = Dir.findExecutable &quot;claude&quot;</span>
+<span class="lineno">  142 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_checkTmux    = requireTmux</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_addWindow    = addHarnessWindowNamed</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_startSession = startTmuxSessionStatus</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_setMarker    = setWindowMarker</span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_renameWindow = renameWindowNamed</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_setRemain    = setRemainOnExit</span>
+<span class="lineno">  148 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_panePidOf    = realPanePidOf</span>
+<span class="lineno">  149 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_harnessPidOf = harnessPidOf</span>
+<span class="lineno">  150 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_sweep        = readMarkers</span>
+<span class="lineno">  151 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_sendNamed    = realSendNamed</span>
+<span class="lineno">  152 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_captureNamed = realCaptureNamed</span>
+<span class="lineno">  153 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_stopNamed    = stopHarnessWindowNamed</span>
+<span class="lineno">  154 </span><span class="spaces">  </span><span class="nottickedoff">, _ccd_status       = realStatus</span>
+<span class="lineno">  155 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  156 </span>
+<span class="lineno">  157 </span>-- | Read the pane shell PID for a window by sweeping the session and matching
+<span class="lineno">  158 </span>-- the window name.
+<span class="lineno">  159 </span>realPanePidOf :: Text -&gt; Text -&gt; IO (Maybe Int)
+<span class="lineno">  160 </span><span class="decl"><span class="nottickedoff">realPanePidOf session windowName = do</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="nottickedoff">rows &lt;- readMarkers session</span>
+<span class="lineno">  162 </span><span class="spaces">  </span><span class="nottickedoff">pure (find ((== windowName) . _twr_windowName) rows &gt;&gt;= _twr_panePid)</span></span>
+<span class="lineno">  163 </span>
+<span class="lineno">  164 </span>-- | Send to a named window through the WU3 tmux seam, reporting whether the
+<span class="lineno">  165 </span>-- window was found. tmux exits non-zero when @-t@ targets a missing window.
+<span class="lineno">  166 </span>--
+<span class="lineno">  167 </span>-- C3 input hygiene (§8 C3): the payload is sent LITERALLY (@send-keys -l --@)
+<span class="lineno">  168 </span>-- so embedded tmux key tokens (@C-c@, @Enter@, @;@, …) are typed verbatim rather
+<span class="lineno">  169 </span>-- than interpreted, then a SEPARATE @Enter@ submits the line (so a launch
+<span class="lineno">  170 </span>-- command still executes). The two-step preserves this function's @IO Bool@
+<span class="lineno">  171 </span>-- contract: found-ness is determined by the LITERAL send (the targeting step);
+<span class="lineno">  172 </span>-- the Enter is only attempted when that succeeded.
+<span class="lineno">  173 </span>realSendNamed :: Text -&gt; Text -&gt; ByteString -&gt; IO Bool
+<span class="lineno">  174 </span><span class="decl"><span class="istickedoff">realSendNamed session windowName _input</span>
+<span class="lineno">  175 </span><span class="spaces">  </span><span class="istickedoff">-- WU8 Part A (§8 C3/C4): fail-closed on the adopted/discovered path — an</span>
+<span class="lineno">  176 </span><span class="spaces">  </span><span class="istickedoff">-- invalid session/window identifier is refused (False) WITHOUT any tmux op.</span>
+<span class="lineno">  177 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">not (validateTmuxIdent session &amp;&amp; validateTmuxIdent windowName)</span> = pure False</span>
+<span class="lineno">  178 </span><span class="spaces"></span><span class="istickedoff">realSendNamed session windowName input = <span class="nottickedoff">do</span></span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">mPath &lt;- findTmux</span></span>
+<span class="lineno">  180 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">case mPath of</span></span>
+<span class="lineno">  181 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Nothing -&gt; pure False</span></span>
+<span class="lineno">  182 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Just tmuxBin -&gt; do</span></span>
+<span class="lineno">  183 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let run args = P.runProcess</span></span>
+<span class="lineno">  184 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">$ P.setStdin P.closed</span></span>
+<span class="lineno">  185 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">$ P.setStdout P.nullStream</span></span>
+<span class="lineno">  186 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">$ P.setStderr P.nullStream</span></span>
+<span class="lineno">  187 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">$ tmuxProc (authorizeTmuxCommand tmuxBin (map T.pack args))</span></span>
+<span class="lineno">  188 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">litCode &lt;- run (sendKeysNamedArgs session windowName input)</span></span>
+<span class="lineno">  189 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">case litCode of</span></span>
+<span class="lineno">  190 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ExitSuccess -&gt; do</span></span>
+<span class="lineno">  191 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- run (sendEnterNamedArgs session windowName)</span></span>
+<span class="lineno">  192 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure True</span></span>
+<span class="lineno">  193 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ExitFailure _ -&gt; pure False</span></span></span>
+<span class="lineno">  194 </span>
+<span class="lineno">  195 </span>-- | Capture from a named window through the WU3 tmux seam. 'Nothing' signals a
+<span class="lineno">  196 </span>-- missing window (tmux exit non-zero); 'Just' carries the (ANSI-stripped) bytes.
+<span class="lineno">  197 </span>realCaptureNamed :: Text -&gt; Text -&gt; Int -&gt; IO (Maybe ByteString)
+<span class="lineno">  198 </span><span class="decl"><span class="istickedoff">realCaptureNamed session windowName _lineCount</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">-- WU8 Part A (§8 C3/C4): fail-closed — an invalid identifier is refused</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="istickedoff">-- (Nothing, the missing-window value) WITHOUT issuing capture-pane.</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">not (validateTmuxIdent session &amp;&amp; validateTmuxIdent windowName)</span> = pure Nothing</span>
+<span class="lineno">  202 </span><span class="spaces"></span><span class="istickedoff">realCaptureNamed session windowName lineCount = <span class="nottickedoff">do</span></span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">mPath &lt;- findTmux</span></span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">case mPath of</span></span>
+<span class="lineno">  205 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Nothing -&gt; pure Nothing</span></span>
+<span class="lineno">  206 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Just tmuxBin -&gt; do</span></span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let args = captureNamedArgs session windowName lineCount</span></span>
+<span class="lineno">  208 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">config = P.setStdin P.closed</span></span>
+<span class="lineno">  209 </span><span class="spaces">                 </span><span class="istickedoff"><span class="nottickedoff">$ P.setStdout P.byteStringOutput</span></span>
+<span class="lineno">  210 </span><span class="spaces">                 </span><span class="istickedoff"><span class="nottickedoff">$ P.setStderr P.nullStream</span></span>
+<span class="lineno">  211 </span><span class="spaces">                 </span><span class="istickedoff"><span class="nottickedoff">$ tmuxProc (authorizeTmuxCommand tmuxBin (map T.pack args))</span></span>
+<span class="lineno">  212 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span></span>
+<span class="lineno">  213 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure $ case exitCode of</span></span>
+<span class="lineno">  214 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ExitSuccess   -&gt; Just (LBS.toStrict stdout)</span></span>
+<span class="lineno">  215 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ExitFailure _ -&gt; Nothing</span></span></span>
+<span class="lineno">  216 </span>
+<span class="lineno">  217 </span>-- | Window-status check by name through the WU3 tmux seam: a present window is
+<span class="lineno">  218 </span>-- 'HarnessRunning'; a missing one is 'HarnessExited'.
+<span class="lineno">  219 </span>realStatus :: Text -&gt; Text -&gt; IO HarnessStatus
+<span class="lineno">  220 </span><span class="decl"><span class="istickedoff">realStatus session windowName</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">-- WU8 Part A (§8 C3/C4): fail-closed — an invalid identifier is treated as a</span>
+<span class="lineno">  222 </span><span class="spaces">  </span><span class="istickedoff">-- missing/unusable window ('HarnessExited') WITHOUT issuing list-windows.</span>
+<span class="lineno">  223 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">not (validateTmuxIdent session &amp;&amp; validateTmuxIdent windowName)</span> =</span>
+<span class="lineno">  224 </span><span class="spaces">      </span><span class="istickedoff">pure (HarnessExited <span class="nottickedoff">(ExitFailure 1)</span>)</span>
+<span class="lineno">  225 </span><span class="spaces"></span><span class="istickedoff">realStatus session windowName = <span class="nottickedoff">do</span></span>
+<span class="lineno">  226 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">mTmux &lt;- findTmux</span></span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">case mTmux of</span></span>
+<span class="lineno">  228 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Nothing -&gt; pure (HarnessExited (ExitFailure 127))</span></span>
+<span class="lineno">  229 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">Just tmuxBin -&gt; do</span></span>
+<span class="lineno">  230 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">exitCode &lt;- P.runProcess</span></span>
+<span class="lineno">  231 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">$ P.setStdin P.closed</span></span>
+<span class="lineno">  232 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">$ P.setStdout P.nullStream</span></span>
+<span class="lineno">  233 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">$ P.setStderr P.nullStream</span></span>
+<span class="lineno">  234 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">$ tmuxProc (authorizeTmuxCommand tmuxBin</span></span>
+<span class="lineno">  235 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">[&quot;list-windows&quot;, &quot;-t&quot;, T.pack (windowTarget session windowName)</span></span>
+<span class="lineno">  236 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, &quot;-F&quot;, &quot;#{window_name}&quot;])</span></span>
+<span class="lineno">  237 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure $ case exitCode of</span></span>
+<span class="lineno">  238 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ExitSuccess      -&gt; HarnessRunning</span></span>
+<span class="lineno">  239 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">ExitFailure code -&gt; HarnessExited (ExitFailure code)</span></span></span>
+<span class="lineno">  240 </span>
+<span class="lineno">  241 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  242 </span>-- Construction
+<span class="lineno">  243 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  244 </span>
+<span class="lineno">  245 </span>-- | Create a Claude Code harness using the production dependency set.
+<span class="lineno">  246 </span>--
+<span class="lineno">  247 </span>-- On success it has stamped the durable @\@pcl_id@ identity marker, enabled
+<span class="lineno">  248 </span>-- @remain-on-exit@, recorded the shell + harness PIDs, and registered a
+<span class="lineno">  249 </span>-- @Spawned@ 'Reg.HarnessEntry' in the registry. The returned 'HarnessId' lets
+<span class="lineno">  250 </span>-- the caller persist the identity and sync the legacy name-keyed map.
+<span class="lineno">  251 </span>mkClaudeCodeHarness
+<span class="lineno">  252 </span>  :: SecurityPolicy
+<span class="lineno">  253 </span>  -&gt; TranscriptHandle
+<span class="lineno">  254 </span>  -&gt; Text             -- ^ tmux session name (default @&quot;pureclaw&quot;@)
+<span class="lineno">  255 </span>  -&gt; Text             -- ^ tmux window name (display-only, e.g. @claude-code-0@)
+<span class="lineno">  256 </span>  -&gt; Int              -- ^ tmux window index (placement hint for the new window)
+<span class="lineno">  257 </span>  -&gt; Maybe FilePath   -- ^ optional working directory
+<span class="lineno">  258 </span>  -&gt; [Text]           -- ^ extra CLI arguments (e.g. --dangerously-skip-permissions)
+<span class="lineno">  259 </span>  -&gt; HarnessRegistry  -- ^ the durable registry to register the spawned entry into
+<span class="lineno">  260 </span>  -&gt; IO (Either HarnessError (HarnessId, HarnessHandle))
+<span class="lineno">  261 </span><span class="decl"><span class="istickedoff">mkClaudeCodeHarness = mkClaudeCodeHarnessWith <span class="nottickedoff">defaultClaudeCodeDeps</span></span></span>
+<span class="lineno">  262 </span>
+<span class="lineno">  263 </span>-- | Testable variant with injectable dependencies ('ClaudeCodeDeps').
+<span class="lineno">  264 </span>mkClaudeCodeHarnessWith
+<span class="lineno">  265 </span>  :: ClaudeCodeDeps
+<span class="lineno">  266 </span>  -&gt; SecurityPolicy
+<span class="lineno">  267 </span>  -&gt; TranscriptHandle
+<span class="lineno">  268 </span>  -&gt; Text             -- ^ tmux session name
+<span class="lineno">  269 </span>  -&gt; Text             -- ^ tmux window name
+<span class="lineno">  270 </span>  -&gt; Int              -- ^ tmux window index
+<span class="lineno">  271 </span>  -&gt; Maybe FilePath   -- ^ optional working directory
+<span class="lineno">  272 </span>  -&gt; [Text]           -- ^ extra CLI arguments
+<span class="lineno">  273 </span>  -&gt; HarnessRegistry
+<span class="lineno">  274 </span>  -&gt; IO (Either HarnessError (HarnessId, HarnessHandle))
+<span class="lineno">  275 </span><span class="decl"><span class="istickedoff">mkClaudeCodeHarnessWith deps policy th session windowName _windowIdx mWorkDir extraArgs reg =</span>
+<span class="lineno">  276 </span><span class="spaces">  </span><span class="istickedoff">-- Step 1: Pre-check authorization (pure, no IO needed).</span>
+<span class="lineno">  277 </span><span class="spaces">  </span><span class="istickedoff">case preAuthorize policy of</span>
+<span class="lineno">  278 </span><span class="spaces">    </span><span class="istickedoff">Left cmdErr -&gt; pure (Left (HarnessNotAuthorized cmdErr))</span>
+<span class="lineno">  279 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">-- Step 2: Check tmux availability</span>
+<span class="lineno">  281 </span><span class="spaces">      </span><span class="istickedoff">tmuxResult &lt;- _ccd_checkTmux deps</span>
+<span class="lineno">  282 </span><span class="spaces">      </span><span class="istickedoff">case tmuxResult of</span>
+<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (Left err)</span>
+<span class="lineno">  284 </span><span class="spaces">        </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  285 </span><span class="spaces">          </span><span class="istickedoff">-- Step 3: Find claude binary</span>
+<span class="lineno">  286 </span><span class="spaces">          </span><span class="istickedoff">mClaudePath &lt;- _ccd_findClaude deps</span>
+<span class="lineno">  287 </span><span class="spaces">          </span><span class="istickedoff">case mClaudePath of</span>
+<span class="lineno">  288 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; pure (Left (HarnessBinaryNotFound &quot;claude&quot;))</span>
+<span class="lineno">  289 </span><span class="spaces">            </span><span class="istickedoff">Just claudePath -&gt;</span>
+<span class="lineno">  290 </span><span class="spaces">              </span><span class="istickedoff">-- Step 4: Authorize the full command path</span>
+<span class="lineno">  291 </span><span class="spaces">              </span><span class="istickedoff">case authorize policy claudePath <span class="nottickedoff">[]</span> of</span>
+<span class="lineno">  292 </span><span class="spaces">                </span><span class="istickedoff">Left cmdErr -&gt; <span class="nottickedoff">pure (Left (HarnessNotAuthorized cmdErr))</span></span>
+<span class="lineno">  293 </span><span class="spaces">                </span><span class="istickedoff">Right authorizedCmd -&gt; do</span>
+<span class="lineno">  294 </span><span class="spaces">                  </span><span class="istickedoff">let program = getCommandProgram authorizedCmd</span>
+<span class="lineno">  295 </span><span class="spaces">                  </span><span class="istickedoff">-- Step 5: Start tmux session (idempotent), learning whether</span>
+<span class="lineno">  296 </span><span class="spaces">                  </span><span class="istickedoff">-- we just created it or it already existed.</span>
+<span class="lineno">  297 </span><span class="spaces">                  </span><span class="istickedoff">sessionResult &lt;- _ccd_startSession deps <span class="nottickedoff">session</span></span>
+<span class="lineno">  298 </span><span class="spaces">                  </span><span class="istickedoff">case sessionResult of</span>
+<span class="lineno">  299 </span><span class="spaces">                    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  300 </span><span class="spaces">                    </span><span class="istickedoff">Right sessionStatus -&gt; do</span>
+<span class="lineno">  301 </span><span class="spaces">                      </span><span class="istickedoff">-- Step 6: Add harness window (named). A freshly created</span>
+<span class="lineno">  302 </span><span class="spaces">                      </span><span class="istickedoff">-- session reuses its window 0 so the first harness lands</span>
+<span class="lineno">  303 </span><span class="spaces">                      </span><span class="istickedoff">-- there; an existing session gets a new window.</span>
+<span class="lineno">  304 </span><span class="spaces">                      </span><span class="istickedoff">windowResult &lt;- _ccd_addWindow deps <span class="nottickedoff">sessionStatus</span> <span class="nottickedoff">session</span> <span class="nottickedoff">windowName</span> program extraArgs <span class="nottickedoff">mWorkDir</span></span>
+<span class="lineno">  305 </span><span class="spaces">                      </span><span class="istickedoff">case windowResult of</span>
+<span class="lineno">  306 </span><span class="spaces">                        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  307 </span><span class="spaces">                        </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  308 </span><span class="spaces">                          </span><span class="istickedoff">-- Step 6b: If unsafe mode, auto-confirm the safety prompt</span>
+<span class="lineno">  309 </span><span class="spaces">                          </span><span class="istickedoff">when (hasUnsafeFlag extraArgs) $ do</span>
+<span class="lineno">  310 </span><span class="spaces">                            </span><span class="istickedoff">threadDelay 2000000  -- 2s for the prompt to appear</span>
+<span class="lineno">  311 </span><span class="spaces">                            </span><span class="istickedoff">_ &lt;- _ccd_sendNamed deps session windowName <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  312 </span><span class="spaces">                            </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  313 </span><span class="spaces">                          </span><span class="istickedoff">-- Step 7: Establish identity (D4.2).</span>
+<span class="lineno">  314 </span><span class="spaces">                          </span><span class="istickedoff">hid &lt;- _ccd_newId deps</span>
+<span class="lineno">  315 </span><span class="spaces">                          </span><span class="istickedoff">_ccd_setMarker deps session windowName (Reg.harnessIdToText hid)</span>
+<span class="lineno">  316 </span><span class="spaces">                          </span><span class="istickedoff">_ccd_setRemain deps session windowName</span>
+<span class="lineno">  317 </span><span class="spaces">                          </span><span class="istickedoff">mShellPid &lt;- _ccd_panePidOf deps <span class="nottickedoff">session</span> <span class="nottickedoff">windowName</span></span>
+<span class="lineno">  318 </span><span class="spaces">                          </span><span class="istickedoff">mHarnessPid &lt;- case mShellPid of</span>
+<span class="lineno">  319 </span><span class="spaces">                            </span><span class="istickedoff">Just shellPid -&gt; _ccd_harnessPidOf deps shellPid <span class="nottickedoff">claudeComm</span></span>
+<span class="lineno">  320 </span><span class="spaces">                            </span><span class="istickedoff">Nothing       -&gt; pure Nothing</span>
+<span class="lineno">  321 </span><span class="spaces">                          </span><span class="istickedoff">-- Step 8: Wire up the cached-coordinate handle (D4.3).</span>
+<span class="lineno">  322 </span><span class="spaces">                          </span><span class="istickedoff">-- Spawn baseline = 0: PureClaw created this window</span>
+<span class="lineno">  323 </span><span class="spaces">                          </span><span class="istickedoff">-- fresh, so there is no pre-existing backlog to</span>
+<span class="lineno">  324 </span><span class="spaces">                          </span><span class="istickedoff">-- exclude (B3 / D3.2 — behavior unchanged). WU4</span>
+<span class="lineno">  325 </span><span class="spaces">                          </span><span class="istickedoff">-- (adopt) instead calls</span>
+<span class="lineno">  326 </span><span class="spaces">                          </span><span class="istickedoff">-- 'mkClaudeCodeHandleWithBaseline' with the window's</span>
+<span class="lineno">  327 </span><span class="spaces">                          </span><span class="istickedoff">-- current scrollback line count so an adopted</span>
+<span class="lineno">  328 </span><span class="spaces">                          </span><span class="istickedoff">-- window's prior backlog never enters the transcript.</span>
+<span class="lineno">  329 </span><span class="spaces">                          </span><span class="istickedoff">handle &lt;- mkClaudeCodeHandleWithBaseline deps reg hid th session 0</span>
+<span class="lineno">  330 </span><span class="spaces">                          </span><span class="istickedoff">-- Step 9: Register the Spawned entry (D4.2).</span>
+<span class="lineno">  331 </span><span class="spaces">                          </span><span class="istickedoff">let entry = Reg.HarnessEntry</span>
+<span class="lineno">  332 </span><span class="spaces">                                </span><span class="istickedoff">{ Reg._he_id          = hid</span>
+<span class="lineno">  333 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_session     = session</span>
+<span class="lineno">  334 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_windowName  = windowName</span>
+<span class="lineno">  335 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_shellPid    = mShellPid</span>
+<span class="lineno">  336 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_harnessPid  = mHarnessPid</span>
+<span class="lineno">  337 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_origin      = Reg.OriginSpawned</span>
+<span class="lineno">  338 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_liveness    = Reg.LivenessIdle</span>
+<span class="lineno">  339 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_extModified = False</span>
+<span class="lineno">  340 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_stale       = False</span>
+<span class="lineno">  341 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_sessionId   = Nothing</span>
+<span class="lineno">  342 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_label       = windowName</span>
+<span class="lineno">  343 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_orphanedTicks = 0</span>
+<span class="lineno">  344 </span><span class="spaces">                                </span><span class="istickedoff">, Reg._he_handle      = Just <span class="nottickedoff">handle</span></span>
+<span class="lineno">  345 </span><span class="spaces">                                </span><span class="istickedoff">}</span>
+<span class="lineno">  346 </span><span class="spaces">                          </span><span class="istickedoff">Reg.insertEntry reg entry</span>
+<span class="lineno">  347 </span><span class="spaces">                          </span><span class="istickedoff">pure (Right (hid, handle))</span></span>
+<span class="lineno">  348 </span>
+<span class="lineno">  349 </span>-- | Check whether the extra args include the unsafe/skip-permissions flag.
+<span class="lineno">  350 </span>hasUnsafeFlag :: [Text] -&gt; Bool
+<span class="lineno">  351 </span><span class="decl"><span class="istickedoff">hasUnsafeFlag = elem &quot;--dangerously-skip-permissions&quot;</span></span>
+<span class="lineno">  352 </span>
+<span class="lineno">  353 </span>-- | Build the extra CLI args for a spawned @claude-code@ harness from the
+<span class="lineno">  354 </span>-- two spawn-time inputs: whether to skip permission checks, and the optional
+<span class="lineno">  355 </span>-- minted @claude-code@ session UUID (WU6, D6.1).
+<span class="lineno">  356 </span>--
+<span class="lineno">  357 </span>-- The @--session-id \&lt;uuid\&gt;@ pair is appended through the EXISTING @[Text]@
+<span class="lineno">  358 </span>-- args that flow to 'mkClaudeCodeHarnessWith' — the @_ccd_addWindow@ signature
+<span class="lineno">  359 </span>-- is deliberately NOT widened. Ordering: the unsafe flag (if any) comes first,
+<span class="lineno">  360 </span>-- exactly as before, so 'hasUnsafeFlag' (which scans the whole list) still
+<span class="lineno">  361 </span>-- detects it; appending @--session-id@ afterwards cannot perturb that. When
+<span class="lineno">  362 </span>-- the uuid is 'Nothing' the result is identical to the legacy behaviour, so a
+<span class="lineno">  363 </span>-- non-correlated spawn (e.g. uuid minting elided) is byte-for-byte unchanged.
+<span class="lineno">  364 </span>claudeCodeExtraArgs :: Bool -&gt; Maybe Text -&gt; [Text]
+<span class="lineno">  365 </span><span class="decl"><span class="istickedoff">claudeCodeExtraArgs skipPerms mUuid =</span>
+<span class="lineno">  366 </span><span class="spaces">  </span><span class="istickedoff">[&quot;--dangerously-skip-permissions&quot; | skipPerms]</span>
+<span class="lineno">  367 </span><span class="spaces">    </span><span class="istickedoff">++ maybe [] (\u -&gt; [&quot;--session-id&quot;, u]) mUuid</span></span>
+<span class="lineno">  368 </span>
+<span class="lineno">  369 </span>-- | Pre-authorize: check that the policy would allow &quot;claude&quot; at all.
+<span class="lineno">  370 </span>preAuthorize :: SecurityPolicy -&gt; Either CommandError ()
+<span class="lineno">  371 </span><span class="decl"><span class="istickedoff">preAuthorize policy = case authorize policy &quot;claude&quot; <span class="nottickedoff">[]</span> of</span>
+<span class="lineno">  372 </span><span class="spaces">  </span><span class="istickedoff">Left err -&gt; Left err</span>
+<span class="lineno">  373 </span><span class="spaces">  </span><span class="istickedoff">Right _  -&gt; Right ()</span></span>
+<span class="lineno">  374 </span>
+<span class="lineno">  375 </span>-- | Build a cached-coordinate 'HarnessHandle' for an already-registered harness
+<span class="lineno">  376 </span>-- with an explicit capture /baseline/ (B3 mechanism, D5).
+<span class="lineno">  377 </span>--
+<span class="lineno">  378 </span>-- The baseline is the number of pre-existing scrollback lines to EXCLUDE from
+<span class="lineno">  379 </span>-- captured\/recorded output (see 'dropBaselineLines'). 'harnessReceive' drops
+<span class="lineno">  380 </span>-- the first @baseline@ lines of every full capture before extraction, so
+<span class="lineno">  381 </span>-- pre-baseline backlog can never reach the transcript NOR the WS broadcast
+<span class="lineno">  382 </span>-- (D3.3 — both derive from the baseline-stripped capture).
+<span class="lineno">  383 </span>--
+<span class="lineno">  384 </span>-- The spawn path ('mkClaudeCodeHarnessWith') passes @0@: a freshly-created
+<span class="lineno">  385 </span>-- window has no pre-existing backlog, so behavior is unchanged (D3.2). WU4
+<span class="lineno">  386 </span>-- (adopt) is the intended other caller: it passes the adopted window's CURRENT
+<span class="lineno">  387 </span>-- scrollback line count so the window's prior backlog is excluded from the
+<span class="lineno">  388 </span>-- adoption point forward.
+<span class="lineno">  389 </span>mkClaudeCodeHandleWithBaseline
+<span class="lineno">  390 </span>  :: ClaudeCodeDeps
+<span class="lineno">  391 </span>  -&gt; HarnessRegistry
+<span class="lineno">  392 </span>  -&gt; HarnessId
+<span class="lineno">  393 </span>  -&gt; TranscriptHandle
+<span class="lineno">  394 </span>  -&gt; Text            -- ^ tmux session name (for '_hh_session')
+<span class="lineno">  395 </span>  -&gt; Int             -- ^ initial capture baseline: pre-existing lines to exclude
+<span class="lineno">  396 </span>  -&gt; IO HarnessHandle
+<span class="lineno">  397 </span><span class="decl"><span class="istickedoff">mkClaudeCodeHandleWithBaseline deps reg hid th session baseline = do</span>
+<span class="lineno">  398 </span><span class="spaces">  </span><span class="istickedoff">baselineRef &lt;- newIORef baseline</span>
+<span class="lineno">  399 </span><span class="spaces">  </span><span class="istickedoff">pure HarnessHandle</span>
+<span class="lineno">  400 </span><span class="spaces">    </span><span class="istickedoff">{ _hh_send    = harnessSend deps reg hid th <span class="nottickedoff">baselineRef</span></span>
+<span class="lineno">  401 </span><span class="spaces">    </span><span class="istickedoff">, _hh_receive = harnessReceive deps reg hid th baselineRef</span>
+<span class="lineno">  402 </span><span class="spaces">    </span><span class="istickedoff">, _hh_name    = &quot;Claude Code&quot;</span>
+<span class="lineno">  403 </span><span class="spaces">    </span><span class="istickedoff">, _hh_session = session</span>
+<span class="lineno">  404 </span><span class="spaces">    </span><span class="istickedoff">, _hh_status  = harnessStatus deps reg hid</span>
+<span class="lineno">  405 </span><span class="spaces">    </span><span class="istickedoff">, _hh_stop    = harnessStop deps reg hid</span>
+<span class="lineno">  406 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  407 </span>
+<span class="lineno">  408 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  409 </span>-- Adopt an existing external window (WU4 — design §6, §8 B2\/B3, D6)
+<span class="lineno">  410 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  411 </span>
+<span class="lineno">  412 </span>-- | Adopt an EXTERNAL (discovered, PureClaw-UNMARKED) tmux window into the
+<span class="lineno">  413 </span>-- registry. This is the spawn path MINUS window creation: the window already
+<span class="lineno">  414 </span>-- exists, so we only stamp identity, set the capture baseline, register, and
+<span class="lineno">  415 </span>-- link a @session.json@.
+<span class="lineno">  416 </span>--
+<span class="lineno">  417 </span>-- The first argument is an 'AdoptedHarness' capability TOKEN. Its value
+<span class="lineno">  418 </span>-- constructor is unexported, so the ONLY way to obtain one is
+<span class="lineno">  419 </span>-- 'PureClaw.Security.Adoption.authorizeAdoption', which enforces the consent +
+<span class="lineno">  420 </span>-- allow-list gate. Requiring the token as a parameter makes it impossible BY
+<span class="lineno">  421 </span>-- CONSTRUCTION to adopt a window without first passing the gate (D4.3) — there
+<span class="lineno">  422 </span>-- is no token-free adopt path. The tmux session name rides in the token
+<span class="lineno">  423 </span>-- ('adoptedSession'); only the window name is supplied separately.
+<span class="lineno">  424 </span>--
+<span class="lineno">  425 </span>-- Steps (mirror 'mkClaudeCodeHarnessWith', omitting tmux session\/window
+<span class="lineno">  426 </span>-- creation):
+<span class="lineno">  427 </span>--
+<span class="lineno">  428 </span>--   1. Generate a fresh 'HarnessId'.
+<span class="lineno">  429 </span>--   2. Stamp the durable @\@pcl_id@ marker and enable @remain-on-exit@ on the
+<span class="lineno">  430 </span>--      adopted coordinates (the C4 trust anchor is established AT adopt time).
+<span class="lineno">  431 </span>--   3. Measure the window's CURRENT scrollback line count and build the handle
+<span class="lineno">  432 </span>--      with that as its capture baseline (B3 \/ D5): the pre-existing backlog
+<span class="lineno">  433 </span>--      is excluded from the transcript and the WS broadcast from the adoption
+<span class="lineno">  434 </span>--      point forward.
+<span class="lineno">  435 </span>--   4. Record the shell PID (best-effort) and derive the harness PID
+<span class="lineno">  436 </span>--      best-effort (may be 'Nothing' for a non-flavour window — OK).
+<span class="lineno">  437 </span>--   5. Register an @OriginAdopted@ 'Reg.HarnessEntry' (with the handle) into the
+<span class="lineno">  438 </span>--      registry.
+<span class="lineno">  439 </span>--   6. Create\/link a harness @session.json@ that persists the 'HarnessId' and
+<span class="lineno">  440 </span>--      the adopted tmux coordinates (mirrors the spawn persistence).
+<span class="lineno">  441 </span>--
+<span class="lineno">  442 </span>-- Does NOT create the window and does NOT capture the backlog. The legacy
+<span class="lineno">  443 </span>-- '_fe_harnesses' map sync (D-ADD-2) is the ENDPOINT's responsibility (it has
+<span class="lineno">  444 </span>-- the map); this mechanism returns the @(HarnessId, HarnessHandle)@ the caller
+<span class="lineno">  445 </span>-- inserts.
+<span class="lineno">  446 </span>adoptExternalWindow
+<span class="lineno">  447 </span>  :: ClaudeCodeDeps
+<span class="lineno">  448 </span>  -&gt; HarnessRegistry
+<span class="lineno">  449 </span>  -&gt; TranscriptHandle
+<span class="lineno">  450 </span>  -&gt; FilePath            -- ^ sessions base directory (where @session.json@ is linked)
+<span class="lineno">  451 </span>  -&gt; AdoptedHarness      -- ^ capability token (REQUIRED — type-enforced, D4.3)
+<span class="lineno">  452 </span>  -&gt; Maybe Int           -- ^ tmux window INDEX to adopt. The index is the only
+<span class="lineno">  453 </span>                         --   identifier UNIQUE within a session (window names
+<span class="lineno">  454 </span>                         --   default to the running command and repeat), so the
+<span class="lineno">  455 </span>                         --   detected-windows picker supplies it. 'Nothing' falls
+<span class="lineno">  456 </span>                         --   back to matching by name — used by manual entry,
+<span class="lineno">  457 </span>                         --   which has no index to offer.
+<span class="lineno">  458 </span>  -&gt; Text                -- ^ tmux window name: the match target when no index is
+<span class="lineno">  459 </span>                         --   given, and always used in diagnostics + the legacy
+<span class="lineno">  460 </span>                         --   name-keyed routing map.
+<span class="lineno">  461 </span>  -&gt; IO (Either HarnessError (HarnessId, HarnessHandle))
+<span class="lineno">  462 </span><span class="decl"><span class="istickedoff">adoptExternalWindow deps reg th sessionsDir token mWindowIndex windowName = do</span>
+<span class="lineno">  463 </span><span class="spaces">  </span><span class="istickedoff">let session = adoptedSession token</span>
+<span class="lineno">  464 </span><span class="spaces">  </span><span class="istickedoff">-- WU8 Part A (§8 C3/C4 defense-in-depth): the adopted coordinates originate</span>
+<span class="lineno">  465 </span><span class="spaces">  </span><span class="istickedoff">-- from the server-wide sweep (attacker-writable) and the allow-list (a literal</span>
+<span class="lineno">  466 </span><span class="spaces">  </span><span class="istickedoff">-- pattern can mint any session string). Validate BOTH identifiers FAIL-CLOSED</span>
+<span class="lineno">  467 </span><span class="spaces">  </span><span class="istickedoff">-- BEFORE any tmux mutation — a leading @-@ / @:@ / control char never reaches</span>
+<span class="lineno">  468 </span><span class="spaces">  </span><span class="istickedoff">-- set-option, capture-pane, or registration. The argv defense already holds;</span>
+<span class="lineno">  469 </span><span class="spaces">  </span><span class="istickedoff">-- this refuses the most-exposed path outright (no marker stamped, nothing</span>
+<span class="lineno">  470 </span><span class="spaces">  </span><span class="istickedoff">-- registered, no session.json written). The window name is validated even on</span>
+<span class="lineno">  471 </span><span class="spaces">  </span><span class="istickedoff">-- the index path: it still flows into diagnostics and the legacy routing map.</span>
+<span class="lineno">  472 </span><span class="spaces">  </span><span class="istickedoff">if not (validateTmuxIdent session &amp;&amp; validateTmuxIdent windowName)</span>
+<span class="lineno">  473 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (HarnessNotAuthorized</span>
+<span class="lineno">  474 </span><span class="spaces">      </span><span class="istickedoff">(CommandNotAllowed (&quot;invalid tmux identifier for adoption: &quot;</span>
+<span class="lineno">  475 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; session &lt;&gt; &quot;:&quot; &lt;&gt; windowName))))</span>
+<span class="lineno">  476 </span><span class="spaces">    </span><span class="istickedoff">else adoptValidated deps reg th sessionsDir session mWindowIndex windowName</span></span>
+<span class="lineno">  477 </span>
+<span class="lineno">  478 </span>-- | The adopt mechanism proper, reached only AFTER both tmux identifiers have
+<span class="lineno">  479 </span>-- passed 'validateTmuxIdent' (WU8 Part A). Split out so the guard in
+<span class="lineno">  480 </span>-- 'adoptExternalWindow' provably precedes every tmux op below.
+<span class="lineno">  481 </span>adoptValidated
+<span class="lineno">  482 </span>  :: ClaudeCodeDeps
+<span class="lineno">  483 </span>  -&gt; HarnessRegistry
+<span class="lineno">  484 </span>  -&gt; TranscriptHandle
+<span class="lineno">  485 </span>  -&gt; FilePath
+<span class="lineno">  486 </span>  -&gt; Text                -- ^ validated tmux session name
+<span class="lineno">  487 </span>  -&gt; Maybe Int           -- ^ tmux window index (preferred, unique); 'Nothing' → by name
+<span class="lineno">  488 </span>  -&gt; Text                -- ^ validated tmux window name (match target when no index)
+<span class="lineno">  489 </span>  -&gt; IO (Either HarnessError (HarnessId, HarnessHandle))
+<span class="lineno">  490 </span><span class="decl"><span class="istickedoff">adoptValidated deps reg th sessionsDir session mWindowIndex windowName = do</span>
+<span class="lineno">  491 </span><span class="spaces">  </span><span class="istickedoff">-- Step 1: fresh identity.</span>
+<span class="lineno">  492 </span><span class="spaces">  </span><span class="istickedoff">hid &lt;- _ccd_newId deps</span>
+<span class="lineno">  493 </span><span class="spaces">  </span><span class="istickedoff">-- Step 2: resolve the user-picked window via a fresh scan. When the picker</span>
+<span class="lineno">  494 </span><span class="spaces">  </span><span class="istickedoff">-- supplied a window INDEX we match on it — the index is the only identifier</span>
+<span class="lineno">  495 </span><span class="spaces">  </span><span class="istickedoff">-- UNIQUE within a session, so two windows sharing a name (e.g. both @zsh@)</span>
+<span class="lineno">  496 </span><span class="spaces">  </span><span class="istickedoff">-- stay distinguishable. Manual entry has no index, so we fall back to the</span>
+<span class="lineno">  497 </span><span class="spaces">  </span><span class="istickedoff">-- FIRST UNMARKED window whose NAME matches (mirrors discovery's adoptable</span>
+<span class="lineno">  498 </span><span class="spaces">  </span><span class="istickedoff">-- filter — avoids grabbing an already-ours duplicate-named window). The scan</span>
+<span class="lineno">  499 </span><span class="spaces">  </span><span class="istickedoff">-- reads @#{window_name}@ as DATA, so a name containing @.@ (or a purely</span>
+<span class="lineno">  500 </span><span class="spaces">  </span><span class="istickedoff">-- numeric name) cannot be misparsed here. If none matches, the window is</span>
+<span class="lineno">  501 </span><span class="spaces">  </span><span class="istickedoff">-- gone\/already adopted: refuse with NO mutation (maps to 503).</span>
+<span class="lineno">  502 </span><span class="spaces">  </span><span class="istickedoff">rows &lt;- _ccd_sweep deps <span class="nottickedoff">session</span></span>
+<span class="lineno">  503 </span><span class="spaces">  </span><span class="istickedoff">let matchesPick r = case mWindowIndex of</span>
+<span class="lineno">  504 </span><span class="spaces">        </span><span class="istickedoff">Just idx -&gt; _twr_windowIndex r == idx</span>
+<span class="lineno">  505 </span><span class="spaces">        </span><span class="istickedoff">Nothing  -&gt; _twr_windowName r == windowName</span>
+<span class="lineno">  506 </span><span class="spaces">      </span><span class="istickedoff">pickDesc = case mWindowIndex of</span>
+<span class="lineno">  507 </span><span class="spaces">        </span><span class="istickedoff">Just idx -&gt; &quot;at index &quot; &lt;&gt; T.pack (show idx)</span>
+<span class="lineno">  508 </span><span class="spaces">                      </span><span class="istickedoff">&lt;&gt; &quot; (named &quot; &lt;&gt; windowName &lt;&gt; &quot;)&quot;</span>
+<span class="lineno">  509 </span><span class="spaces">        </span><span class="istickedoff">Nothing  -&gt; &quot;named &quot; &lt;&gt; windowName</span>
+<span class="lineno">  510 </span><span class="spaces">  </span><span class="istickedoff">case find (\r -&gt; matchesPick r &amp;&amp; _twr_pclId r == &quot;&quot;) rows of</span>
+<span class="lineno">  511 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure (Left (HarnessTmuxNotAvailable</span>
+<span class="lineno">  512 </span><span class="spaces">      </span><span class="istickedoff">(&quot;adopt: no unmarked window &quot; &lt;&gt; pickDesc</span>
+<span class="lineno">  513 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; &quot; in session &quot; &lt;&gt; session)))</span>
+<span class="lineno">  514 </span><span class="spaces">    </span><span class="istickedoff">Just row -&gt; do</span>
+<span class="lineno">  515 </span><span class="spaces">      </span><span class="istickedoff">let idx = _twr_windowIndex row</span>
+<span class="lineno">  516 </span><span class="spaces">          </span><span class="istickedoff">-- Step 3: a SAFE canonical name. The HarnessId UUID is hex + hyphens,</span>
+<span class="lineno">  517 </span><span class="spaces">          </span><span class="istickedoff">-- so the result never contains @.@\/@:@ and passes 'validateTmuxIdent'.</span>
+<span class="lineno">  518 </span><span class="spaces">          </span><span class="istickedoff">-- We DO NOT reuse the user's name (which may contain a @.@ that breaks</span>
+<span class="lineno">  519 </span><span class="spaces">          </span><span class="istickedoff">-- the @session:name@ targeting every downstream op relies on — the</span>
+<span class="lineno">  520 </span><span class="spaces">          </span><span class="istickedoff">-- root-cause of the §8 C4 &quot;no corroborating PID&quot; eviction).</span>
+<span class="lineno">  521 </span><span class="spaces">          </span><span class="istickedoff">safeName = &quot;adopted-&quot; &lt;&gt; T.take 8 (Reg.harnessIdToText hid)</span>
+<span class="lineno">  522 </span><span class="spaces">      </span><span class="istickedoff">-- Step 4: rename the window BY INDEX (@session:&lt;int&gt;@ resolves by window</span>
+<span class="lineno">  523 </span><span class="spaces">      </span><span class="istickedoff">-- index — unambiguous, immune to the @.@ misparse). After this, the window</span>
+<span class="lineno">  524 </span><span class="spaces">      </span><span class="istickedoff">-- name is safe and @session:safeName@ targeting is correct.</span>
+<span class="lineno">  525 </span><span class="spaces">      </span><span class="istickedoff">_ccd_renameWindow deps session (T.pack (show idx)) safeName</span>
+<span class="lineno">  526 </span><span class="spaces">      </span><span class="istickedoff">-- From here EVERYTHING addresses the window by the SAFE name.</span>
+<span class="lineno">  527 </span><span class="spaces">      </span><span class="istickedoff">-- Step 5: establish identity on the renamed window (C4 anchor at adopt time).</span>
+<span class="lineno">  528 </span><span class="spaces">      </span><span class="istickedoff">_ccd_setMarker deps session safeName (Reg.harnessIdToText hid)</span>
+<span class="lineno">  529 </span><span class="spaces">      </span><span class="istickedoff">_ccd_setRemain deps session safeName</span>
+<span class="lineno">  530 </span><span class="spaces">      </span><span class="istickedoff">-- Step 6: measure the window's current scrollback and set the baseline so</span>
+<span class="lineno">  531 </span><span class="spaces">      </span><span class="istickedoff">-- the pre-existing backlog is excluded (B3 / D5). A full capture</span>
+<span class="lineno">  532 </span><span class="spaces">      </span><span class="istickedoff">-- (lineCount 0) mirrors the receive path's full-screen capture; we count</span>
+<span class="lineno">  533 </span><span class="spaces">      </span><span class="istickedoff">-- its lines.</span>
+<span class="lineno">  534 </span><span class="spaces">      </span><span class="istickedoff">fullCapture &lt;- fromMaybe <span class="nottickedoff">&quot;&quot;</span> &lt;$&gt; _ccd_captureNamed deps <span class="nottickedoff">session</span> safeName <span class="nottickedoff">0</span></span>
+<span class="lineno">  535 </span><span class="spaces">      </span><span class="istickedoff">let baseline = countCaptureLines fullCapture</span>
+<span class="lineno">  536 </span><span class="spaces">      </span><span class="istickedoff">-- Step 7: PID provenance (both best-effort).</span>
+<span class="lineno">  537 </span><span class="spaces">      </span><span class="istickedoff">mShellPid &lt;- _ccd_panePidOf deps <span class="nottickedoff">session</span> safeName</span>
+<span class="lineno">  538 </span><span class="spaces">      </span><span class="istickedoff">mHarnessPid &lt;- case mShellPid of</span>
+<span class="lineno">  539 </span><span class="spaces">        </span><span class="istickedoff">Just shellPid -&gt; _ccd_harnessPidOf deps <span class="nottickedoff">shellPid</span> <span class="nottickedoff">claudeComm</span></span>
+<span class="lineno">  540 </span><span class="spaces">        </span><span class="istickedoff">Nothing       -&gt; pure Nothing</span>
+<span class="lineno">  541 </span><span class="spaces">      </span><span class="istickedoff">-- Step 8: build the cached-coordinate handle with the adoption baseline.</span>
+<span class="lineno">  542 </span><span class="spaces">      </span><span class="istickedoff">handle &lt;- mkClaudeCodeHandleWithBaseline deps reg hid th <span class="nottickedoff">session</span> baseline</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">-- Step 9: link a harness session.json (mirrors the spawn persistence;</span>
+<span class="lineno">  544 </span><span class="spaces">      </span><span class="istickedoff">-- persists the HarnessId + adopted coords like WU6 / Phase 2).</span>
+<span class="lineno">  545 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  546 </span><span class="spaces">      </span><span class="istickedoff">let sid = newSessionId Nothing now</span>
+<span class="lineno">  547 </span><span class="spaces">          </span><span class="istickedoff">entry = Reg.HarnessEntry</span>
+<span class="lineno">  548 </span><span class="spaces">            </span><span class="istickedoff">{ Reg._he_id          = hid</span>
+<span class="lineno">  549 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_session     = session</span>
+<span class="lineno">  550 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_windowName  = safeName</span>
+<span class="lineno">  551 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_shellPid    = mShellPid</span>
+<span class="lineno">  552 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_harnessPid  = mHarnessPid</span>
+<span class="lineno">  553 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_origin      = Reg.OriginAdopted</span>
+<span class="lineno">  554 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_liveness    = Reg.LivenessIdle</span>
+<span class="lineno">  555 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_extModified = False</span>
+<span class="lineno">  556 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_stale       = False</span>
+<span class="lineno">  557 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_sessionId   = Just <span class="nottickedoff">(unSessionId sid)</span></span>
+<span class="lineno">  558 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_label       = safeName</span>
+<span class="lineno">  559 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_orphanedTicks = 0</span>
+<span class="lineno">  560 </span><span class="spaces">            </span><span class="istickedoff">, Reg._he_handle      = Just <span class="nottickedoff">handle</span></span>
+<span class="lineno">  561 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  562 </span><span class="spaces">          </span><span class="istickedoff">meta = SessionMeta</span>
+<span class="lineno">  563 </span><span class="spaces">            </span><span class="istickedoff">{ _sm_id                = sid</span>
+<span class="lineno">  564 </span><span class="spaces">            </span><span class="istickedoff">, _sm_agent             = Nothing</span>
+<span class="lineno">  565 </span><span class="spaces">            </span><span class="istickedoff">, _sm_kind              = SkHarness HarnessSpec</span>
+<span class="lineno">  566 </span><span class="spaces">                </span><span class="istickedoff">{ _h_flavour   = HClaudeCode</span>
+<span class="lineno">  567 </span><span class="spaces">                </span><span class="istickedoff">, _h_tmux      = TmuxConfig</span>
+<span class="lineno">  568 </span><span class="spaces">                    </span><span class="istickedoff">{ _tc_session = session</span>
+<span class="lineno">  569 </span><span class="spaces">                    </span><span class="istickedoff">, _tc_window  = safeName</span>
+<span class="lineno">  570 </span><span class="spaces">                    </span><span class="istickedoff">, _tc_pane    = Nothing</span>
+<span class="lineno">  571 </span><span class="spaces">                    </span><span class="istickedoff">}</span>
+<span class="lineno">  572 </span><span class="spaces">                </span><span class="istickedoff">, _h_cwd       = Nothing</span>
+<span class="lineno">  573 </span><span class="spaces">                </span><span class="istickedoff">, _h_args      = []</span>
+<span class="lineno">  574 </span><span class="spaces">                </span><span class="istickedoff">, _h_harnessId = Just hid</span>
+<span class="lineno">  575 </span><span class="spaces">                </span><span class="istickedoff">-- Adopted harnesses are NOT spawned by PureClaw, so we never</span>
+<span class="lineno">  576 </span><span class="spaces">                </span><span class="istickedoff">-- minted a --session-id for them and cannot correlate their</span>
+<span class="lineno">  577 </span><span class="spaces">                </span><span class="istickedoff">-- JSONL log (WU6: claude-code log capture is spawned-only).</span>
+<span class="lineno">  578 </span><span class="spaces">                </span><span class="istickedoff">-- Both Nothing.</span>
+<span class="lineno">  579 </span><span class="spaces">                </span><span class="istickedoff">, _h_claudeSessionUuid = Nothing</span>
+<span class="lineno">  580 </span><span class="spaces">                </span><span class="istickedoff">, _h_canonicalCwd      = Nothing</span>
+<span class="lineno">  581 </span><span class="spaces">                </span><span class="istickedoff">}</span>
+<span class="lineno">  582 </span><span class="spaces">            </span><span class="istickedoff">, _sm_model             = &quot;&quot;</span>
+<span class="lineno">  583 </span><span class="spaces">            </span><span class="istickedoff">, _sm_channel           = &quot;web&quot;</span>
+<span class="lineno">  584 </span><span class="spaces">            </span><span class="istickedoff">, _sm_createdAt         = now</span>
+<span class="lineno">  585 </span><span class="spaces">            </span><span class="istickedoff">, _sm_lastActive        = now</span>
+<span class="lineno">  586 </span><span class="spaces">            </span><span class="istickedoff">, _sm_bootstrapConsumed = True</span>
+<span class="lineno">  587 </span><span class="spaces">            </span><span class="istickedoff">, _sm_archived          = False</span>
+<span class="lineno">  588 </span><span class="spaces">            </span><span class="istickedoff">, _sm_description       = Nothing</span>
+<span class="lineno">  589 </span><span class="spaces">            </span><span class="istickedoff">, _sm_autoSummary       = Nothing</span>
+<span class="lineno">  590 </span><span class="spaces">            </span><span class="istickedoff">, _sm_source            = Nothing</span>
+<span class="lineno">  591 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  592 </span><span class="spaces">      </span><span class="istickedoff">Reg.insertEntry reg entry</span>
+<span class="lineno">  593 </span><span class="spaces">      </span><span class="istickedoff">writeSessionMeta sessionsDir meta</span>
+<span class="lineno">  594 </span><span class="spaces">      </span><span class="istickedoff">pure (Right (hid, handle))</span></span>
+<span class="lineno">  595 </span>
+<span class="lineno">  596 </span>-- | Count the newline-delimited lines in a raw capture, matching the splitting
+<span class="lineno">  597 </span>-- 'dropBaselineLines' \/ 'extractLastResponse' use (split on @0x0A@). An empty
+<span class="lineno">  598 </span>-- capture is 0 lines; otherwise it is one more than the number of @0x0A@ bytes.
+<span class="lineno">  599 </span>-- This is the adoption baseline: the count of pre-existing scrollback lines to
+<span class="lineno">  600 </span>-- exclude from the adoption point forward (B3).
+<span class="lineno">  601 </span>countCaptureLines :: ByteString -&gt; Int
+<span class="lineno">  602 </span><span class="decl"><span class="istickedoff">countCaptureLines bs</span>
+<span class="lineno">  603 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">BS.null bs</span> = <span class="nottickedoff">0</span></span>
+<span class="lineno">  604 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>  = length (BS.split 0x0A bs)</span></span>
+<span class="lineno">  605 </span>
+<span class="lineno">  606 </span>-- | Atomically write a session's @session.json@ (mirrors
+<span class="lineno">  607 </span>-- @PureClaw.Session.Handle.saveMeta@: tmp-file + 'Dir.renameFile'). Kept local
+<span class="lineno">  608 </span>-- so the adopt mechanism does not depend on the higher broker-aware
+<span class="lineno">  609 </span>-- 'PureClaw.Session.Handle' layer. Creates the session directory if needed.
+<span class="lineno">  610 </span>writeSessionMeta :: FilePath -&gt; SessionMeta -&gt; IO ()
+<span class="lineno">  611 </span><span class="decl"><span class="istickedoff">writeSessionMeta baseDir meta = do</span>
+<span class="lineno">  612 </span><span class="spaces">  </span><span class="istickedoff">let dir    = baseDir &lt;/&gt; T.unpack (unSessionId (_sm_id meta))</span>
+<span class="lineno">  613 </span><span class="spaces">      </span><span class="istickedoff">finalP = dir &lt;/&gt; &quot;session.json&quot;</span>
+<span class="lineno">  614 </span><span class="spaces">      </span><span class="istickedoff">tmpP   = finalP &lt;&gt; &quot;.tmp&quot;</span>
+<span class="lineno">  615 </span><span class="spaces">      </span><span class="istickedoff">txP    = dir &lt;/&gt; &quot;transcript.jsonl&quot;</span>
+<span class="lineno">  616 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True dir</span>
+<span class="lineno">  617 </span><span class="spaces">  </span><span class="istickedoff">-- Mirror the spawn path's session creation: 'mkSessionHandle' opens</span>
+<span class="lineno">  618 </span><span class="spaces">  </span><span class="istickedoff">-- @transcript.jsonl@ with @O_CREAT 0o600@ at session-creation time, so a</span>
+<span class="lineno">  619 </span><span class="spaces">  </span><span class="istickedoff">-- freshly-spawned session always has the file. The adopt path persists the</span>
+<span class="lineno">  620 </span><span class="spaces">  </span><span class="istickedoff">-- meta by hand (it does not go through 'mkSessionHandle'), so without this an</span>
+<span class="lineno">  621 </span><span class="spaces">  </span><span class="istickedoff">-- adopted session has only @session.json@ — and the FIRST</span>
+<span class="lineno">  622 </span><span class="spaces">  </span><span class="istickedoff">-- @POST /api/sessions/&lt;sid&gt;/send@ is rejected 404 by 'handleSend', whose</span>
+<span class="lineno">  623 </span><span class="spaces">  </span><span class="istickedoff">-- existence check is @doesFileExist transcript.jsonl@. Create the (empty)</span>
+<span class="lineno">  624 </span><span class="spaces">  </span><span class="istickedoff">-- transcript here, non-destructively (never truncates an existing one) and</span>
+<span class="lineno">  625 </span><span class="spaces">  </span><span class="istickedoff">-- with the same 0o600 mode the transcript layer uses.</span>
+<span class="lineno">  626 </span><span class="spaces">  </span><span class="istickedoff">txExists &lt;- Dir.doesFileExist txP</span>
+<span class="lineno">  627 </span><span class="spaces">  </span><span class="istickedoff">unless txExists $ do</span>
+<span class="lineno">  628 </span><span class="spaces">    </span><span class="istickedoff">LBS.writeFile txP LBS.empty</span>
+<span class="lineno">  629 </span><span class="spaces">    </span><span class="istickedoff">PFiles.setFileMode txP 0o600</span>
+<span class="lineno">  630 </span><span class="spaces">  </span><span class="istickedoff">LBS.writeFile tmpP (Aeson.encode meta)</span>
+<span class="lineno">  631 </span><span class="spaces">  </span><span class="istickedoff">-- Best-effort persistence: a failed rename is SWALLOWED (swallow-and-continue),</span>
+<span class="lineno">  632 </span><span class="spaces">  </span><span class="istickedoff">-- not surfaced. The adopt mechanism has already stamped identity and registered</span>
+<span class="lineno">  633 </span><span class="spaces">  </span><span class="istickedoff">-- the OriginAdopted entry by this point, so a session.json write fault must not</span>
+<span class="lineno">  634 </span><span class="spaces">  </span><span class="istickedoff">-- fail the adoption — the in-memory registry entry still routes; the persisted</span>
+<span class="lineno">  635 </span><span class="spaces">  </span><span class="istickedoff">-- metadata is a reconnect convenience that the next reconcile/save can rebuild.</span>
+<span class="lineno">  636 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try (Dir.renameFile tmpP finalP) :: IO (Either IOError ())</span>
+<span class="lineno">  637 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  638 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  639 </span><span class="spaces">    </span><span class="istickedoff">Left _   -&gt; <span class="nottickedoff">pure ()</span></span></span>
+<span class="lineno">  640 </span>
+<span class="lineno">  641 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  642 </span>-- Cached-coordinate, self-healing handle (D4.3)
+<span class="lineno">  643 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  644 </span>
+<span class="lineno">  645 </span>-- | Read the current cached coordinate @(session, windowName)@ for a harness
+<span class="lineno">  646 </span>-- from its registry entry. The handle does NOT close over a frozen window name
+<span class="lineno">  647 </span>-- (design §4): it reads the live entry on every I\/O so the reconcile loop
+<span class="lineno">  648 </span>-- (WU5) can update the coordinate underneath it.
+<span class="lineno">  649 </span>currentCoord :: HarnessRegistry -&gt; HarnessId -&gt; IO (Maybe (Text, Text))
+<span class="lineno">  650 </span><span class="decl"><span class="istickedoff">currentCoord reg hid = do</span>
+<span class="lineno">  651 </span><span class="spaces">  </span><span class="istickedoff">mEntry &lt;- Reg.lookupById reg hid</span>
+<span class="lineno">  652 </span><span class="spaces">  </span><span class="istickedoff">pure (fmap (\e -&gt; (Reg._he_session e, Reg._he_windowName e)) mEntry)</span></span>
+<span class="lineno">  653 </span>
+<span class="lineno">  654 </span>-- | Re-resolve a harness's window after a tmux \&quot;no such window\&quot;: sweep the
+<span class="lineno">  655 </span>-- session, find the row whose @\@pcl_id@ matches this harness's id, update the
+<span class="lineno">  656 </span>-- cached '_he_windowName', and return the new name. 'Nothing' if no marked
+<span class="lineno">  657 </span>-- window matches (the full reconcile loop is WU5; this is the minimal
+<span class="lineno">  658 </span>-- one-shot heal).
+<span class="lineno">  659 </span>reResolve :: ClaudeCodeDeps -&gt; HarnessRegistry -&gt; HarnessId -&gt; Text -&gt; IO (Maybe Text)
+<span class="lineno">  660 </span><span class="decl"><span class="istickedoff">reResolve deps reg hid session = do</span>
+<span class="lineno">  661 </span><span class="spaces">  </span><span class="istickedoff">rows &lt;- _ccd_sweep deps <span class="nottickedoff">session</span></span>
+<span class="lineno">  662 </span><span class="spaces">  </span><span class="istickedoff">let idText = Reg.harnessIdToText hid</span>
+<span class="lineno">  663 </span><span class="spaces">  </span><span class="istickedoff">case find ((== idText) . _twr_pclId) rows of</span>
+<span class="lineno">  664 </span><span class="spaces">    </span><span class="istickedoff">Nothing  -&gt; pure Nothing</span>
+<span class="lineno">  665 </span><span class="spaces">    </span><span class="istickedoff">Just row -&gt; do</span>
+<span class="lineno">  666 </span><span class="spaces">      </span><span class="istickedoff">let newName = _twr_windowName row</span>
+<span class="lineno">  667 </span><span class="spaces">      </span><span class="istickedoff">mEntry &lt;- Reg.lookupById reg hid</span>
+<span class="lineno">  668 </span><span class="spaces">      </span><span class="istickedoff">case mEntry of</span>
+<span class="lineno">  669 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  670 </span><span class="spaces">        </span><span class="istickedoff">Just e  -&gt; Reg.insertEntry reg e { Reg._he_windowName = newName }</span>
+<span class="lineno">  671 </span><span class="spaces">      </span><span class="istickedoff">pure (Just newName)</span></span>
+<span class="lineno">  672 </span>
+<span class="lineno">  673 </span>-- | Send input to the harness, logging the request. Reads the cached coordinate;
+<span class="lineno">  674 </span>-- on a tmux \&quot;no such window\&quot; it re-resolves once by @\@pcl_id@ and retries.
+<span class="lineno">  675 </span>harnessSend :: ClaudeCodeDeps -&gt; HarnessRegistry -&gt; HarnessId -&gt; TranscriptHandle -&gt; IORef Int -&gt; ByteString -&gt; IO ()
+<span class="lineno">  676 </span><span class="decl"><span class="istickedoff">harnessSend deps reg hid th _baselineRef input = do</span>
+<span class="lineno">  677 </span><span class="spaces">  </span><span class="istickedoff">entryId &lt;- UUID.toText &lt;$&gt; UUID.nextRandom</span>
+<span class="lineno">  678 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  679 </span><span class="spaces">  </span><span class="istickedoff">let entry = TranscriptEntry</span>
+<span class="lineno">  680 </span><span class="spaces">        </span><span class="istickedoff">{ _te_id            = entryId</span>
+<span class="lineno">  681 </span><span class="spaces">        </span><span class="istickedoff">, _te_timestamp     = now</span>
+<span class="lineno">  682 </span><span class="spaces">        </span><span class="istickedoff">, _te_harness       = Just &quot;claude-code&quot;</span>
+<span class="lineno">  683 </span><span class="spaces">        </span><span class="istickedoff">, _te_model         = Nothing</span>
+<span class="lineno">  684 </span><span class="spaces">        </span><span class="istickedoff">, _te_direction     = Request</span>
+<span class="lineno">  685 </span><span class="spaces">        </span><span class="istickedoff">, _te_payload       = encodePayload input</span>
+<span class="lineno">  686 </span><span class="spaces">        </span><span class="istickedoff">, _te_durationMs    = Nothing</span>
+<span class="lineno">  687 </span><span class="spaces">        </span><span class="istickedoff">, _te_correlationId = entryId</span>
+<span class="lineno">  688 </span><span class="spaces">        </span><span class="istickedoff">, _te_metadata      = Map.empty</span>
+<span class="lineno">  689 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  690 </span><span class="spaces">  </span><span class="istickedoff">_th_record th entry</span>
+<span class="lineno">  691 </span><span class="spaces">  </span><span class="istickedoff">mCoord &lt;- currentCoord reg hid</span>
+<span class="lineno">  692 </span><span class="spaces">  </span><span class="istickedoff">case mCoord of</span>
+<span class="lineno">  693 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span>  -- entry vanished; nothing to target</span>
+<span class="lineno">  694 </span><span class="spaces">    </span><span class="istickedoff">Just (session, windowName) -&gt; do</span>
+<span class="lineno">  695 </span><span class="spaces">      </span><span class="istickedoff">found &lt;- _ccd_sendNamed deps <span class="nottickedoff">session</span> windowName <span class="nottickedoff">input</span></span>
+<span class="lineno">  696 </span><span class="spaces">      </span><span class="istickedoff">unless found $ do</span>
+<span class="lineno">  697 </span><span class="spaces">        </span><span class="istickedoff">mNew &lt;- reResolve deps reg hid <span class="nottickedoff">session</span></span>
+<span class="lineno">  698 </span><span class="spaces">        </span><span class="istickedoff">case mNew of</span>
+<span class="lineno">  699 </span><span class="spaces">          </span><span class="istickedoff">Nothing      -&gt; pure <span class="nottickedoff">()</span>  -- could not heal; give up (WU5 owns reconcile)</span>
+<span class="lineno">  700 </span><span class="spaces">          </span><span class="istickedoff">Just newName -&gt; do</span>
+<span class="lineno">  701 </span><span class="spaces">            </span><span class="istickedoff">_ &lt;- _ccd_sendNamed deps <span class="nottickedoff">session</span> newName input</span>
+<span class="lineno">  702 </span><span class="spaces">            </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  703 </span>
+<span class="lineno">  704 </span>-- | Poll the harness window until idle, then capture and extract the last
+<span class="lineno">  705 </span>-- response. Re-resolves the coordinate once on a tmux \&quot;no such window\&quot;.
+<span class="lineno">  706 </span>harnessReceive :: ClaudeCodeDeps -&gt; HarnessRegistry -&gt; HarnessId -&gt; TranscriptHandle -&gt; IORef Int -&gt; IO ByteString
+<span class="lineno">  707 </span><span class="decl"><span class="istickedoff">harnessReceive deps reg hid th baselineRef = do</span>
+<span class="lineno">  708 </span><span class="spaces">  </span><span class="istickedoff">mCoord &lt;- currentCoord reg hid</span>
+<span class="lineno">  709 </span><span class="spaces">  </span><span class="istickedoff">case mCoord of</span>
+<span class="lineno">  710 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure &quot;&quot;</span></span>
+<span class="lineno">  711 </span><span class="spaces">    </span><span class="istickedoff">Just (session, windowName0) -&gt; do</span>
+<span class="lineno">  712 </span><span class="spaces">      </span><span class="istickedoff">-- Ensure the window is reachable; re-resolve once if not.</span>
+<span class="lineno">  713 </span><span class="spaces">      </span><span class="istickedoff">windowName &lt;- do</span>
+<span class="lineno">  714 </span><span class="spaces">        </span><span class="istickedoff">probe &lt;- _ccd_captureNamed deps <span class="nottickedoff">session</span> windowName0 <span class="nottickedoff">1</span></span>
+<span class="lineno">  715 </span><span class="spaces">        </span><span class="istickedoff">case probe of</span>
+<span class="lineno">  716 </span><span class="spaces">          </span><span class="istickedoff">Just _  -&gt; pure <span class="nottickedoff">windowName0</span></span>
+<span class="lineno">  717 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  718 </span><span class="spaces">            </span><span class="istickedoff">mNew &lt;- reResolve deps reg hid <span class="nottickedoff">session</span></span>
+<span class="lineno">  719 </span><span class="spaces">            </span><span class="istickedoff">pure (fromMaybe <span class="nottickedoff">windowName0</span> mNew)</span>
+<span class="lineno">  720 </span><span class="spaces">      </span><span class="istickedoff">startTime &lt;- getCurrentTime</span>
+<span class="lineno">  721 </span><span class="spaces">      </span><span class="istickedoff">pollUntilIdle <span class="nottickedoff">session</span> windowName startTime &quot;&quot; <span class="nottickedoff">(0 :: Int)</span></span>
+<span class="lineno">  722 </span><span class="spaces">      </span><span class="istickedoff">fullCapture &lt;- fromMaybe <span class="nottickedoff">&quot;&quot;</span> &lt;$&gt; _ccd_captureNamed deps <span class="nottickedoff">session</span> windowName <span class="nottickedoff">0</span></span>
+<span class="lineno">  723 </span><span class="spaces">      </span><span class="istickedoff">-- B3: exclude everything before the recorded baseline (the count of</span>
+<span class="lineno">  724 </span><span class="spaces">      </span><span class="istickedoff">-- pre-existing scrollback lines) so pre-baseline backlog can never be</span>
+<span class="lineno">  725 </span><span class="spaces">      </span><span class="istickedoff">-- extracted/recorded. Both 'responseText' (the WS-broadcast value) and</span>
+<span class="lineno">  726 </span><span class="spaces">      </span><span class="istickedoff">-- the transcript entry below derive from the stripped capture (D3.3).</span>
+<span class="lineno">  727 </span><span class="spaces">      </span><span class="istickedoff">baseline &lt;- readIORef baselineRef</span>
+<span class="lineno">  728 </span><span class="spaces">      </span><span class="istickedoff">let responseText = extractLastResponse (dropBaselineLines baseline fullCapture)</span>
+<span class="lineno">  729 </span><span class="spaces">      </span><span class="istickedoff">entryId &lt;- UUID.toText &lt;$&gt; UUID.nextRandom</span>
+<span class="lineno">  730 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  731 </span><span class="spaces">      </span><span class="istickedoff">let entry = TranscriptEntry</span>
+<span class="lineno">  732 </span><span class="spaces">            </span><span class="istickedoff">{ _te_id            = entryId</span>
+<span class="lineno">  733 </span><span class="spaces">            </span><span class="istickedoff">, _te_timestamp     = now</span>
+<span class="lineno">  734 </span><span class="spaces">            </span><span class="istickedoff">, _te_harness       = Just <span class="nottickedoff">&quot;claude-code&quot;</span></span>
+<span class="lineno">  735 </span><span class="spaces">            </span><span class="istickedoff">, _te_model         = Nothing</span>
+<span class="lineno">  736 </span><span class="spaces">            </span><span class="istickedoff">, _te_direction     = Response</span>
+<span class="lineno">  737 </span><span class="spaces">            </span><span class="istickedoff">, _te_payload       = encodePayload responseText</span>
+<span class="lineno">  738 </span><span class="spaces">            </span><span class="istickedoff">, _te_durationMs    = Nothing</span>
+<span class="lineno">  739 </span><span class="spaces">            </span><span class="istickedoff">, _te_correlationId = entryId</span>
+<span class="lineno">  740 </span><span class="spaces">            </span><span class="istickedoff">, _te_metadata      = Map.empty</span>
+<span class="lineno">  741 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  742 </span><span class="spaces">      </span><span class="istickedoff">_th_record th entry</span>
+<span class="lineno">  743 </span><span class="spaces">      </span><span class="istickedoff">pure responseText</span>
+<span class="lineno">  744 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  745 </span><span class="spaces">    </span><span class="istickedoff">pollUntilIdle session windowName startTime lastScreen stableCount = do</span>
+<span class="lineno">  746 </span><span class="spaces">      </span><span class="istickedoff">threadDelay 500000  -- 500ms</span>
+<span class="lineno">  747 </span><span class="spaces">      </span><span class="istickedoff">current &lt;- fromMaybe <span class="nottickedoff">&quot;&quot;</span> &lt;$&gt; _ccd_captureNamed deps <span class="nottickedoff">session</span> windowName <span class="nottickedoff">300</span></span>
+<span class="lineno">  748 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  749 </span><span class="spaces">      </span><span class="istickedoff">let elapsed = diffUTCTime now startTime</span>
+<span class="lineno">  750 </span><span class="spaces">          </span><span class="istickedoff">screenText = TE.decodeUtf8Lenient current</span>
+<span class="lineno">  751 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlyfalse">elapsed &gt; 120</span></span>
+<span class="lineno">  752 </span><span class="spaces">        </span><span class="istickedoff">then <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  753 </span><span class="spaces">        </span><span class="istickedoff">else if <span class="tickonlytrue">isIdle screenText</span></span>
+<span class="lineno">  754 </span><span class="spaces">          </span><span class="istickedoff">then if current == lastScreen</span>
+<span class="lineno">  755 </span><span class="spaces">            </span><span class="istickedoff">then if stableCount &gt;= 2</span>
+<span class="lineno">  756 </span><span class="spaces">              </span><span class="istickedoff">then pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  757 </span><span class="spaces">              </span><span class="istickedoff">else pollUntilIdle <span class="nottickedoff">session</span> windowName startTime current (stableCount + 1)</span>
+<span class="lineno">  758 </span><span class="spaces">            </span><span class="istickedoff">else pollUntilIdle <span class="nottickedoff">session</span> windowName startTime current 0</span>
+<span class="lineno">  759 </span><span class="spaces">          </span><span class="istickedoff">else <span class="nottickedoff">pollUntilIdle session windowName startTime &quot;&quot; 0</span></span></span>
+<span class="lineno">  760 </span>
+<span class="lineno">  761 </span>-- | Check the harness window status via the cached coordinate.
+<span class="lineno">  762 </span>harnessStatus :: ClaudeCodeDeps -&gt; HarnessRegistry -&gt; HarnessId -&gt; IO HarnessStatus
+<span class="lineno">  763 </span><span class="decl"><span class="istickedoff">harnessStatus deps reg hid = do</span>
+<span class="lineno">  764 </span><span class="spaces">  </span><span class="istickedoff">mCoord &lt;- currentCoord reg hid</span>
+<span class="lineno">  765 </span><span class="spaces">  </span><span class="istickedoff">case mCoord of</span>
+<span class="lineno">  766 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure (HarnessExited (ExitFailure 127))</span>
+<span class="lineno">  767 </span><span class="spaces">    </span><span class="istickedoff">Just (session, windowName) -&gt; _ccd_status deps <span class="nottickedoff">session</span> <span class="nottickedoff">windowName</span></span></span>
+<span class="lineno">  768 </span>
+<span class="lineno">  769 </span>-- | Stop (kill) the harness window via the cached coordinate.
+<span class="lineno">  770 </span>harnessStop :: ClaudeCodeDeps -&gt; HarnessRegistry -&gt; HarnessId -&gt; IO ()
+<span class="lineno">  771 </span><span class="decl"><span class="istickedoff">harnessStop deps reg hid = do</span>
+<span class="lineno">  772 </span><span class="spaces">  </span><span class="istickedoff">mCoord &lt;- currentCoord reg hid</span>
+<span class="lineno">  773 </span><span class="spaces">  </span><span class="istickedoff">case mCoord of</span>
+<span class="lineno">  774 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  775 </span><span class="spaces">    </span><span class="istickedoff">Just (session, windowName) -&gt; _ccd_stopNamed deps session windowName</span></span>
+<span class="lineno">  776 </span>
+<span class="lineno">  777 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  778 </span>-- Response extraction (pure)
+<span class="lineno">  779 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  780 </span>
+<span class="lineno">  781 </span>-- | Check if Claude Code is idle (showing prompt, not busy).
+<span class="lineno">  782 </span>isIdle :: Text -&gt; Bool
+<span class="lineno">  783 </span><span class="decl"><span class="istickedoff">isIdle screen =</span>
+<span class="lineno">  784 </span><span class="spaces">  </span><span class="istickedoff">let hasPrompt = T.isInfixOf &quot;\x276F&quot; screen   -- ❯</span>
+<span class="lineno">  785 </span><span class="spaces">      </span><span class="istickedoff">isBusy    = T.isInfixOf &quot;\x280B&quot; screen    -- ⠋ (spinner)</span>
+<span class="lineno">  786 </span><span class="spaces">                </span><span class="istickedoff">|| T.isInfixOf &quot;Thinking&quot; screen</span>
+<span class="lineno">  787 </span><span class="spaces">                </span><span class="istickedoff">|| T.isInfixOf &quot;Running&quot; screen</span>
+<span class="lineno">  788 </span><span class="spaces">  </span><span class="istickedoff">in hasPrompt &amp;&amp; not isBusy</span></span>
+<span class="lineno">  789 </span>
+<span class="lineno">  790 </span>-- | Drop the first @n@ scrollback lines from a raw capture (B3 baseline
+<span class="lineno">  791 </span>-- mechanism). The baseline is the number of pre-existing lines to EXCLUDE.
+<span class="lineno">  792 </span>--
+<span class="lineno">  793 </span>-- Total: @n &lt;= 0@ → identity; @n &gt;= line count@ → empty; otherwise drops
+<span class="lineno">  794 </span>-- exactly @n@ leading newline-delimited lines and re-joins the remainder with
+<span class="lineno">  795 </span>-- @0x0A@. Splitting on @0x0A@ mirrors 'extractLastResponse' so the line indices
+<span class="lineno">  796 </span>-- agree.
+<span class="lineno">  797 </span>dropBaselineLines :: Int -&gt; ByteString -&gt; ByteString
+<span class="lineno">  798 </span><span class="decl"><span class="istickedoff">dropBaselineLines n capture</span>
+<span class="lineno">  799 </span><span class="spaces">  </span><span class="istickedoff">| n &lt;= 0    = capture</span>
+<span class="lineno">  800 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = BS.intercalate (BS.singleton 0x0A) (drop n (BS.split 0x0A capture))</span></span>
+<span class="lineno">  801 </span>
+<span class="lineno">  802 </span>-- | Extract the last response block from Claude Code scrollback.
+<span class="lineno">  803 </span>extractLastResponse :: ByteString -&gt; ByteString
+<span class="lineno">  804 </span><span class="decl"><span class="istickedoff">extractLastResponse capture =</span>
+<span class="lineno">  805 </span><span class="spaces">  </span><span class="istickedoff">let allLines  = map TE.decodeUtf8Lenient (BS.split 0x0A capture)</span>
+<span class="lineno">  806 </span><span class="spaces">      </span><span class="istickedoff">markerIdxs = [ i | (i, line) &lt;- zip [0..] allLines</span>
+<span class="lineno">  807 </span><span class="spaces">                       </span><span class="istickedoff">, isResponseMarker line ]</span>
+<span class="lineno">  808 </span><span class="spaces">  </span><span class="istickedoff">in case markerIdxs of</span>
+<span class="lineno">  809 </span><span class="spaces">    </span><span class="istickedoff">[] -&gt; &quot;&quot;  -- no response found</span>
+<span class="lineno">  810 </span><span class="spaces">    </span><span class="istickedoff">_  -&gt;</span>
+<span class="lineno">  811 </span><span class="spaces">      </span><span class="istickedoff">let startIdx   = last markerIdxs</span>
+<span class="lineno">  812 </span><span class="spaces">          </span><span class="istickedoff">response   = takeWhile (not . isUiBoundary)</span>
+<span class="lineno">  813 </span><span class="spaces">                     </span><span class="istickedoff">$ drop startIdx allLines</span>
+<span class="lineno">  814 </span><span class="spaces">          </span><span class="istickedoff">cleaned    = case response of</span>
+<span class="lineno">  815 </span><span class="spaces">            </span><span class="istickedoff">(firstLine : rest) -&gt; stripMarker firstLine : rest</span>
+<span class="lineno">  816 </span><span class="spaces">            </span><span class="istickedoff">[]                 -&gt; <span class="nottickedoff">[]</span></span>
+<span class="lineno">  817 </span><span class="spaces">      </span><span class="istickedoff">in TE.encodeUtf8 (T.intercalate &quot;\n&quot; cleaned)</span></span>
+<span class="lineno">  818 </span>
+<span class="lineno">  819 </span>-- | Lines starting with ⏺ (U+23FA, BLACK CIRCLE FOR RECORD) are response markers.
+<span class="lineno">  820 </span>isResponseMarker :: Text -&gt; Bool
+<span class="lineno">  821 </span><span class="decl"><span class="istickedoff">isResponseMarker line =</span>
+<span class="lineno">  822 </span><span class="spaces">  </span><span class="istickedoff">T.isPrefixOf &quot;\x23FA&quot; (T.stripStart line)</span>
+<span class="lineno">  823 </span><span class="spaces">  </span><span class="istickedoff">|| T.isPrefixOf &quot;\x2B24&quot; (T.stripStart line)</span></span>  -- ⬤ alternate marker
+<span class="lineno">  824 </span>
+<span class="lineno">  825 </span>-- | UI boundaries that terminate response extraction.
+<span class="lineno">  826 </span>isUiBoundary :: Text -&gt; Bool
+<span class="lineno">  827 </span><span class="decl"><span class="istickedoff">isUiBoundary line =</span>
+<span class="lineno">  828 </span><span class="spaces">  </span><span class="istickedoff">let stripped = T.stripStart line</span>
+<span class="lineno">  829 </span><span class="spaces">  </span><span class="istickedoff">in T.isPrefixOf &quot;\x276F&quot; stripped         -- ❯ input prompt</span>
+<span class="lineno">  830 </span><span class="spaces">  </span><span class="istickedoff">|| T.isPrefixOf &quot;?&quot; stripped</span>
+<span class="lineno">  831 </span><span class="spaces">     </span><span class="istickedoff">&amp;&amp; T.isInfixOf &quot;shortcut&quot; line         -- &quot;? for shortcuts&quot;</span>
+<span class="lineno">  832 </span><span class="spaces">  </span><span class="istickedoff">|| T.isInfixOf &quot;\x2580\x2580&quot; line        -- ▀▀ top bar</span>
+<span class="lineno">  833 </span><span class="spaces">  </span><span class="istickedoff">|| T.isInfixOf &quot;\x2584\x2584&quot; line        -- ▄▄ bottom bar</span>
+<span class="lineno">  834 </span><span class="spaces">  </span><span class="istickedoff">|| T.isInfixOf &quot;\x2500\x2500\x2500&quot; line</span></span>  -- ─── horizontal rule
+<span class="lineno">  835 </span>
+<span class="lineno">  836 </span>-- | Strip the response marker prefix (⏺ or ⬤) from a line.
+<span class="lineno">  837 </span>stripMarker :: Text -&gt; Text
+<span class="lineno">  838 </span><span class="decl"><span class="istickedoff">stripMarker line =</span>
+<span class="lineno">  839 </span><span class="spaces">  </span><span class="istickedoff">let stripped = T.stripStart line</span>
+<span class="lineno">  840 </span><span class="spaces">  </span><span class="istickedoff">in if <span class="tickonlytrue">T.isPrefixOf &quot;\x23FA&quot; stripped || T.isPrefixOf &quot;\x2B24&quot; stripped</span></span>
+<span class="lineno">  841 </span><span class="spaces">     </span><span class="istickedoff">then T.stripStart (T.drop 1 stripped)</span>
+<span class="lineno">  842 </span><span class="spaces">     </span><span class="istickedoff">else <span class="nottickedoff">line</span></span></span>
+<span class="lineno">  843 </span>
+<span class="lineno">  844 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  845 </span>-- Discovered handle
+<span class="lineno">  846 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  847 </span>
+<span class="lineno">  848 </span>-- | Reconstruct a 'HarnessHandle' for an already-running Claude Code window
+<span class="lineno">  849 </span>-- discovered via tmux. Used on startup to recover harness state.
+<span class="lineno">  850 </span>--
+<span class="lineno">  851 </span>-- This is the legacy, registry-less discovery path (the boot reconstruction
+<span class="lineno">  852 </span>-- that builds registry entries is WU5). It targets the window by name directly
+<span class="lineno">  853 </span>-- using the production tmux ops; it does NOT re-resolve (no registry entry to
+<span class="lineno">  854 </span>-- update). The 'Text' session and window name are threaded through (D4.1).
+<span class="lineno">  855 </span>mkDiscoveredClaudeCodeHandle :: TranscriptHandle -&gt; Text -&gt; Text -&gt; IO HarnessHandle
+<span class="lineno">  856 </span><span class="decl"><span class="istickedoff">mkDiscoveredClaudeCodeHandle th session windowName =</span>
+<span class="lineno">  857 </span><span class="spaces">  </span><span class="istickedoff">pure HarnessHandle</span>
+<span class="lineno">  858 </span><span class="spaces">    </span><span class="istickedoff">{ _hh_send    = <span class="nottickedoff">discoveredSend th session windowName</span></span>
+<span class="lineno">  859 </span><span class="spaces">    </span><span class="istickedoff">, _hh_receive = <span class="nottickedoff">discoveredReceive th session windowName</span></span>
+<span class="lineno">  860 </span><span class="spaces">    </span><span class="istickedoff">, _hh_name    = &quot;Claude Code&quot;</span>
+<span class="lineno">  861 </span><span class="spaces">    </span><span class="istickedoff">, _hh_session = session</span>
+<span class="lineno">  862 </span><span class="spaces">    </span><span class="istickedoff">, _hh_status  = <span class="nottickedoff">realStatus session windowName</span></span>
+<span class="lineno">  863 </span><span class="spaces">    </span><span class="istickedoff">, _hh_stop    = <span class="nottickedoff">stopHarnessWindowNamed session windowName</span></span>
+<span class="lineno">  864 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  865 </span>
+<span class="lineno">  866 </span>-- | Send for a discovered (registry-less) handle: log the request, then send by
+<span class="lineno">  867 </span>-- name. No re-resolve (no registry entry to heal).
+<span class="lineno">  868 </span>discoveredSend :: TranscriptHandle -&gt; Text -&gt; Text -&gt; ByteString -&gt; IO ()
+<span class="lineno">  869 </span><span class="decl"><span class="nottickedoff">discoveredSend th session windowName input = do</span>
+<span class="lineno">  870 </span><span class="spaces">  </span><span class="nottickedoff">entryId &lt;- UUID.toText &lt;$&gt; UUID.nextRandom</span>
+<span class="lineno">  871 </span><span class="spaces">  </span><span class="nottickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  872 </span><span class="spaces">  </span><span class="nottickedoff">let entry = TranscriptEntry</span>
+<span class="lineno">  873 </span><span class="spaces">        </span><span class="nottickedoff">{ _te_id            = entryId</span>
+<span class="lineno">  874 </span><span class="spaces">        </span><span class="nottickedoff">, _te_timestamp     = now</span>
+<span class="lineno">  875 </span><span class="spaces">        </span><span class="nottickedoff">, _te_harness       = Just &quot;claude-code&quot;</span>
+<span class="lineno">  876 </span><span class="spaces">        </span><span class="nottickedoff">, _te_model         = Nothing</span>
+<span class="lineno">  877 </span><span class="spaces">        </span><span class="nottickedoff">, _te_direction     = Request</span>
+<span class="lineno">  878 </span><span class="spaces">        </span><span class="nottickedoff">, _te_payload       = encodePayload input</span>
+<span class="lineno">  879 </span><span class="spaces">        </span><span class="nottickedoff">, _te_durationMs    = Nothing</span>
+<span class="lineno">  880 </span><span class="spaces">        </span><span class="nottickedoff">, _te_correlationId = entryId</span>
+<span class="lineno">  881 </span><span class="spaces">        </span><span class="nottickedoff">, _te_metadata      = Map.empty</span>
+<span class="lineno">  882 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  883 </span><span class="spaces">  </span><span class="nottickedoff">_th_record th entry</span>
+<span class="lineno">  884 </span><span class="spaces">  </span><span class="nottickedoff">_ &lt;- realSendNamed session windowName input</span>
+<span class="lineno">  885 </span><span class="spaces">  </span><span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  886 </span>
+<span class="lineno">  887 </span>-- | Receive for a discovered handle: poll until idle, capture, extract, log.
+<span class="lineno">  888 </span>discoveredReceive :: TranscriptHandle -&gt; Text -&gt; Text -&gt; IO ByteString
+<span class="lineno">  889 </span><span class="decl"><span class="nottickedoff">discoveredReceive th session windowName = do</span>
+<span class="lineno">  890 </span><span class="spaces">  </span><span class="nottickedoff">startTime &lt;- getCurrentTime</span>
+<span class="lineno">  891 </span><span class="spaces">  </span><span class="nottickedoff">pollUntilIdle startTime &quot;&quot; (0 :: Int)</span>
+<span class="lineno">  892 </span><span class="spaces">  </span><span class="nottickedoff">fullCapture &lt;- captureFullScrollbackNamed session windowName</span>
+<span class="lineno">  893 </span><span class="spaces">  </span><span class="nottickedoff">let responseText = extractLastResponse fullCapture</span>
+<span class="lineno">  894 </span><span class="spaces">  </span><span class="nottickedoff">entryId &lt;- UUID.toText &lt;$&gt; UUID.nextRandom</span>
+<span class="lineno">  895 </span><span class="spaces">  </span><span class="nottickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  896 </span><span class="spaces">  </span><span class="nottickedoff">let entry = TranscriptEntry</span>
+<span class="lineno">  897 </span><span class="spaces">        </span><span class="nottickedoff">{ _te_id            = entryId</span>
+<span class="lineno">  898 </span><span class="spaces">        </span><span class="nottickedoff">, _te_timestamp     = now</span>
+<span class="lineno">  899 </span><span class="spaces">        </span><span class="nottickedoff">, _te_harness       = Just &quot;claude-code&quot;</span>
+<span class="lineno">  900 </span><span class="spaces">        </span><span class="nottickedoff">, _te_model         = Nothing</span>
+<span class="lineno">  901 </span><span class="spaces">        </span><span class="nottickedoff">, _te_direction     = Response</span>
+<span class="lineno">  902 </span><span class="spaces">        </span><span class="nottickedoff">, _te_payload       = encodePayload responseText</span>
+<span class="lineno">  903 </span><span class="spaces">        </span><span class="nottickedoff">, _te_durationMs    = Nothing</span>
+<span class="lineno">  904 </span><span class="spaces">        </span><span class="nottickedoff">, _te_correlationId = entryId</span>
+<span class="lineno">  905 </span><span class="spaces">        </span><span class="nottickedoff">, _te_metadata      = Map.empty</span>
+<span class="lineno">  906 </span><span class="spaces">        </span><span class="nottickedoff">}</span>
+<span class="lineno">  907 </span><span class="spaces">  </span><span class="nottickedoff">_th_record th entry</span>
+<span class="lineno">  908 </span><span class="spaces">  </span><span class="nottickedoff">pure responseText</span>
+<span class="lineno">  909 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  910 </span><span class="spaces">    </span><span class="nottickedoff">pollUntilIdle startTime lastScreen stableCount = do</span>
+<span class="lineno">  911 </span><span class="spaces">      </span><span class="nottickedoff">threadDelay 500000</span>
+<span class="lineno">  912 </span><span class="spaces">      </span><span class="nottickedoff">current &lt;- fromMaybe &quot;&quot; &lt;$&gt; realCaptureNamed session windowName 300</span>
+<span class="lineno">  913 </span><span class="spaces">      </span><span class="nottickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  914 </span><span class="spaces">      </span><span class="nottickedoff">let elapsed = diffUTCTime now startTime</span>
+<span class="lineno">  915 </span><span class="spaces">          </span><span class="nottickedoff">screenText = TE.decodeUtf8Lenient current</span>
+<span class="lineno">  916 </span><span class="spaces">      </span><span class="nottickedoff">if elapsed &gt; 120</span>
+<span class="lineno">  917 </span><span class="spaces">        </span><span class="nottickedoff">then pure ()</span>
+<span class="lineno">  918 </span><span class="spaces">        </span><span class="nottickedoff">else if isIdle screenText</span>
+<span class="lineno">  919 </span><span class="spaces">          </span><span class="nottickedoff">then if current == lastScreen</span>
+<span class="lineno">  920 </span><span class="spaces">            </span><span class="nottickedoff">then if stableCount &gt;= 2</span>
+<span class="lineno">  921 </span><span class="spaces">              </span><span class="nottickedoff">then pure ()</span>
+<span class="lineno">  922 </span><span class="spaces">              </span><span class="nottickedoff">else pollUntilIdle startTime current (stableCount + 1)</span>
+<span class="lineno">  923 </span><span class="spaces">            </span><span class="nottickedoff">else pollUntilIdle startTime current 0</span>
+<span class="lineno">  924 </span><span class="spaces">          </span><span class="nottickedoff">else pollUntilIdle startTime &quot;&quot; 0</span></span>
+<span class="lineno">  925 </span>
+<span class="lineno">  926 </span>-- | Capture the full scrollback buffer (not just the visible pane) by name,
+<span class="lineno">  927 </span>-- through the WU3 tmux seam. Returns empty on a missing window or tmux absence.
+<span class="lineno">  928 </span>captureFullScrollbackNamed :: Text -&gt; Text -&gt; IO ByteString
+<span class="lineno">  929 </span><span class="decl"><span class="nottickedoff">captureFullScrollbackNamed session windowName</span>
+<span class="lineno">  930 </span><span class="spaces">  </span><span class="nottickedoff">-- WU8 Part A (§8 C3/C4): fail-closed on the discovered receive path — an</span>
+<span class="lineno">  931 </span><span class="spaces">  </span><span class="nottickedoff">-- invalid identifier yields the empty capture WITHOUT issuing capture-pane.</span>
+<span class="lineno">  932 </span><span class="spaces">  </span><span class="nottickedoff">| not (validateTmuxIdent session &amp;&amp; validateTmuxIdent windowName) = pure &quot;&quot;</span>
+<span class="lineno">  933 </span><span class="spaces"></span><span class="nottickedoff">captureFullScrollbackNamed session windowName = do</span>
+<span class="lineno">  934 </span><span class="spaces">  </span><span class="nottickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  935 </span><span class="spaces">  </span><span class="nottickedoff">case mPath of</span>
+<span class="lineno">  936 </span><span class="spaces">    </span><span class="nottickedoff">Nothing -&gt; pure &quot;&quot;</span>
+<span class="lineno">  937 </span><span class="spaces">    </span><span class="nottickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  938 </span><span class="spaces">      </span><span class="nottickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  939 </span><span class="spaces">                 </span><span class="nottickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  940 </span><span class="spaces">                 </span><span class="nottickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  941 </span><span class="spaces">                 </span><span class="nottickedoff">$ tmuxProc (authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  942 </span><span class="spaces">                     </span><span class="nottickedoff">[ &quot;capture-pane&quot;, &quot;-t&quot;, T.pack (windowTarget session windowName)</span>
+<span class="lineno">  943 </span><span class="spaces">                     </span><span class="nottickedoff">, &quot;-p&quot;, &quot;-S&quot;, &quot;-&quot;, &quot;-E&quot;, &quot;-&quot;</span>
+<span class="lineno">  944 </span><span class="spaces">                     </span><span class="nottickedoff">])</span>
+<span class="lineno">  945 </span><span class="spaces">      </span><span class="nottickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  946 </span><span class="spaces">      </span><span class="nottickedoff">pure $ case exitCode of</span>
+<span class="lineno">  947 </span><span class="spaces">        </span><span class="nottickedoff">ExitSuccess   -&gt; LBS.toStrict stdout</span>
+<span class="lineno">  948 </span><span class="spaces">        </span><span class="nottickedoff">ExitFailure _ -&gt; &quot;&quot;</span></span>
+
+</pre>
+</body>
+</html>

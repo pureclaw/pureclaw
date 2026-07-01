@@ -1,0 +1,255 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE LambdaCase #-}
+<span class="lineno">    2 </span>
+<span class="lineno">    3 </span>-- |
+<span class="lineno">    4 </span>-- Module      : PureClaw.Agent.Turn
+<span class="lineno">    5 </span>-- Description : Env-light, single-turn provider execution with tool cycling.
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- == Tabs-as-View
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- This module is the env-light extraction of the tool-call cycle. It is the
+<span class="lineno">   10 </span>-- reusable, per-tab core that the tabbed loop ('runTabbedLoop' via the tab
+<span class="lineno">   11 </span>-- runtimes) drives, replacing the original env-coupled completion handler that
+<span class="lineno">   12 </span>-- wrote @_env_channel@ directly and tail-recursed into a singleton loop.
+<span class="lineno">   13 </span>--
+<span class="lineno">   14 </span>-- 'runTurnWithTools' performs the logical cycle — build request, stream,
+<span class="lineno">   15 </span>-- capture response, run any tool calls, re-complete until none remain — but
+<span class="lineno">   16 </span>-- over an injected 'TurnDeps' record. Every effect (the provider stream, the
+<span class="lineno">   17 </span>-- tool executor, the streaming sink, the transcript append, the 'StreamId'
+<span class="lineno">   18 </span>-- allocator) is a field, so the function unit-tests fully with fakes: no live
+<span class="lineno">   19 </span>-- provider, no 'PureClaw.Tools.Registry.ToolRegistry', no @AgentEnv@.
+<span class="lineno">   20 </span>--
+<span class="lineno">   21 </span>-- The streaming sink is a small 'TurnEvent' (start\/chunk\/end framed by a
+<span class="lineno">   22 </span>-- 'StreamId') that carries no 'PureClaw.Handles.Tab.TabIndex' or slot
+<span class="lineno">   23 </span>-- identity — the runtime layer (8b.3) maps 'TurnEvent' to
+<span class="lineno">   24 </span>-- 'PureClaw.Routing.Types.ChannelEvent'. Keeping that mapping out of here is
+<span class="lineno">   25 </span>-- what decouples 'PureClaw.Agent.Turn' from the slot\/relay machinery.
+<span class="lineno">   26 </span>module PureClaw.Agent.Turn
+<span class="lineno">   27 </span>  ( -- * Output events
+<span class="lineno">   28 </span>    TurnEvent (..)
+<span class="lineno">   29 </span>    -- * Dependencies
+<span class="lineno">   30 </span>  , TurnDeps (..)
+<span class="lineno">   31 </span>    -- * Running a turn
+<span class="lineno">   32 </span>  , runTurnWithTools
+<span class="lineno">   33 </span>    -- * Stream identifiers (re-exported for convenience)
+<span class="lineno">   34 </span>  , StreamId
+<span class="lineno">   35 </span>  , mkStreamId
+<span class="lineno">   36 </span>  ) where
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>import Control.Exception qualified as E
+<span class="lineno">   39 </span>import Control.Monad qualified as M
+<span class="lineno">   40 </span>import Data.Aeson (Value)
+<span class="lineno">   41 </span>import Data.IORef qualified as Ref
+<span class="lineno">   42 </span>import Data.Text (Text)
+<span class="lineno">   43 </span>import Data.Text qualified as T
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>import PureClaw.Agent.Context (Context)
+<span class="lineno">   46 </span>import PureClaw.Agent.Context qualified as Ctx
+<span class="lineno">   47 </span>import PureClaw.Core.Types (ModelId, ToolCallId)
+<span class="lineno">   48 </span>import PureClaw.Providers.Class qualified as P
+<span class="lineno">   49 </span>import PureClaw.Routing.Types (StreamId, mkStreamId)
+<span class="lineno">   50 </span>
+<span class="lineno">   51 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   52 </span>-- Output events
+<span class="lineno">   53 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>-- | A single streaming-output event for one provider turn.
+<span class="lineno">   56 </span>--
+<span class="lineno">   57 </span>-- One logical streamed message is framed @'TurnStart' sid@, a sequence of
+<span class="lineno">   58 </span>-- @'TurnChunk' sid chunk@, then @'TurnEnd' sid@. The 'StreamId' is allocated
+<span class="lineno">   59 </span>-- once per provider completion (so a tool cycle that re-completes produces a
+<span class="lineno">   60 </span>-- fresh 'StreamId' per leg). Deliberately env-light: no slot\/tab identity —
+<span class="lineno">   61 </span>-- the runtime maps these to 'PureClaw.Routing.Types.ChannelEvent' in 8b.3.
+<span class="lineno">   62 </span>--
+<span class="lineno">   63 </span>-- @'TurnError' sid msg@ surfaces a provider failure as a visible message. The
+<span class="lineno">   64 </span>-- the original completion handler caught a throwing stream and sent the user a
+<span class="lineno">   65 </span>-- @TemporaryError &quot;Something went wrong. Please try again.&quot;@; on the tabbed
+<span class="lineno">   66 </span>-- path the throw must likewise be surfaced (pureclaw-9d0) rather than silently
+<span class="lineno">   67 </span>-- swallowed, leaving the user with an empty 'TurnStart'\/'TurnEnd' pair.
+<span class="lineno">   68 </span>data TurnEvent
+<span class="lineno">   69 </span>  = TurnStart !StreamId
+<span class="lineno">   70 </span>  | TurnChunk !StreamId !Text
+<span class="lineno">   71 </span>  | TurnEnd   !StreamId
+<span class="lineno">   72 </span>  | TurnError !StreamId !Text
+<span class="lineno">   73 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   76 </span>-- Dependencies
+<span class="lineno">   77 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | The injected effects 'runTurnWithTools' needs. Production wires:
+<span class="lineno">   80 </span>--
+<span class="lineno">   81 </span>--   * '_turn_stream'       — @'P.completeStream' someProvider@ (wrapped with
+<span class="lineno">   82 </span>--                            the per-session transcript provider).
+<span class="lineno">   83 </span>--   * '_turn_execTool'     — a closure over the session's
+<span class="lineno">   84 </span>--                            'PureClaw.Tools.Registry.ToolRegistry' that runs
+<span class="lineno">   85 </span>--                            one tool call and returns the tool-result
+<span class="lineno">   86 </span>--                            'P.Message'.
+<span class="lineno">   87 </span>--   * '_turn_emit'         — the per-conversation streaming sink.
+<span class="lineno">   88 </span>--   * '_turn_record'       — the per-session transcript append.
+<span class="lineno">   89 </span>--   * '_turn_nextStreamId' — a monotonic 'StreamId' allocator.
+<span class="lineno">   90 </span>--
+<span class="lineno">   91 </span>-- Tests inject fakes for all of these.
+<span class="lineno">   92 </span>data TurnDeps = TurnDeps
+<span class="lineno">   93 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_stream</span></span></span>       :: P.CompletionRequest -&gt; (P.StreamEvent -&gt; IO ()) -&gt; IO ()
+<span class="lineno">   94 </span>    -- ^ Injected provider stream (prod: @'P.completeStream' someProvider@).
+<span class="lineno">   95 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_execTool</span></span></span>     :: ToolCallId -&gt; Text -&gt; Value -&gt; IO P.Message
+<span class="lineno">   96 </span>    -- ^ Injected tool exec — runs one call, yields a tool-result 'P.Message'.
+<span class="lineno">   97 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_emit</span></span></span>         :: TurnEvent -&gt; IO ()
+<span class="lineno">   98 </span>    -- ^ Injected streaming sink.
+<span class="lineno">   99 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_record</span></span></span>       :: P.Message -&gt; IO ()
+<span class="lineno">  100 </span>    -- ^ Injected transcript append (user, assistant, and tool-result msgs).
+<span class="lineno">  101 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_nextStreamId</span></span></span> :: IO StreamId
+<span class="lineno">  102 </span>    -- ^ Allocates a fresh 'StreamId' per completion leg.
+<span class="lineno">  103 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_model</span></span></span>        :: ModelId
+<span class="lineno">  104 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_systemPrompt</span></span></span> :: Maybe Text
+<span class="lineno">  105 </span>    -- ^ Overrides the context's system prompt when @'Just'@; otherwise the
+<span class="lineno">  106 </span>    -- request falls back to 'Ctx.contextSystemPrompt' (matching Loop).
+<span class="lineno">  107 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_tools</span></span></span>        :: [P.ToolDefinition]
+<span class="lineno">  108 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_maxTokens</span></span></span>    :: Maybe Int
+<span class="lineno">  109 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_turn_onStreamDone</span></span></span> :: IO ()
+<span class="lineno">  110 </span>    -- ^ A one-shot-style hook fired on EVERY provider 'P.StreamDone' (in
+<span class="lineno">  111 </span>    -- addition to capturing the response). Idempotency is the action's
+<span class="lineno">  112 </span>    -- responsibility — production wires a read-and-clear @fireOnce@ over
+<span class="lineno">  113 </span>    -- @_env_onFirstStreamDone@ so @'markBootstrapConsumed'@ runs exactly once,
+<span class="lineno">  114 </span>    -- restoring the the original completion handler behaviour the tabbed path
+<span class="lineno">  115 </span>    -- dropped (pureclaw-8g4). Tests default it to @pure ()@.
+<span class="lineno">  116 </span>  }
+<span class="lineno">  117 </span>
+<span class="lineno">  118 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  119 </span>-- Running a turn
+<span class="lineno">  120 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  121 </span>
+<span class="lineno">  122 </span>-- | Run one user turn WITH the provider's tool-call cycle, env-light.
+<span class="lineno">  123 </span>--
+<span class="lineno">  124 </span>-- Mirrors the original completion handler but over 'TurnDeps':
+<span class="lineno">  125 </span>--
+<span class="lineno">  126 </span>--   1. Append a user 'P.Message' (the text) to the 'Context' and record it.
+<span class="lineno">  127 </span>--   2. Cycle: build a 'P.CompletionRequest' from the current context plus the
+<span class="lineno">  128 </span>--      injected model\/system\/tools\/maxTokens; allocate a 'StreamId'; emit
+<span class="lineno">  129 </span>--      'TurnStart'; stream — 'P.StreamText' becomes a 'TurnChunk',
+<span class="lineno">  130 </span>--      'P.StreamWarning' is ignored, 'P.StreamDone' captures the response;
+<span class="lineno">  131 </span>--      emit 'TurnEnd'.
+<span class="lineno">  132 </span>--   3. Append the assistant message and record it. If 'P.toolUseCalls' is
+<span class="lineno">  133 </span>--      empty, return the context. Otherwise run every call through
+<span class="lineno">  134 </span>--      '_turn_execTool', append + record each tool-result message, and loop.
+<span class="lineno">  135 </span>--   4. On a provider error (the stream throws, or yields no 'P.StreamDone'),
+<span class="lineno">  136 </span>--      do not crash: 'TurnEnd' is still emitted (it is emitted unconditionally
+<span class="lineno">  137 </span>--      after the stream attempt) and the context — carrying at least the user
+<span class="lineno">  138 </span>--      message — is returned. When the stream /throws/, a 'TurnError' is also
+<span class="lineno">  139 </span>--      emitted (after 'TurnEnd') so the failure is surfaced as a visible
+<span class="lineno">  140 </span>--      message — restoring the legacy @TemporaryError@ visibility (pureclaw-9d0).
+<span class="lineno">  141 </span>--      The no-'P.StreamDone' path stays a graceful, silent no-op.
+<span class="lineno">  142 </span>runTurnWithTools :: TurnDeps -&gt; Context -&gt; Text -&gt; IO Context
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">runTurnWithTools deps ctx0 userText = do</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">let userMsg = P.textMessage P.User userText</span>
+<span class="lineno">  145 </span><span class="spaces">      </span><span class="istickedoff">ctx1    = Ctx.addMessage userMsg ctx0</span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="istickedoff">_turn_record deps userMsg</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">cycleTurn deps ctx1</span></span>
+<span class="lineno">  148 </span>
+<span class="lineno">  149 </span>-- | One completion leg plus the tool cycle. Recurses when the response
+<span class="lineno">  150 </span>-- carries tool calls. Each call to 'cycleTurn' performs exactly one provider
+<span class="lineno">  151 </span>-- completion; a tool cycle of @n@ legs invokes 'cycleTurn' @n@ times.
+<span class="lineno">  152 </span>cycleTurn :: TurnDeps -&gt; Context -&gt; IO Context
+<span class="lineno">  153 </span><span class="decl"><span class="istickedoff">cycleTurn deps ctx = do</span>
+<span class="lineno">  154 </span><span class="spaces">  </span><span class="istickedoff">let req = P.CompletionRequest</span>
+<span class="lineno">  155 </span><span class="spaces">        </span><span class="istickedoff">{ P._cr_model        = _turn_model deps</span>
+<span class="lineno">  156 </span><span class="spaces">        </span><span class="istickedoff">, P._cr_messages     = Ctx.contextMessages ctx</span>
+<span class="lineno">  157 </span><span class="spaces">        </span><span class="istickedoff">, P._cr_systemPrompt = case _turn_systemPrompt deps of</span>
+<span class="lineno">  158 </span><span class="spaces">            </span><span class="istickedoff">Just sys -&gt; Just sys</span>
+<span class="lineno">  159 </span><span class="spaces">            </span><span class="istickedoff">Nothing  -&gt; Ctx.contextSystemPrompt ctx</span>
+<span class="lineno">  160 </span><span class="spaces">        </span><span class="istickedoff">, P._cr_maxTokens    = _turn_maxTokens deps</span>
+<span class="lineno">  161 </span><span class="spaces">        </span><span class="istickedoff">, P._cr_tools        = _turn_tools deps</span>
+<span class="lineno">  162 </span><span class="spaces">        </span><span class="istickedoff">, P._cr_toolChoice   = Nothing</span>
+<span class="lineno">  163 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  164 </span><span class="spaces">  </span><span class="istickedoff">sid &lt;- _turn_nextStreamId deps</span>
+<span class="lineno">  165 </span><span class="spaces">  </span><span class="istickedoff">_turn_emit deps (TurnStart sid)</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">responseRef &lt;- Ref.newIORef (Nothing :: Maybe P.CompletionResponse)</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">streamedRef &lt;- Ref.newIORef False</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="istickedoff">-- Mirror Loop's @try@ around the stream so a throwing provider does not</span>
+<span class="lineno">  169 </span><span class="spaces">  </span><span class="istickedoff">-- bring the turn down. The sink, not @_env_channel@, receives framing.</span>
+<span class="lineno">  170 </span><span class="spaces">  </span><span class="istickedoff">streamResult &lt;- E.try @E.SomeException $</span>
+<span class="lineno">  171 </span><span class="spaces">    </span><span class="istickedoff">_turn_stream deps req $ \case</span>
+<span class="lineno">  172 </span><span class="spaces">      </span><span class="istickedoff">P.StreamText t   -&gt; Ref.writeIORef streamedRef True &gt;&gt; _turn_emit deps (TurnChunk sid t)</span>
+<span class="lineno">  173 </span><span class="spaces">      </span><span class="istickedoff">P.StreamWarning _ -&gt; pure <span class="nottickedoff">()</span>      -- non-fatal; logged by prod sink elsewhere</span>
+<span class="lineno">  174 </span><span class="spaces">      </span><span class="istickedoff">P.StreamDone resp -&gt; do</span>
+<span class="lineno">  175 </span><span class="spaces">        </span><span class="istickedoff">Ref.writeIORef responseRef (Just resp)</span>
+<span class="lineno">  176 </span><span class="spaces">        </span><span class="istickedoff">-- Fire the one-shot-style hook on every StreamDone (mirrors the legacy</span>
+<span class="lineno">  177 </span><span class="spaces">        </span><span class="istickedoff">-- the original completion handler StreamDone handler that ran</span>
+<span class="lineno">  178 </span><span class="spaces">        </span><span class="istickedoff">-- @_env_onFirstStreamDone@). Idempotency is the action's responsibility</span>
+<span class="lineno">  179 </span><span class="spaces">        </span><span class="istickedoff">-- — production wires a read-and-clear @fireOnce@ so</span>
+<span class="lineno">  180 </span><span class="spaces">        </span><span class="istickedoff">-- @markBootstrapConsumed@ runs exactly once (pureclaw-8g4).</span>
+<span class="lineno">  181 </span><span class="spaces">        </span><span class="istickedoff">_turn_onStreamDone deps</span>
+<span class="lineno">  182 </span><span class="spaces">      </span><span class="istickedoff">_                 -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">-- Non-streaming providers (e.g. Ollama with @stream = False@) emit only a</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">-- single 'P.StreamDone' carrying the full response and no incremental</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">-- 'P.StreamText', so nothing was relayed as a 'TurnChunk' above. Mirror Loop's</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">-- fallback (Loop.hs: @unless wasStreaming ... _ch_send fullText@) by emitting</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">-- the whole response text as one chunk so it is displayed.</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">streamed &lt;- Ref.readIORef streamedRef</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">mResp0   &lt;- Ref.readIORef responseRef</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="istickedoff">case mResp0 of</span>
+<span class="lineno">  191 </span><span class="spaces">    </span><span class="istickedoff">Just resp | not streamed -&gt;</span>
+<span class="lineno">  192 </span><span class="spaces">      </span><span class="istickedoff">let txt = P.responseText resp</span>
+<span class="lineno">  193 </span><span class="spaces">      </span><span class="istickedoff">in M.unless (T.null (T.strip txt)) $ _turn_emit deps (TurnChunk sid txt)</span>
+<span class="lineno">  194 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  195 </span><span class="spaces">  </span><span class="istickedoff">-- 'TurnEnd' is emitted unconditionally — success, throw, or no-StreamDone —</span>
+<span class="lineno">  196 </span><span class="spaces">  </span><span class="istickedoff">-- so the burst is always closed for the downstream relay.</span>
+<span class="lineno">  197 </span><span class="spaces">  </span><span class="istickedoff">_turn_emit deps (TurnEnd sid)</span>
+<span class="lineno">  198 </span><span class="spaces">  </span><span class="istickedoff">case streamResult of</span>
+<span class="lineno">  199 </span><span class="spaces">    </span><span class="istickedoff">Left _  -&gt; do</span>
+<span class="lineno">  200 </span><span class="spaces">      </span><span class="istickedoff">-- Provider threw: surface a VISIBLE error (mirrors the legacy</span>
+<span class="lineno">  201 </span><span class="spaces">      </span><span class="istickedoff">-- the original completion handler @TemporaryError@), then stop and keep the</span>
+<span class="lineno">  202 </span><span class="spaces">      </span><span class="istickedoff">-- context. Emitted after 'TurnEnd' so it lands as its own message rather</span>
+<span class="lineno">  203 </span><span class="spaces">      </span><span class="istickedoff">-- than as part of the (closed) stream burst (pureclaw-9d0).</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">_turn_emit deps (TurnError sid &quot;Something went wrong. Please try again.&quot;)</span>
+<span class="lineno">  205 </span><span class="spaces">      </span><span class="istickedoff">pure ctx</span>
+<span class="lineno">  206 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff">mResp &lt;- Ref.readIORef responseRef</span>
+<span class="lineno">  208 </span><span class="spaces">      </span><span class="istickedoff">case mResp of</span>
+<span class="lineno">  209 </span><span class="spaces">        </span><span class="istickedoff">Nothing   -&gt; pure ctx        -- no StreamDone captured: stop gracefully</span>
+<span class="lineno">  210 </span><span class="spaces">        </span><span class="istickedoff">Just resp -&gt; handleResponse deps ctx resp</span></span>
+<span class="lineno">  211 </span>
+<span class="lineno">  212 </span>-- | Fold a captured response into the context: append + record the assistant
+<span class="lineno">  213 </span>-- message, then either finish (no tool calls) or run the calls and re-complete
+<span class="lineno">  214 </span>-- (mirrors Loop.hs:251-268).
+<span class="lineno">  215 </span>handleResponse :: TurnDeps -&gt; Context -&gt; P.CompletionResponse -&gt; IO Context
+<span class="lineno">  216 </span><span class="decl"><span class="istickedoff">handleResponse deps ctx resp = do</span>
+<span class="lineno">  217 </span><span class="spaces">  </span><span class="istickedoff">let assistantMsg = P.Message P.Assistant (P._crsp_content resp)</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">ctx'         = Ctx.recordUsage (P._crsp_usage resp)</span>
+<span class="lineno">  219 </span><span class="spaces">                   </span><span class="istickedoff">$ Ctx.addMessage assistantMsg ctx</span>
+<span class="lineno">  220 </span><span class="spaces">      </span><span class="istickedoff">calls        = P.toolUseCalls resp</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">_turn_record deps assistantMsg</span>
+<span class="lineno">  222 </span><span class="spaces">  </span><span class="istickedoff">if null calls</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">then pure ctx'</span>
+<span class="lineno">  224 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  225 </span><span class="spaces">      </span><span class="istickedoff">ctx'' &lt;- M.foldM runOneCall ctx' calls</span>
+<span class="lineno">  226 </span><span class="spaces">      </span><span class="istickedoff">cycleTurn deps ctx''</span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  228 </span><span class="spaces">    </span><span class="istickedoff">runOneCall :: Context -&gt; (ToolCallId, Text, Value) -&gt; IO Context</span>
+<span class="lineno">  229 </span><span class="spaces">    </span><span class="istickedoff">runOneCall c (callId, name, input) = do</span>
+<span class="lineno">  230 </span><span class="spaces">      </span><span class="istickedoff">resultMsg &lt;- _turn_execTool deps callId name <span class="nottickedoff">input</span></span>
+<span class="lineno">  231 </span><span class="spaces">      </span><span class="istickedoff">_turn_record deps resultMsg</span>
+<span class="lineno">  232 </span><span class="spaces">      </span><span class="istickedoff">pure (Ctx.addMessage resultMsg c)</span></span>
+
+</pre>
+</body>
+</html>

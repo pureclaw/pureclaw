@@ -1,0 +1,103 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tabs
+<span class="lineno">    3 </span>-- Description : Thin IORef handle over the pure 'TabList' registry.
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- 'TabRegistry' is the single mutable cell holding the ordered 'TabList'
+<span class="lineno">    6 </span>-- (invariants I1\/I2 — see &quot;PureClaw.Tabs.Types&quot;). All mutation is delegated
+<span class="lineno">    7 </span>-- to the pure operations in that module; this layer only owns the 'IORef'
+<span class="lineno">    8 </span>-- and re-exports the value types for convenience. There is no global state —
+<span class="lineno">    9 </span>-- the registry is constructed explicitly and passed by the caller (Handle
+<span class="lineno">   10 </span>-- pattern).
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>-- See the Tabs-as-View refactor (GitHub #79) for the design context.
+<span class="lineno">   13 </span>module PureClaw.Tabs
+<span class="lineno">   14 </span>  ( -- * Registry handle
+<span class="lineno">   15 </span>    TabRegistry (..)
+<span class="lineno">   16 </span>  , newTabRegistry
+<span class="lineno">   17 </span>  , readTabs
+<span class="lineno">   18 </span>  , overwriteTabs
+<span class="lineno">   19 </span>  , registryAppend
+<span class="lineno">   20 </span>  , registryRemove
+<span class="lineno">   21 </span>  , registryLookupSlot
+<span class="lineno">   22 </span>  , registryLookupRef
+<span class="lineno">   23 </span>  , registrySetStatus
+<span class="lineno">   24 </span>    -- * Re-exports
+<span class="lineno">   25 </span>  , module PureClaw.Tabs.Types
+<span class="lineno">   26 </span>  ) where
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, newIORef, readIORef)
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import PureClaw.Handles.Tab (TabIndex)
+<span class="lineno">   31 </span>import PureClaw.Tabs.Types
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | The mutable tab registry: a single 'IORef' over a pure 'TabList'.
+<span class="lineno">   34 </span>newtype TabRegistry = TabRegistry (IORef TabList)
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>-- | Create an empty registry.
+<span class="lineno">   37 </span>newTabRegistry :: IO TabRegistry
+<span class="lineno">   38 </span><span class="decl"><span class="istickedoff">newTabRegistry = TabRegistry &lt;$&gt; newIORef emptyTabs</span></span>
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | Read the current 'TabList' snapshot.
+<span class="lineno">   41 </span>readTabs :: TabRegistry -&gt; IO TabList
+<span class="lineno">   42 </span><span class="decl"><span class="istickedoff">readTabs (TabRegistry ref) = readIORef ref</span></span>
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>-- | Replace the entire registry contents with @tl@, atomically. Used at boot
+<span class="lineno">   45 </span>-- (WU8) to SEED the live shared registry from the reconciled 'TabList' that
+<span class="lineno">   46 </span>-- 'PureClaw.Tabs.Persist.loadTabs' returns, BEFORE the frontend server or the
+<span class="lineno">   47 </span>-- tabbed loop observe it. The supplied 'TabList' already satisfies the slot
+<span class="lineno">   48 </span>-- invariants (it comes from 'loadTabs'\'s @rebuildTabs@), so this is a direct
+<span class="lineno">   49 </span>-- swap — no per-tab re-append.
+<span class="lineno">   50 </span>overwriteTabs :: TabRegistry -&gt; TabList -&gt; IO ()
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">overwriteTabs (TabRegistry ref) = atomicWriteIORef ref</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Append a tab binding @ref@, atomically. Returns the new slot, or the pure
+<span class="lineno">   54 </span>-- 'TabsError' (dedup\/cap) without mutating on rejection.
+<span class="lineno">   55 </span>registryAppend :: TabRegistry -&gt; TabRef -&gt; IO (Either TabsError TabIndex)
+<span class="lineno">   56 </span><span class="decl"><span class="istickedoff">registryAppend (TabRegistry ref) tabRef =</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' ref $ \tl -&gt;</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">case appendTab tabRef tl of</span>
+<span class="lineno">   59 </span><span class="spaces">      </span><span class="istickedoff">Left err          -&gt; (tl, Left err)</span>
+<span class="lineno">   60 </span><span class="spaces">      </span><span class="istickedoff">Right (slot, tl') -&gt; (tl', Right slot)</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Remove the tab at @slot@ and compact, atomically (no-op if absent).
+<span class="lineno">   63 </span>registryRemove :: TabRegistry -&gt; TabIndex -&gt; IO ()
+<span class="lineno">   64 </span><span class="decl"><span class="istickedoff">registryRemove (TabRegistry ref) slot =</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' ref $ \tl -&gt; (removeSlot slot tl, ())</span></span>
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>-- | Look up the tab currently at @slot@.
+<span class="lineno">   68 </span>registryLookupSlot :: TabRegistry -&gt; TabIndex -&gt; IO (Maybe Tab)
+<span class="lineno">   69 </span><span class="decl"><span class="istickedoff">registryLookupSlot (TabRegistry ref) slot =</span>
+<span class="lineno">   70 </span><span class="spaces">  </span><span class="istickedoff">lookupSlot slot &lt;$&gt; readIORef ref</span></span>
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | Look up the slot currently occupied by @ref@.
+<span class="lineno">   73 </span>registryLookupRef :: TabRegistry -&gt; TabRef -&gt; IO (Maybe TabIndex)
+<span class="lineno">   74 </span><span class="decl"><span class="istickedoff">registryLookupRef (TabRegistry ref) tabRef =</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">lookupRef tabRef &lt;$&gt; readIORef ref</span></span>
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- | Set the status of the tab bound to @ref@, atomically (no-op if absent).
+<span class="lineno">   78 </span>registrySetStatus :: TabRegistry -&gt; TabRef -&gt; TabStatus -&gt; IO ()
+<span class="lineno">   79 </span><span class="decl"><span class="istickedoff">registrySetStatus (TabRegistry ref) tabRef status =</span>
+<span class="lineno">   80 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' ref $ \tl -&gt; (setStatus tabRef status tl, ())</span></span>
+
+</pre>
+</body>
+</html>

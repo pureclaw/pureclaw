@@ -1,0 +1,112 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Internal.FakeClock
+<span class="lineno">    3 </span>-- Description : Deterministic in-process fake clock for tests (WU3).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- A 'FakeClock' is an in-process integer time source measured in
+<span class="lineno">    6 </span>-- milliseconds. It is used by 'PureClaw.Handles.Backend.mkInMemoryBackendHandle'
+<span class="lineno">    7 </span>-- (and, later, by @fakePtyIO@ in WU7) so property tests can advance
+<span class="lineno">    8 </span>-- time without sleeping the test runner.
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- The clock starts at @0@. Callers advance it explicitly with
+<span class="lineno">   11 </span>-- 'advanceFakeClock'; there is no automatic wall-clock progression.
+<span class="lineno">   12 </span>--
+<span class="lineno">   13 </span>-- Listeners registered with 'forkClockListener' are invoked
+<span class="lineno">   14 </span>-- synchronously inside 'advanceFakeClock' with the new time. The
+<span class="lineno">   15 </span>-- returned action unregisters the listener (idempotent).
+<span class="lineno">   16 </span>module PureClaw.Internal.FakeClock
+<span class="lineno">   17 </span>  ( FakeClock
+<span class="lineno">   18 </span>  , newFakeClock
+<span class="lineno">   19 </span>  , currentFakeTime
+<span class="lineno">   20 </span>  , advanceFakeClock
+<span class="lineno">   21 </span>  , forkClockListener
+<span class="lineno">   22 </span>  ) where
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>import Control.Concurrent.STM (atomically)
+<span class="lineno">   25 </span>import Control.Concurrent.STM.TVar
+<span class="lineno">   26 </span>  ( TVar
+<span class="lineno">   27 </span>  , modifyTVar'
+<span class="lineno">   28 </span>  , newTVarIO
+<span class="lineno">   29 </span>  , readTVar
+<span class="lineno">   30 </span>  , readTVarIO
+<span class="lineno">   31 </span>  , writeTVar
+<span class="lineno">   32 </span>  )
+<span class="lineno">   33 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>-- | Internal listener identifier; increments monotonically.
+<span class="lineno">   36 </span>newtype ListenerId = ListenerId Int
+<span class="lineno">   37 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | A deterministic millisecond clock used for tests.
+<span class="lineno">   40 </span>--
+<span class="lineno">   41 </span>-- The constructor is intentionally NOT exported: callers obtain a
+<span class="lineno">   42 </span>-- clock via 'newFakeClock' and observe it via 'currentFakeTime'.
+<span class="lineno">   43 </span>data FakeClock = FakeClock
+<span class="lineno">   44 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fc_nowMs</span></span></span>     :: !(IORef Int)
+<span class="lineno">   45 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fc_listeners</span></span></span> :: !(TVar [(ListenerId, Int -&gt; IO ())])
+<span class="lineno">   46 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fc_nextId</span></span></span>    :: !(IORef Int)
+<span class="lineno">   47 </span>  }
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>-- | Construct a fresh fake clock starting at @0@.
+<span class="lineno">   50 </span>newFakeClock :: IO FakeClock
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">newFakeClock = do</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">nowRef &lt;- newIORef <span class="nottickedoff">0</span></span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="istickedoff">ls     &lt;- newTVarIO <span class="nottickedoff">[]</span></span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">idRef  &lt;- newIORef <span class="nottickedoff">0</span></span>
+<span class="lineno">   55 </span><span class="spaces">  </span><span class="istickedoff">pure FakeClock</span>
+<span class="lineno">   56 </span><span class="spaces">    </span><span class="istickedoff">{ _fc_nowMs     = nowRef</span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">, _fc_listeners = ls</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">, _fc_nextId    = idRef</span>
+<span class="lineno">   59 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>-- | The current fake time in milliseconds since the clock was constructed.
+<span class="lineno">   62 </span>currentFakeTime :: FakeClock -&gt; IO Int
+<span class="lineno">   63 </span><span class="decl"><span class="nottickedoff">currentFakeTime = readIORef . _fc_nowMs</span></span>
+<span class="lineno">   64 </span>
+<span class="lineno">   65 </span>-- | Advance the clock by the given number of milliseconds. Listeners
+<span class="lineno">   66 </span>-- registered via 'forkClockListener' are fired synchronously, in
+<span class="lineno">   67 </span>-- registration order, with the new time.
+<span class="lineno">   68 </span>--
+<span class="lineno">   69 </span>-- Negative deltas are clamped to zero (the clock never goes backwards).
+<span class="lineno">   70 </span>advanceFakeClock :: FakeClock -&gt; Int -&gt; IO ()
+<span class="lineno">   71 </span><span class="decl"><span class="nottickedoff">advanceFakeClock clock deltaMs = do</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="nottickedoff">let delta = max 0 deltaMs</span>
+<span class="lineno">   73 </span><span class="spaces">  </span><span class="nottickedoff">newTime &lt;- atomicModifyIORef' (_fc_nowMs clock) $ \t -&gt;</span>
+<span class="lineno">   74 </span><span class="spaces">    </span><span class="nottickedoff">let t' = t + delta in (t', t')</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="nottickedoff">ls &lt;- readTVarIO (_fc_listeners clock)</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="nottickedoff">mapM_ (\(_, cb) -&gt; cb newTime) ls</span></span>
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | Register a listener; returns an action that unregisters it.
+<span class="lineno">   79 </span>--
+<span class="lineno">   80 </span>-- The unregister action is safe to call more than once (subsequent
+<span class="lineno">   81 </span>-- calls are no-ops).
+<span class="lineno">   82 </span>forkClockListener :: FakeClock -&gt; (Int -&gt; IO ()) -&gt; IO (IO ())
+<span class="lineno">   83 </span><span class="decl"><span class="nottickedoff">forkClockListener clock cb = do</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="nottickedoff">newId &lt;- atomicModifyIORef' (_fc_nextId clock) $ \n -&gt;</span>
+<span class="lineno">   85 </span><span class="spaces">    </span><span class="nottickedoff">let n' = n + 1 in (n', ListenerId n)</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="nottickedoff">atomically $ modifyTVar' (_fc_listeners clock) ((newId, cb) :)</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="nottickedoff">pure $ atomically $ do</span>
+<span class="lineno">   88 </span><span class="spaces">    </span><span class="nottickedoff">cur &lt;- readTVar (_fc_listeners clock)</span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="nottickedoff">writeTVar (_fc_listeners clock) (filter ((/= newId) . fst) cur)</span></span>
+
+</pre>
+</body>
+</html>

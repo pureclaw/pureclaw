@@ -1,0 +1,872 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- == Scope note (post-WU4)
+<span class="lineno">    3 </span>--
+<span class="lineno">    4 </span>-- For NEW code, the canonical shell-quoter lives in
+<span class="lineno">    5 </span>-- 'PureClaw.Internal.ShellQuote'. The local re-exports
+<span class="lineno">    6 </span>-- 'shellEscape' / 'shellEscapeStr' here delegate to it. The
+<span class="lineno">    7 </span>-- double-quote variant 'escapeForShell' and the @sh -c@-based
+<span class="lineno">    8 </span>-- 'stealthShellCommand' remain local because they are specific to
+<span class="lineno">    9 </span>-- the existing Claude Code supervision flow; they will retire when
+<span class="lineno">   10 </span>-- the future TmuxRpc work refactors the harness.
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>-- See @docs\/terminal-backend-abstractions.md@
+<span class="lineno">   13 </span>-- § \&quot;Remote arg quoting\&quot; and § \&quot;Scope of Harness.Tmux migration\&quot;.
+<span class="lineno">   14 </span>module PureClaw.Harness.Tmux
+<span class="lineno">   15 </span>  ( -- * tmux availability
+<span class="lineno">   16 </span>    requireTmux
+<span class="lineno">   17 </span>  , findTmux
+<span class="lineno">   18 </span>  , checkTmuxCapabilities
+<span class="lineno">   19 </span>    -- * Session lifecycle
+<span class="lineno">   20 </span>  , startTmuxSession
+<span class="lineno">   21 </span>  , startTmuxSessionStatus
+<span class="lineno">   22 </span>  , TmuxSessionStatus (..)
+<span class="lineno">   23 </span>  , stopTmuxSession
+<span class="lineno">   24 </span>  , listTmuxSessions
+<span class="lineno">   25 </span>    -- * Window management (index-based, legacy)
+<span class="lineno">   26 </span>  , listSessionWindows
+<span class="lineno">   27 </span>    -- * Window management (name-based, WU1)
+<span class="lineno">   28 </span>  , windowTarget
+<span class="lineno">   29 </span>  , addHarnessWindowNamed
+<span class="lineno">   30 </span>  , stopHarnessWindowNamed
+<span class="lineno">   31 </span>  , renameWindowNamed
+<span class="lineno">   32 </span>    -- * Identity markers (WU1)
+<span class="lineno">   33 </span>  , setWindowMarker
+<span class="lineno">   34 </span>  , clearWindowMarker
+<span class="lineno">   35 </span>  , setRemainOnExit
+<span class="lineno">   36 </span>  , readMarkers
+<span class="lineno">   37 </span>  , showWindowOption
+<span class="lineno">   38 </span>  , TmuxWindowRow (..)
+<span class="lineno">   39 </span>  , parseMarkerRows
+<span class="lineno">   40 </span>    -- * PID provenance (WU1)
+<span class="lineno">   41 </span>  , harnessPidOf
+<span class="lineno">   42 </span>  , selectHarnessPid
+<span class="lineno">   43 </span>  , parsePsRows
+<span class="lineno">   44 </span>    -- * Pure output helpers (unit-testable)
+<span class="lineno">   45 </span>  , stripAnsi
+<span class="lineno">   46 </span>  , escapeForShell
+<span class="lineno">   47 </span>    -- * I/O (index-based, legacy)
+<span class="lineno">   48 </span>  , tmuxDisplay
+<span class="lineno">   49 </span>    -- * I/O (name-based, WU1)
+<span class="lineno">   50 </span>  , sendToWindowNamed
+<span class="lineno">   51 </span>  , captureWindowNamed
+<span class="lineno">   52 </span>    -- * Identifier validation (WU6 — C3 input hygiene, defense-in-depth)
+<span class="lineno">   53 </span>  , validateTmuxIdent
+<span class="lineno">   54 </span>    -- * Pure argv builders (WU1, unit-testable)
+<span class="lineno">   55 </span>  , sendKeysNamedArgs
+<span class="lineno">   56 </span>  , sendEnterNamedArgs
+<span class="lineno">   57 </span>  , pasteBufferNamedArgs
+<span class="lineno">   58 </span>  , captureNamedArgs
+<span class="lineno">   59 </span>  , killWindowNamedArgs
+<span class="lineno">   60 </span>  , renameWindowNamedArgs
+<span class="lineno">   61 </span>  , newWindowNamedArgs
+<span class="lineno">   62 </span>  , setWindowMarkerArgs
+<span class="lineno">   63 </span>  , clearWindowMarkerArgs
+<span class="lineno">   64 </span>  , setRemainOnExitArgs
+<span class="lineno">   65 </span>    -- * Stealth mode
+<span class="lineno">   66 </span>  , stealthShellCommand
+<span class="lineno">   67 </span>    -- * Shell quoting (delegates to 'PureClaw.Internal.ShellQuote')
+<span class="lineno">   68 </span>  , shellEscape
+<span class="lineno">   69 </span>  , shellEscapeStr
+<span class="lineno">   70 </span>    -- * tmux authorization seam (WU3 — sole chokepoint for tmux subprocesses)
+<span class="lineno">   71 </span>  , tmuxProc
+<span class="lineno">   72 </span>  ) where
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>import Data.ByteString (ByteString)
+<span class="lineno">   75 </span>import Data.ByteString.Char8 qualified as BC
+<span class="lineno">   76 </span>import Data.Char qualified as Char
+<span class="lineno">   77 </span>import Data.ByteString.Lazy qualified as LBS
+<span class="lineno">   78 </span>import Data.Set (Set)
+<span class="lineno">   79 </span>import Data.Set qualified as Set
+<span class="lineno">   80 </span>import Data.Text (Text)
+<span class="lineno">   81 </span>import Data.Text qualified as T
+<span class="lineno">   82 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   83 </span>import System.Directory qualified as Dir
+<span class="lineno">   84 </span>import System.Exit
+<span class="lineno">   85 </span>import System.IO qualified as IO
+<span class="lineno">   86 </span>import System.Info qualified as Info
+<span class="lineno">   87 </span>import System.IO.Temp qualified as Temp
+<span class="lineno">   88 </span>import System.Process.Typed qualified as P
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>import PureClaw.Handles.Harness
+<span class="lineno">   91 </span>import PureClaw.Internal.ShellQuote qualified as ShellQuote
+<span class="lineno">   92 </span>import PureClaw.Security.Command qualified as Command
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>-- | The SOLE chokepoint for constructing a tmux subprocess. Every tmux
+<span class="lineno">   95 </span>-- invocation in PureClaw builds its 'P.ProcessConfig' from an
+<span class="lineno">   96 </span>-- 'Command.AuthorizedCommand' obtained via 'Command.authorizeTmuxCommand'
+<span class="lineno">   97 </span>-- (the manager-owned tmux seam, §8 B1). After this helper has produced the
+<span class="lineno">   98 </span>-- base config, callers apply the appropriate @setStdin@\/@setStdout@\/
+<span class="lineno">   99 </span>-- @setStderr@ wrappers.
+<span class="lineno">  100 </span>--
+<span class="lineno">  101 </span>-- Because 'Command.AuthorizedCommand' has an un-exported value constructor and
+<span class="lineno">  102 </span>-- 'Command.authorizeTmuxCommand' is the only tmux path to one, routing every
+<span class="lineno">  103 </span>-- @tmux@ @P.proc@ through here makes an un-authorized tmux call impossible by
+<span class="lineno">  104 </span>-- construction. Bare @P.proc tmuxBin@ must appear nowhere else.
+<span class="lineno">  105 </span>--
+<span class="lineno">  106 </span>-- TODO(harness-registry phase 2): audit-log tmux seam invocations once a
+<span class="lineno">  107 </span>-- 'LogHandle' is threaded to the call sites (would change exported signatures,
+<span class="lineno">  108 </span>-- out of scope for this additive refactor — see 'Command.authorizeTmuxCommand').
+<span class="lineno">  109 </span>tmuxProc :: Command.AuthorizedCommand -&gt; P.ProcessConfig () () ()
+<span class="lineno">  110 </span><span class="decl"><span class="istickedoff">tmuxProc ac =</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff">P.proc (Command.getCommandProgram ac) (map T.unpack (Command.getCommandArgs ac))</span></span>
+<span class="lineno">  112 </span>
+<span class="lineno">  113 </span>-- | Resolve the absolute path to the tmux binary.
+<span class="lineno">  114 </span>-- First checks PATH via 'findExecutable', then tries common system locations.
+<span class="lineno">  115 </span>findTmux :: IO (Maybe FilePath)
+<span class="lineno">  116 </span><span class="decl"><span class="istickedoff">findTmux = do</span>
+<span class="lineno">  117 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- Dir.findExecutable &quot;tmux&quot;</span>
+<span class="lineno">  118 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  119 </span><span class="spaces">    </span><span class="istickedoff">Just p  -&gt; pure (Just p)</span>
+<span class="lineno">  120 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">findFirstExisting fallbackPaths</span></span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  122 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">fallbackPaths =</span></span>
+<span class="lineno">  123 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">[ &quot;/opt/homebrew/bin/tmux&quot;</span></span>
+<span class="lineno">  124 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">, &quot;/usr/local/bin/tmux&quot;</span></span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">, &quot;/usr/bin/tmux&quot;</span></span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  127 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">findFirstExisting [] = pure Nothing</span></span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">findFirstExisting (p : ps) = do</span></span>
+<span class="lineno">  129 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">exists &lt;- Dir.doesFileExist p</span></span>
+<span class="lineno">  130 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">if exists then pure (Just p) else findFirstExisting ps</span></span></span>
+<span class="lineno">  131 </span>
+<span class="lineno">  132 </span>-- | Check if tmux is available on PATH.
+<span class="lineno">  133 </span>requireTmux :: IO (Either HarnessError ())
+<span class="lineno">  134 </span><span class="decl"><span class="istickedoff">requireTmux = do</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  136 </span><span class="spaces">  </span><span class="istickedoff">pure $ case mPath of</span>
+<span class="lineno">  137 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">Left (HarnessTmuxNotAvailable &quot;tmux not found on PATH or fallback locations&quot;)</span></span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">Just _  -&gt; Right ()</span></span>
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Run a tmux command, capturing stderr for diagnostics.
+<span class="lineno">  141 </span>-- Returns the exit code and stderr output.
+<span class="lineno">  142 </span>runTmux :: [String] -&gt; IO (ExitCode, ByteString)
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">runTmux args = do</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  146 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure (ExitFailure 127, &quot;tmux not found&quot;)</span></span>
+<span class="lineno">  147 </span><span class="spaces">    </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  148 </span><span class="spaces">      </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  149 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStdout P.nullStream</span>
+<span class="lineno">  150 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStderr P.byteStringOutput</span>
+<span class="lineno">  151 </span><span class="spaces">                 </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin (map T.pack args))</span>
+<span class="lineno">  152 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, _stdout, stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  153 </span><span class="spaces">      </span><span class="istickedoff">pure (exitCode, <span class="nottickedoff">LBS.toStrict stderr</span>)</span></span>
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>-- | Run a tmux command silently. Returns just the exit code.
+<span class="lineno">  156 </span>runTmuxSilent :: [String] -&gt; IO ExitCode
+<span class="lineno">  157 </span><span class="decl"><span class="istickedoff">runTmuxSilent args = fst &lt;$&gt; runTmux args</span></span>
+<span class="lineno">  158 </span>
+<span class="lineno">  159 </span>-- | Build a stealth shell command string for launching a binary in tmux.
+<span class="lineno">  160 </span>-- Strips TMUX env vars and wraps with script(1) for a fresh PTY.
+<span class="lineno">  161 </span>--
+<span class="lineno">  162 </span>-- macOS: @script -q \/dev\/null command args...@
+<span class="lineno">  163 </span>-- Linux: @script -qc \&quot;command args...\&quot; \/dev\/null@
+<span class="lineno">  164 </span>stealthShellCommand :: FilePath -&gt; [Text] -&gt; String
+<span class="lineno">  165 </span><span class="decl"><span class="istickedoff">stealthShellCommand binary args =</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">let argStr = unwords (map (T.unpack . shellEscape) args)</span>
+<span class="lineno">  167 </span><span class="spaces">      </span><span class="istickedoff">fullCmd = binary &lt;&gt; if null args then &quot;&quot; else &quot; &quot; &lt;&gt; argStr</span>
+<span class="lineno">  168 </span><span class="spaces">      </span><span class="istickedoff">scriptWrapped</span>
+<span class="lineno">  169 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">Info.os == &quot;darwin&quot;</span> =</span>
+<span class="lineno">  170 </span><span class="spaces">            </span><span class="istickedoff">&quot;script -q /dev/null &quot; &lt;&gt; fullCmd</span>
+<span class="lineno">  171 </span><span class="spaces">        </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> =</span>
+<span class="lineno">  172 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;script -qc \&quot;&quot; &lt;&gt; escapeForShell fullCmd &lt;&gt; &quot;\&quot; /dev/null&quot;</span></span>
+<span class="lineno">  173 </span><span class="spaces">  </span><span class="istickedoff">in &quot;env -u TMUX -u TMUX_PANE TERM=xterm-256color &quot; &lt;&gt; scriptWrapped</span></span>
+<span class="lineno">  174 </span>
+<span class="lineno">  175 </span>-- | Escape a string for embedding inside double quotes in a shell command.
+<span class="lineno">  176 </span>escapeForShell :: String -&gt; String
+<span class="lineno">  177 </span><span class="decl"><span class="istickedoff">escapeForShell = concatMap go</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  179 </span><span class="spaces">    </span><span class="istickedoff">go '&quot;'  = &quot;\\\&quot;&quot;</span>
+<span class="lineno">  180 </span><span class="spaces">    </span><span class="istickedoff">go '\\' = &quot;\\\\&quot;</span>
+<span class="lineno">  181 </span><span class="spaces">    </span><span class="istickedoff">go '$'  = &quot;\\$&quot;</span>
+<span class="lineno">  182 </span><span class="spaces">    </span><span class="istickedoff">go '`'  = &quot;\\`&quot;</span>
+<span class="lineno">  183 </span><span class="spaces">    </span><span class="istickedoff">go c    = [c]</span></span>
+<span class="lineno">  184 </span>
+<span class="lineno">  185 </span>-- | Shell-escape a 'String' argument. Delegates to the canonical
+<span class="lineno">  186 </span>-- quoter 'PureClaw.Internal.ShellQuote.shellQuoteString'; new code
+<span class="lineno">  187 </span>-- should call that module directly.
+<span class="lineno">  188 </span>shellEscapeStr :: String -&gt; String
+<span class="lineno">  189 </span><span class="decl"><span class="istickedoff">shellEscapeStr = ShellQuote.shellQuoteString</span></span>
+<span class="lineno">  190 </span>
+<span class="lineno">  191 </span>-- | Single-quote-wrap a 'Text' for inclusion as a shell argument.
+<span class="lineno">  192 </span>-- Delegates to the canonical quoter
+<span class="lineno">  193 </span>-- 'PureClaw.Internal.ShellQuote.shellQuote'; new code should call
+<span class="lineno">  194 </span>-- that module directly.
+<span class="lineno">  195 </span>shellEscape :: Text -&gt; Text
+<span class="lineno">  196 </span><span class="decl"><span class="istickedoff">shellEscape = ShellQuote.shellQuote</span></span>
+<span class="lineno">  197 </span>
+<span class="lineno">  198 </span>-- | Start a tmux session with the given name if not already running.
+<span class="lineno">  199 </span>-- Creates a detached session with 300x100 dimensions.
+<span class="lineno">  200 </span>startTmuxSession :: Text -&gt; IO (Either HarnessError ())
+<span class="lineno">  201 </span><span class="decl"><span class="istickedoff">startTmuxSession sessionName = do</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="istickedoff">tmuxCheck &lt;- requireTmux</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">case tmuxCheck of</span>
+<span class="lineno">  204 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  205 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  206 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- sessionExists sessionName</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="istickedoff">if exists</span>
+<span class="lineno">  208 </span><span class="spaces">        </span><span class="istickedoff">then pure (Right <span class="nottickedoff">()</span>)</span>
+<span class="lineno">  209 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  210 </span><span class="spaces">          </span><span class="istickedoff">(exitCode, stderr) &lt;- runTmux</span>
+<span class="lineno">  211 </span><span class="spaces">            </span><span class="istickedoff">[ &quot;new-session&quot;, &quot;-d&quot;</span>
+<span class="lineno">  212 </span><span class="spaces">            </span><span class="istickedoff">, &quot;-s&quot;, T.unpack sessionName</span>
+<span class="lineno">  213 </span><span class="spaces">            </span><span class="istickedoff">, &quot;-x&quot;, &quot;300&quot;</span>
+<span class="lineno">  214 </span><span class="spaces">            </span><span class="istickedoff">, &quot;-y&quot;, &quot;100&quot;</span>
+<span class="lineno">  215 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">  216 </span><span class="spaces">          </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  217 </span><span class="spaces">            </span><span class="istickedoff">ExitSuccess   -&gt; pure (Right <span class="nottickedoff">()</span>)</span>
+<span class="lineno">  218 </span><span class="spaces">            </span><span class="istickedoff">ExitFailure c -&gt; <span class="nottickedoff">pure (Left (HarnessTmuxNotAvailable</span></span>
+<span class="lineno">  219 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(&quot;tmux new-session failed (exit &quot; &lt;&gt; T.pack (show c) &lt;&gt; &quot;): &quot;</span></span>
+<span class="lineno">  220 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; TE.decodeUtf8Lenient stderr)))</span></span></span>
+<span class="lineno">  221 </span>
+<span class="lineno">  222 </span>-- | Check if a tmux session with the given name exists.
+<span class="lineno">  223 </span>sessionExists :: Text -&gt; IO Bool
+<span class="lineno">  224 </span><span class="decl"><span class="istickedoff">sessionExists sessionName = do</span>
+<span class="lineno">  225 </span><span class="spaces">  </span><span class="istickedoff">exitCode &lt;- runTmuxSilent [&quot;has-session&quot;, &quot;-t&quot;, T.unpack sessionName]</span>
+<span class="lineno">  226 </span><span class="spaces">  </span><span class="istickedoff">pure (exitCode == ExitSuccess)</span></span>
+<span class="lineno">  227 </span>
+<span class="lineno">  228 </span>-- | Strip ANSI escape sequences from a ByteString.
+<span class="lineno">  229 </span>-- Matches ESC [ ... (letter or @) sequences.
+<span class="lineno">  230 </span>stripAnsi :: ByteString -&gt; ByteString
+<span class="lineno">  231 </span><span class="decl"><span class="istickedoff">stripAnsi = go</span>
+<span class="lineno">  232 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  233 </span><span class="spaces">    </span><span class="istickedoff">go input</span>
+<span class="lineno">  234 </span><span class="spaces">      </span><span class="istickedoff">| BC.null input = BC.empty</span>
+<span class="lineno">  235 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  236 </span><span class="spaces">          </span><span class="istickedoff">let (before, rest) = BC.break (== '\ESC') input</span>
+<span class="lineno">  237 </span><span class="spaces">          </span><span class="istickedoff">in if BC.null rest</span>
+<span class="lineno">  238 </span><span class="spaces">             </span><span class="istickedoff">then before</span>
+<span class="lineno">  239 </span><span class="spaces">             </span><span class="istickedoff">else before &lt;&gt; skipEsc (BC.drop 1 rest)</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">skipEsc input</span>
+<span class="lineno">  241 </span><span class="spaces">      </span><span class="istickedoff">| BC.null input = BC.empty</span>
+<span class="lineno">  242 </span><span class="spaces">      </span><span class="istickedoff">| BC.head input == '[' = skipCsi (BC.drop 1 input)</span>
+<span class="lineno">  243 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = go (BC.drop 1 input)</span>
+<span class="lineno">  244 </span><span class="spaces">    </span><span class="istickedoff">skipCsi input</span>
+<span class="lineno">  245 </span><span class="spaces">      </span><span class="istickedoff">| BC.null input = BC.empty</span>
+<span class="lineno">  246 </span><span class="spaces">      </span><span class="istickedoff">| let c = BC.head input</span>
+<span class="lineno">  247 </span><span class="spaces">      </span><span class="istickedoff">, c &gt;= '@' &amp;&amp; c &lt;= '~' = go (BC.drop 1 input)</span>
+<span class="lineno">  248 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = skipCsi (BC.drop 1 input)</span></span>
+<span class="lineno">  249 </span>
+<span class="lineno">  250 </span>-- | Display text in a harness window (for tee-style mirroring).
+<span class="lineno">  251 </span>-- Uses send-keys to echo the text.
+<span class="lineno">  252 </span>tmuxDisplay :: Text -&gt; ByteString -&gt; IO ()
+<span class="lineno">  253 </span><span class="decl"><span class="istickedoff">tmuxDisplay sessionName content = do</span>
+<span class="lineno">  254 </span><span class="spaces">  </span><span class="istickedoff">let target = T.unpack sessionName</span>
+<span class="lineno">  255 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- runTmuxSilent [&quot;send-keys&quot;, &quot;-t&quot;, target, BC.unpack content, &quot;&quot;]</span>
+<span class="lineno">  256 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  257 </span>
+<span class="lineno">  258 </span>-- | Kill the entire tmux session. Idempotent -- does not fail if session
+<span class="lineno">  259 </span>-- does not exist.
+<span class="lineno">  260 </span>stopTmuxSession :: Text -&gt; IO ()
+<span class="lineno">  261 </span><span class="decl"><span class="istickedoff">stopTmuxSession sessionName = do</span>
+<span class="lineno">  262 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- runTmuxSilent [&quot;kill-session&quot;, &quot;-t&quot;, T.unpack sessionName]</span>
+<span class="lineno">  263 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  264 </span>
+<span class="lineno">  265 </span>-- | List all windows in a tmux session, returning @(windowIndex, windowName)@ pairs.
+<span class="lineno">  266 </span>-- Returns an empty list if the session does not exist or tmux is unavailable.
+<span class="lineno">  267 </span>listSessionWindows :: Text -&gt; IO [(Int, Text)]
+<span class="lineno">  268 </span><span class="decl"><span class="istickedoff">listSessionWindows sessionName = do</span>
+<span class="lineno">  269 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  271 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  272 </span><span class="spaces">    </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  273 </span><span class="spaces">      </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  274 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  275 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  276 </span><span class="spaces">                 </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  277 </span><span class="spaces">                     </span><span class="istickedoff">[ &quot;list-windows&quot;, &quot;-t&quot;, sessionName</span>
+<span class="lineno">  278 </span><span class="spaces">                     </span><span class="istickedoff">, &quot;-F&quot;, &quot;#{window_index}\t#{window_name}&quot;</span>
+<span class="lineno">  279 </span><span class="spaces">                     </span><span class="istickedoff">])</span>
+<span class="lineno">  280 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  281 </span><span class="spaces">      </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  282 </span><span class="spaces">        </span><span class="istickedoff">ExitFailure _ -&gt; pure []</span>
+<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">ExitSuccess   -&gt; pure (parseListing (LBS.toStrict stdout))</span>
+<span class="lineno">  284 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  285 </span><span class="spaces">    </span><span class="istickedoff">parseListing bs =</span>
+<span class="lineno">  286 </span><span class="spaces">      </span><span class="istickedoff">[ (idx, name)</span>
+<span class="lineno">  287 </span><span class="spaces">      </span><span class="istickedoff">| line &lt;- BC.lines bs</span>
+<span class="lineno">  288 </span><span class="spaces">      </span><span class="istickedoff">, let txt = TE.decodeUtf8Lenient line</span>
+<span class="lineno">  289 </span><span class="spaces">      </span><span class="istickedoff">, (idxStr, rest) &lt;- [T.break (== '\t') txt]</span>
+<span class="lineno">  290 </span><span class="spaces">      </span><span class="istickedoff">, <span class="tickonlytrue">not (T.null rest)</span></span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">, let name = T.drop 1 rest  -- drop the tab</span>
+<span class="lineno">  292 </span><span class="spaces">      </span><span class="istickedoff">, Just idx &lt;- [readIndex idxStr]</span>
+<span class="lineno">  293 </span><span class="spaces">      </span><span class="istickedoff">]</span>
+<span class="lineno">  294 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  295 </span><span class="spaces">    </span><span class="istickedoff">readIndex t = case reads (T.unpack t) of</span>
+<span class="lineno">  296 </span><span class="spaces">      </span><span class="istickedoff">[(n, &quot;&quot;)] -&gt; Just n</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">_         -&gt; <span class="nottickedoff">Nothing</span></span></span>
+<span class="lineno">  298 </span>
+<span class="lineno">  299 </span>-- ============================================================================
+<span class="lineno">  300 </span>-- WU1: name-based targeting, identity markers, PID provenance, capability check
+<span class="lineno">  301 </span>--
+<span class="lineno">  302 </span>-- These functions are ADDITIVE (orchestrator decision D-ADD-1): the existing
+<span class="lineno">  303 </span>-- index-based functions above are kept unchanged until later work units migrate
+<span class="lineno">  304 </span>-- their callers. New code should prefer the name-based variants — a tmux window
+<span class="lineno">  305 </span>-- name (anchored to a durable @pcl_id marker) is a stabler target than a
+<span class="lineno">  306 </span>-- mutable window index.
+<span class="lineno">  307 </span>-- ============================================================================
+<span class="lineno">  308 </span>
+<span class="lineno">  309 </span>-- | Render a tmux target string @\&lt;session\&gt;:\&lt;windowName\&gt;@.
+<span class="lineno">  310 </span>--
+<span class="lineno">  311 </span>-- This is the name-based analogue of the @session:index@ targets the legacy
+<span class="lineno">  312 </span>-- index-based functions build. Pure; the single source of truth for how the
+<span class="lineno">  313 </span>-- name-based ops below address a window.
+<span class="lineno">  314 </span>windowTarget :: Text -&gt; Text -&gt; String
+<span class="lineno">  315 </span><span class="decl"><span class="istickedoff">windowTarget sessionName windowName =</span>
+<span class="lineno">  316 </span><span class="spaces">  </span><span class="istickedoff">T.unpack sessionName &lt;&gt; &quot;:&quot; &lt;&gt; T.unpack windowName</span></span>
+<span class="lineno">  317 </span>
+<span class="lineno">  318 </span>-- | Validate a tmux session\/window identifier (C3 input hygiene, §8 C3,
+<span class="lineno">  319 </span>-- defense-in-depth).
+<span class="lineno">  320 </span>--
+<span class="lineno">  321 </span>-- The PRIMARY injection defense is argv-style 'P.proc' (via the
+<span class="lineno">  322 </span>-- 'tmuxProc'\/'Command.authorizeTmuxCommand' seam): every identifier is passed
+<span class="lineno">  323 </span>-- as a DISTINCT argv element, so it can never be re-tokenized into extra tmux
+<span class="lineno">  324 </span>-- arguments. 'validateTmuxIdent' is a second layer that rejects identifiers
+<span class="lineno">  325 </span>-- which — even as a single argv element — tmux could misread:
+<span class="lineno">  326 </span>--
+<span class="lineno">  327 </span>--   * a leading @-@ (would be parsed as an OPTION by @set-option@\/@send-keys@
+<span class="lineno">  328 </span>--     @-t &lt;name&gt;@ etc. — the @\@pcl_id@ marker path is the chief concern when a
+<span class="lineno">  329 </span>--     name is derived from an adopted\/discovered external window);
+<span class="lineno">  330 </span>--   * an empty identifier (no window\/session to target);
+<span class="lineno">  331 </span>--   * a NUL or any control character (newline\/tab corrupts the @-F@ sweep
+<span class="lineno">  332 </span>--     parsing and is never a legitimate harness name);
+<span class="lineno">  333 </span>--   * a @:@ (the 'windowTarget' @session:window@ separator — a @:@ inside a
+<span class="lineno">  334 </span>--     single component would let it spill into the next).
+<span class="lineno">  335 </span>--
+<span class="lineno">  336 </span>-- Total and pure. Valid harness names (e.g. @claude-code-0@, @pureclaw@, a bare
+<span class="lineno">  337 </span>-- index like @0@) pass.
+<span class="lineno">  338 </span>validateTmuxIdent :: Text -&gt; Bool
+<span class="lineno">  339 </span><span class="decl"><span class="istickedoff">validateTmuxIdent ident =</span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="istickedoff">not (T.null ident)</span>
+<span class="lineno">  341 </span><span class="spaces">    </span><span class="istickedoff">&amp;&amp; T.head ident /= '-'</span>
+<span class="lineno">  342 </span><span class="spaces">    </span><span class="istickedoff">&amp;&amp; T.all ok ident</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  344 </span><span class="spaces">    </span><span class="istickedoff">ok c = c /= ':' &amp;&amp; not (Char.isControl c)</span></span>
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>-- | Parse a non-negative 'Int' from 'Text', returning 'Nothing' on any
+<span class="lineno">  347 </span>-- trailing garbage or empty input.
+<span class="lineno">  348 </span>readIntMaybe :: Text -&gt; Maybe Int
+<span class="lineno">  349 </span><span class="decl"><span class="istickedoff">readIntMaybe t = case reads (T.unpack t) of</span>
+<span class="lineno">  350 </span><span class="spaces">  </span><span class="istickedoff">[(n, &quot;&quot;)] -&gt; Just n</span>
+<span class="lineno">  351 </span><span class="spaces">  </span><span class="istickedoff">_         -&gt; Nothing</span></span>
+<span class="lineno">  352 </span>
+<span class="lineno">  353 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  354 </span>-- Pure argv builders (unit-testable; the IO wrappers call straight through)
+<span class="lineno">  355 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  356 </span>
+<span class="lineno">  357 </span>-- | @send-keys -l --@ argv for a small payload, targeting a window by name.
+<span class="lineno">  358 </span>--
+<span class="lineno">  359 </span>-- C3 input hygiene (§8 C3): the payload is delivered LITERALLY via @-l@ so tmux
+<span class="lineno">  360 </span>-- does NOT interpret it as key tokens (a payload containing @C-c@, @Enter@, @;@,
+<span class="lineno">  361 </span>-- etc. is typed verbatim, never executed as a tmux key/command). The @--@ ends
+<span class="lineno">  362 </span>-- option parsing so a payload that begins with @-@ is never mistaken for a flag.
+<span class="lineno">  363 </span>--
+<span class="lineno">  364 </span>-- This builder does NOT submit the line — 'sendEnterNamedArgs' sends a SEPARATE
+<span class="lineno">  365 </span>-- @Enter@ key. Splitting the literal text from the submit keystroke is what
+<span class="lineno">  366 </span>-- prevents key-token injection while still letting callers actually run a
+<span class="lineno">  367 </span>-- command (literal text, then Enter).
+<span class="lineno">  368 </span>sendKeysNamedArgs :: Text -&gt; Text -&gt; ByteString -&gt; [String]
+<span class="lineno">  369 </span><span class="decl"><span class="istickedoff">sendKeysNamedArgs sessionName windowName input =</span>
+<span class="lineno">  370 </span><span class="spaces">  </span><span class="istickedoff">[&quot;send-keys&quot;, &quot;-t&quot;, windowTarget sessionName windowName, &quot;-l&quot;, &quot;--&quot;, BC.unpack input]</span></span>
+<span class="lineno">  371 </span>
+<span class="lineno">  372 </span>-- | @send-keys ... Enter@ argv — the SEPARATE submit keystroke that follows a
+<span class="lineno">  373 </span>-- 'sendKeysNamedArgs' (or 'pasteBufferNamedArgs') literal payload. Kept distinct
+<span class="lineno">  374 </span>-- from the literal send so injected key tokens in the payload can never be
+<span class="lineno">  375 </span>-- interpreted (C3); the only intentional key tmux sees is this @Enter@.
+<span class="lineno">  376 </span>sendEnterNamedArgs :: Text -&gt; Text -&gt; [String]
+<span class="lineno">  377 </span><span class="decl"><span class="istickedoff">sendEnterNamedArgs sessionName windowName =</span>
+<span class="lineno">  378 </span><span class="spaces">  </span><span class="istickedoff">[&quot;send-keys&quot;, &quot;-t&quot;, windowTarget sessionName windowName, &quot;Enter&quot;]</span></span>
+<span class="lineno">  379 </span>
+<span class="lineno">  380 </span>-- | @paste-buffer@ argv targeting a window by name (large-payload path).
+<span class="lineno">  381 </span>pasteBufferNamedArgs :: Text -&gt; Text -&gt; [String]
+<span class="lineno">  382 </span><span class="decl"><span class="istickedoff">pasteBufferNamedArgs sessionName windowName =</span>
+<span class="lineno">  383 </span><span class="spaces">  </span><span class="istickedoff">[&quot;paste-buffer&quot;, &quot;-t&quot;, windowTarget sessionName windowName]</span></span>
+<span class="lineno">  384 </span>
+<span class="lineno">  385 </span>-- | @capture-pane@ argv targeting a window by name, capturing the last
+<span class="lineno">  386 </span>-- @lineCount@ lines of scrollback as plain text.
+<span class="lineno">  387 </span>captureNamedArgs :: Text -&gt; Text -&gt; Int -&gt; [String]
+<span class="lineno">  388 </span><span class="decl"><span class="istickedoff">captureNamedArgs sessionName windowName lineCount =</span>
+<span class="lineno">  389 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;capture-pane&quot;, &quot;-t&quot;, windowTarget sessionName windowName</span>
+<span class="lineno">  390 </span><span class="spaces">  </span><span class="istickedoff">, &quot;-p&quot;, &quot;-S&quot;, &quot;-&quot; &lt;&gt; show lineCount</span>
+<span class="lineno">  391 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  392 </span>
+<span class="lineno">  393 </span>-- | @kill-window@ argv targeting a window by name.
+<span class="lineno">  394 </span>killWindowNamedArgs :: Text -&gt; Text -&gt; [String]
+<span class="lineno">  395 </span><span class="decl"><span class="istickedoff">killWindowNamedArgs sessionName windowName =</span>
+<span class="lineno">  396 </span><span class="spaces">  </span><span class="istickedoff">[&quot;kill-window&quot;, &quot;-t&quot;, windowTarget sessionName windowName]</span></span>
+<span class="lineno">  397 </span>
+<span class="lineno">  398 </span>-- | @rename-window@ argv: target the window by its current name, rename to the
+<span class="lineno">  399 </span>-- new label.
+<span class="lineno">  400 </span>renameWindowNamedArgs :: Text -&gt; Text -&gt; Text -&gt; [String]
+<span class="lineno">  401 </span><span class="decl"><span class="istickedoff">renameWindowNamedArgs sessionName windowName newLabel =</span>
+<span class="lineno">  402 </span><span class="spaces">  </span><span class="istickedoff">[&quot;rename-window&quot;, &quot;-t&quot;, windowTarget sessionName windowName, T.unpack newLabel]</span></span>
+<span class="lineno">  403 </span>
+<span class="lineno">  404 </span>-- | @new-window@ argv creating a named window in a session, optionally honoring
+<span class="lineno">  405 </span>-- a working directory (@-c@). The command string is run in the new window.
+<span class="lineno">  406 </span>--
+<span class="lineno">  407 </span>-- The target is the SESSION form @\&lt;session\&gt;:@ (trailing colon), NOT the bare
+<span class="lineno">  408 </span>-- session name. @new-window@'s @-t@ is an /insertion-window/ target: a bare
+<span class="lineno">  409 </span>-- name is resolved by tmux as a window-name match in the CURRENT session first,
+<span class="lineno">  410 </span>-- so if the user has a window named e.g. @pureclaw@ in their attached session,
+<span class="lineno">  411 </span>-- @-t pureclaw@ lands on that window's index and tmux fails with
+<span class="lineno">  412 </span>-- @create window failed: index 0 in use@ — the harness window is never created.
+<span class="lineno">  413 </span>-- The trailing colon pins the target to the session named @\&lt;session\&gt;@, so
+<span class="lineno">  414 </span>-- tmux allocates the next free window index there regardless of any same-named
+<span class="lineno">  415 </span>-- windows elsewhere on the server.
+<span class="lineno">  416 </span>newWindowNamedArgs :: Text -&gt; Text -&gt; Maybe FilePath -&gt; String -&gt; [String]
+<span class="lineno">  417 </span><span class="decl"><span class="istickedoff">newWindowNamedArgs sessionName windowName mWorkDir cmd =</span>
+<span class="lineno">  418 </span><span class="spaces">  </span><span class="istickedoff">[&quot;new-window&quot;, &quot;-t&quot;, T.unpack sessionName &lt;&gt; &quot;:&quot;, &quot;-n&quot;, T.unpack windowName]</span>
+<span class="lineno">  419 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; dirArgs</span>
+<span class="lineno">  420 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; [cmd]</span>
+<span class="lineno">  421 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  422 </span><span class="spaces">    </span><span class="istickedoff">dirArgs = case mWorkDir of</span>
+<span class="lineno">  423 </span><span class="spaces">      </span><span class="istickedoff">Just dir -&gt; [&quot;-c&quot;, dir]</span>
+<span class="lineno">  424 </span><span class="spaces">      </span><span class="istickedoff">Nothing  -&gt; []</span></span>
+<span class="lineno">  425 </span>
+<span class="lineno">  426 </span>-- | @set-option -w @pcl_id \&lt;uuid\&gt;@ argv — stamps the durable identity anchor
+<span class="lineno">  427 </span>-- on a window (the re-find hint used by reconcile; see design §3).
+<span class="lineno">  428 </span>setWindowMarkerArgs :: Text -&gt; Text -&gt; Text -&gt; [String]
+<span class="lineno">  429 </span><span class="decl"><span class="istickedoff">setWindowMarkerArgs sessionName windowName uuid =</span>
+<span class="lineno">  430 </span><span class="spaces">  </span><span class="istickedoff">[&quot;set-option&quot;, &quot;-w&quot;, &quot;-t&quot;, windowTarget sessionName windowName, &quot;@pcl_id&quot;, T.unpack uuid]</span></span>
+<span class="lineno">  431 </span>
+<span class="lineno">  432 </span>-- | @set-option -wu @pcl_id@ argv — UNSETS the durable identity anchor on a
+<span class="lineno">  433 </span>-- window (the inverse of 'setWindowMarkerArgs'). Used by Release (Phase 3 WU5)
+<span class="lineno">  434 </span>-- to stop managing an adopted window: it removes PureClaw's @\@pcl_id@ marker
+<span class="lineno">  435 </span>-- WITHOUT killing the window. @-u@ unsets the option, so no value follows.
+<span class="lineno">  436 </span>clearWindowMarkerArgs :: Text -&gt; Text -&gt; [String]
+<span class="lineno">  437 </span><span class="decl"><span class="istickedoff">clearWindowMarkerArgs sessionName windowName =</span>
+<span class="lineno">  438 </span><span class="spaces">  </span><span class="istickedoff">[&quot;set-option&quot;, &quot;-wu&quot;, &quot;-t&quot;, windowTarget sessionName windowName, &quot;@pcl_id&quot;]</span></span>
+<span class="lineno">  439 </span>
+<span class="lineno">  440 </span>-- | @set-option -w remain-on-exit on@ argv — required so a dead harness leaves
+<span class="lineno">  441 </span>-- a @pane_dead@ pane in place (observable as @Exited@) instead of the window
+<span class="lineno">  442 </span>-- vanishing (collapsing into @Orphaned@); see spike §11 E3.
+<span class="lineno">  443 </span>setRemainOnExitArgs :: Text -&gt; Text -&gt; [String]
+<span class="lineno">  444 </span><span class="decl"><span class="istickedoff">setRemainOnExitArgs sessionName windowName =</span>
+<span class="lineno">  445 </span><span class="spaces">  </span><span class="istickedoff">[&quot;set-option&quot;, &quot;-w&quot;, &quot;-t&quot;, windowTarget sessionName windowName, &quot;remain-on-exit&quot;, &quot;on&quot;]</span></span>
+<span class="lineno">  446 </span>
+<span class="lineno">  447 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  448 </span>-- Name-based I/O
+<span class="lineno">  449 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  450 </span>
+<span class="lineno">  451 </span>-- | Send input to a harness window addressed by name.
+<span class="lineno">  452 </span>--
+<span class="lineno">  453 </span>-- C3 input hygiene (§8 C3): small input (&lt;= 256 bytes) is delivered LITERALLY
+<span class="lineno">  454 </span>-- via @send-keys -l --@ (so tmux key tokens in the payload are NOT interpreted),
+<span class="lineno">  455 </span>-- followed by a SEPARATE @Enter@ to submit. Large input uses
+<span class="lineno">  456 </span>-- @load-buffer@ + @paste-buffer@ (already literal) with a separate @Enter@.
+<span class="lineno">  457 </span>--
+<span class="lineno">  458 </span>-- Identifiers are validated (defense-in-depth) before any tmux op: an invalid
+<span class="lineno">  459 </span>-- session\/window name (leading @-@, empty, control char, @:@) is a no-op
+<span class="lineno">  460 </span>-- (fail-closed) since argv targeting could otherwise be misread as options.
+<span class="lineno">  461 </span>sendToWindowNamed :: Text -&gt; Text -&gt; ByteString -&gt; IO ()
+<span class="lineno">  462 </span><span class="decl"><span class="istickedoff">sendToWindowNamed sessionName windowName input</span>
+<span class="lineno">  463 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">not (validateTmuxIdent sessionName &amp;&amp; validateTmuxIdent windowName)</span> = <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  464 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">BC.length input &lt;= 256</span> = do</span>
+<span class="lineno">  465 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- runTmuxSilent (sendKeysNamedArgs sessionName windowName input)</span>
+<span class="lineno">  466 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- runTmuxSilent (sendEnterNamedArgs sessionName windowName)</span>
+<span class="lineno">  467 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  468 </span><span class="spaces">  </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> =</span>
+<span class="lineno">  469 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">Temp.withSystemTempFile &quot;pureclaw-tmux-input&quot; $ \tmpPath tmpHandle -&gt; do</span></span>
+<span class="lineno">  470 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">BC.hPut tmpHandle input</span></span>
+<span class="lineno">  471 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">IO.hClose tmpHandle</span></span>
+<span class="lineno">  472 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- runTmuxSilent [&quot;load-buffer&quot;, tmpPath]</span></span>
+<span class="lineno">  473 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- runTmuxSilent (pasteBufferNamedArgs sessionName windowName)</span></span>
+<span class="lineno">  474 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- runTmuxSilent (sendEnterNamedArgs sessionName windowName)</span></span>
+<span class="lineno">  475 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">pure ()</span></span></span>
+<span class="lineno">  476 </span>
+<span class="lineno">  477 </span>-- | Type a command LINE into a window and run it: send the bytes LITERALLY
+<span class="lineno">  478 </span>-- (@send-keys -l --@) then a SEPARATE @Enter@ to execute (C3 two-step). Used by
+<span class="lineno">  479 </span>-- the launch path ('addHarnessWindowNamed') for the @cd@ and stealth-launch
+<span class="lineno">  480 </span>-- commands, which MUST still execute. Fail-closed on an invalid identifier.
+<span class="lineno">  481 </span>sendLineNamed :: Text -&gt; Text -&gt; ByteString -&gt; IO ()
+<span class="lineno">  482 </span><span class="decl"><span class="istickedoff">sendLineNamed sessionName windowName input</span>
+<span class="lineno">  483 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">not (validateTmuxIdent sessionName &amp;&amp; validateTmuxIdent windowName)</span> = <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">  485 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- runTmuxSilent (sendKeysNamedArgs sessionName windowName input)</span>
+<span class="lineno">  486 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- runTmuxSilent (sendEnterNamedArgs sessionName windowName)</span>
+<span class="lineno">  487 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  488 </span>
+<span class="lineno">  489 </span>-- | Capture output from a harness window addressed by name, stripping ANSI
+<span class="lineno">  490 </span>-- escape sequences.
+<span class="lineno">  491 </span>captureWindowNamed :: Text -&gt; Text -&gt; Int -&gt; IO ByteString
+<span class="lineno">  492 </span><span class="decl"><span class="istickedoff">captureWindowNamed sessionName windowName lineCount = do</span>
+<span class="lineno">  493 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  494 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  495 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure &quot;&quot;</span></span>
+<span class="lineno">  496 </span><span class="spaces">    </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  497 </span><span class="spaces">      </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  498 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  499 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  500 </span><span class="spaces">                 </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  501 </span><span class="spaces">                     </span><span class="istickedoff">(map T.pack (captureNamedArgs sessionName windowName lineCount)))</span>
+<span class="lineno">  502 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  503 </span><span class="spaces">      </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  504 </span><span class="spaces">        </span><span class="istickedoff">ExitSuccess   -&gt; pure (stripAnsi (LBS.toStrict stdout))</span>
+<span class="lineno">  505 </span><span class="spaces">        </span><span class="istickedoff">ExitFailure _ -&gt; <span class="nottickedoff">pure &quot;&quot;</span></span></span>
+<span class="lineno">  506 </span>
+<span class="lineno">  507 </span>-- | Kill a harness window addressed by name. Idempotent.
+<span class="lineno">  508 </span>stopHarnessWindowNamed :: Text -&gt; Text -&gt; IO ()
+<span class="lineno">  509 </span><span class="decl"><span class="nottickedoff">stopHarnessWindowNamed sessionName windowName = do</span>
+<span class="lineno">  510 </span><span class="spaces">  </span><span class="nottickedoff">_ &lt;- runTmuxSilent (killWindowNamedArgs sessionName windowName)</span>
+<span class="lineno">  511 </span><span class="spaces">  </span><span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  512 </span>
+<span class="lineno">  513 </span>-- | Rename a harness window addressed by its current name.
+<span class="lineno">  514 </span>renameWindowNamed :: Text -&gt; Text -&gt; Text -&gt; IO ()
+<span class="lineno">  515 </span><span class="decl"><span class="istickedoff">renameWindowNamed sessionName windowName newLabel = do</span>
+<span class="lineno">  516 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- runTmuxSilent (renameWindowNamedArgs sessionName windowName newLabel)</span>
+<span class="lineno">  517 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  518 </span>
+<span class="lineno">  519 </span>-- | Add a harness window addressed by name, given whether the tmux session was
+<span class="lineno">  520 </span>-- just created by us ('TmuxSessionCreated') or already existed
+<span class="lineno">  521 </span>-- ('TmuxSessionExisted').
+<span class="lineno">  522 </span>--
+<span class="lineno">  523 </span>-- A freshly created session still holds only its default window 0 (a bare
+<span class="lineno">  524 </span>-- shell), so we REUSE it: rename it to @windowName@, @cd@ if asked, then run
+<span class="lineno">  525 </span>-- the command. This keeps the FIRST harness in window 0 instead of stranding an
+<span class="lineno">  526 </span>-- idle shell there and opening the harness in window 1. An existing session
+<span class="lineno">  527 </span>-- already has windows, so we append a new named window.
+<span class="lineno">  528 </span>--
+<span class="lineno">  529 </span>-- The status comes from 'startTmuxSessionStatus' and is authoritative. An
+<span class="lineno">  530 </span>-- earlier version inferred freshness from window 0's NAME (@name == index@),
+<span class="lineno">  531 </span>-- but that never holds under tmux @automatic-rename@ — a new session's window 0
+<span class="lineno">  532 </span>-- is named after its shell (e.g. @zsh@), not @0@ — so the reuse branch was dead
+<span class="lineno">  533 </span>-- and every harness, including the first, landed in a new window.
+<span class="lineno">  534 </span>--
+<span class="lineno">  535 </span>-- Targets and names the window by 'Text' rather than by index.
+<span class="lineno">  536 </span>addHarnessWindowNamed :: TmuxSessionStatus -&gt; Text -&gt; Text -&gt; FilePath -&gt; [Text] -&gt; Maybe FilePath -&gt; IO (Either HarnessError ())
+<span class="lineno">  537 </span><span class="decl"><span class="istickedoff">addHarnessWindowNamed sessionStatus sessionName windowName binary args mWorkDir = do</span>
+<span class="lineno">  538 </span><span class="spaces">  </span><span class="istickedoff">tmuxCheck &lt;- requireTmux</span>
+<span class="lineno">  539 </span><span class="spaces">  </span><span class="istickedoff">case tmuxCheck of</span>
+<span class="lineno">  540 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  541 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  542 </span><span class="spaces">      </span><span class="istickedoff">let stealthCmd = stealthShellCommand binary args</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">case sessionStatus of</span>
+<span class="lineno">  544 </span><span class="spaces">        </span><span class="istickedoff">TmuxSessionCreated -&gt; do</span>
+<span class="lineno">  545 </span><span class="spaces">          </span><span class="istickedoff">-- Reuse the freshly created session's default window 0: name it, then</span>
+<span class="lineno">  546 </span><span class="spaces">          </span><span class="istickedoff">-- run. 'renameWindowNamed' targets @session:0@, which resolves to</span>
+<span class="lineno">  547 </span><span class="spaces">          </span><span class="istickedoff">-- window INDEX 0 (no window is named &quot;0&quot;), so it works regardless of</span>
+<span class="lineno">  548 </span><span class="spaces">          </span><span class="istickedoff">-- the shell-derived default name.</span>
+<span class="lineno">  549 </span><span class="spaces">          </span><span class="istickedoff">renameWindowNamed sessionName &quot;0&quot; windowName</span>
+<span class="lineno">  550 </span><span class="spaces">          </span><span class="istickedoff">case mWorkDir of</span>
+<span class="lineno">  551 </span><span class="spaces">            </span><span class="istickedoff">Just dir -&gt;</span>
+<span class="lineno">  552 </span><span class="spaces">              </span><span class="istickedoff">-- C3: send the `cd` command text LITERALLY, then a SEPARATE Enter</span>
+<span class="lineno">  553 </span><span class="spaces">              </span><span class="istickedoff">-- so it actually executes (the launch path MUST still run).</span>
+<span class="lineno">  554 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">sendLineNamed sessionName windowName (BC.pack (&quot;cd &quot; &lt;&gt; shellEscapeStr dir))</span></span>
+<span class="lineno">  555 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  556 </span><span class="spaces">          </span><span class="istickedoff">-- Same two-step for the stealth-launch command — literal text, then</span>
+<span class="lineno">  557 </span><span class="spaces">          </span><span class="istickedoff">-- Enter to execute it.</span>
+<span class="lineno">  558 </span><span class="spaces">          </span><span class="istickedoff">sendLineNamed sessionName windowName (BC.pack stealthCmd)</span>
+<span class="lineno">  559 </span><span class="spaces">          </span><span class="istickedoff">pure (Right <span class="nottickedoff">()</span>)</span>
+<span class="lineno">  560 </span><span class="spaces">        </span><span class="istickedoff">TmuxSessionExisted -&gt; do</span>
+<span class="lineno">  561 </span><span class="spaces">          </span><span class="istickedoff">(exitCode, stderr) &lt;- runTmux (newWindowNamedArgs sessionName windowName mWorkDir stealthCmd)</span>
+<span class="lineno">  562 </span><span class="spaces">          </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  563 </span><span class="spaces">            </span><span class="istickedoff">ExitSuccess   -&gt; pure (Right <span class="nottickedoff">()</span>)</span>
+<span class="lineno">  564 </span><span class="spaces">            </span><span class="istickedoff">-- Surface the failure rather than swallowing it as success: a</span>
+<span class="lineno">  565 </span><span class="spaces">            </span><span class="istickedoff">-- dropped @new-window@ error previously left the caller believing</span>
+<span class="lineno">  566 </span><span class="spaces">            </span><span class="istickedoff">-- the harness launched (registering a phantom entry the reconciler</span>
+<span class="lineno">  567 </span><span class="spaces">            </span><span class="istickedoff">-- later evicts) while no window or command ever ran. Fail loud so</span>
+<span class="lineno">  568 </span><span class="spaces">            </span><span class="istickedoff">-- the create path reports the real tmux error (everything-visible).</span>
+<span class="lineno">  569 </span><span class="spaces">            </span><span class="istickedoff">ExitFailure c -&gt; pure (Left <span class="nottickedoff">(HarnessTmuxNotAvailable</span></span>
+<span class="lineno">  570 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(&quot;tmux new-window failed (exit &quot; &lt;&gt; T.pack (show c) &lt;&gt; &quot;): &quot;</span></span>
+<span class="lineno">  571 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; TE.decodeUtf8Lenient stderr))</span>)</span></span>
+<span class="lineno">  572 </span>
+<span class="lineno">  573 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  574 </span>-- Identity markers + server sweep
+<span class="lineno">  575 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  576 </span>
+<span class="lineno">  577 </span>-- | One row of a per-window tmux sweep, carrying the fields the registry needs
+<span class="lineno">  578 </span>-- to identify and assess a harness window.
+<span class="lineno">  579 </span>data TmuxWindowRow = TmuxWindowRow
+<span class="lineno">  580 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_twr_windowIndex</span></span></span> :: !Int          -- ^ @#{window_index}@
+<span class="lineno">  581 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_twr_windowName</span></span></span>  :: !Text         -- ^ @#{window_name}@
+<span class="lineno">  582 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_twr_pclId</span></span></span>       :: !Text         -- ^ @#{@pcl_id}@ (empty if unset)
+<span class="lineno">  583 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_twr_panePid</span></span></span>     :: !(Maybe Int)  -- ^ @#{pane_pid}@ (shell PID)
+<span class="lineno">  584 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_twr_paneDead</span></span></span>    :: !Bool         -- ^ @#{pane_dead}@ (True when the pane process has exited)
+<span class="lineno">  585 </span>  }
+<span class="lineno">  586 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  587 </span>
+<span class="lineno">  588 </span>-- | The format string used for the 'readMarkers' sweep. Tab-separated so the
+<span class="lineno">  589 </span>-- parser can split tolerantly (window names may contain spaces but not tabs).
+<span class="lineno">  590 </span>markerFormat :: String
+<span class="lineno">  591 </span><span class="decl"><span class="istickedoff">markerFormat =</span>
+<span class="lineno">  592 </span><span class="spaces">  </span><span class="istickedoff">&quot;#{window_index}\t#{window_name}\t#{@pcl_id}\t#{pane_pid}\t#{pane_dead}&quot;</span></span>
+<span class="lineno">  593 </span>
+<span class="lineno">  594 </span>-- | Set the durable @pcl_id identity marker on a named window.
+<span class="lineno">  595 </span>setWindowMarker :: Text -&gt; Text -&gt; Text -&gt; IO ()
+<span class="lineno">  596 </span><span class="decl"><span class="istickedoff">setWindowMarker sessionName windowName uuid = do</span>
+<span class="lineno">  597 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- runTmuxSilent (setWindowMarkerArgs sessionName windowName uuid)</span>
+<span class="lineno">  598 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  599 </span>
+<span class="lineno">  600 </span>-- | Unset the @\@pcl_id@ identity marker on a named window (Phase 3 WU5,
+<span class="lineno">  601 </span>-- Release). Routes through the same 'tmuxProc'\/'authorizeTmuxCommand' seam as
+<span class="lineno">  602 </span>-- 'setWindowMarker'. NEVER kills the window — it only removes the marker so
+<span class="lineno">  603 </span>-- PureClaw stops claiming the (now-released) adopted window.
+<span class="lineno">  604 </span>clearWindowMarker :: Text -&gt; Text -&gt; IO ()
+<span class="lineno">  605 </span><span class="decl"><span class="nottickedoff">clearWindowMarker sessionName windowName = do</span>
+<span class="lineno">  606 </span><span class="spaces">  </span><span class="nottickedoff">_ &lt;- runTmuxSilent (clearWindowMarkerArgs sessionName windowName)</span>
+<span class="lineno">  607 </span><span class="spaces">  </span><span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  608 </span>
+<span class="lineno">  609 </span>-- | Enable @remain-on-exit@ on a named window (spike §11 E3).
+<span class="lineno">  610 </span>setRemainOnExit :: Text -&gt; Text -&gt; IO ()
+<span class="lineno">  611 </span><span class="decl"><span class="istickedoff">setRemainOnExit sessionName windowName = do</span>
+<span class="lineno">  612 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- runTmuxSilent (setRemainOnExitArgs sessionName windowName)</span>
+<span class="lineno">  613 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  614 </span>
+<span class="lineno">  615 </span>-- | One server sweep of a session: return per-window rows including the
+<span class="lineno">  616 </span>-- @pcl_id marker, the shell PID, and the pane-dead flag. Returns an empty list
+<span class="lineno">  617 </span>-- if the session does not exist or tmux is unavailable.
+<span class="lineno">  618 </span>readMarkers :: Text -&gt; IO [TmuxWindowRow]
+<span class="lineno">  619 </span><span class="decl"><span class="istickedoff">readMarkers sessionName = do</span>
+<span class="lineno">  620 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  621 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  622 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  623 </span><span class="spaces">    </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  624 </span><span class="spaces">      </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  625 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  626 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  627 </span><span class="spaces">                 </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  628 </span><span class="spaces">                     </span><span class="istickedoff">[ &quot;list-windows&quot;, &quot;-t&quot;, sessionName, &quot;-F&quot;, T.pack markerFormat ])</span>
+<span class="lineno">  629 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  630 </span><span class="spaces">      </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  631 </span><span class="spaces">        </span><span class="istickedoff">ExitFailure _ -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  632 </span><span class="spaces">        </span><span class="istickedoff">ExitSuccess   -&gt; pure (parseMarkerRows (LBS.toStrict stdout))</span></span>
+<span class="lineno">  633 </span>
+<span class="lineno">  634 </span>-- | Parse the tab-separated 'readMarkers' output into 'TmuxWindowRow's.
+<span class="lineno">  635 </span>-- Tolerant: lines with fewer than five fields, or an unparseable window index,
+<span class="lineno">  636 </span>-- are skipped; an unparseable @pane_pid@ yields 'Nothing'; @pane_dead@ is
+<span class="lineno">  637 </span>-- @True@ iff the field is exactly @1@.
+<span class="lineno">  638 </span>parseMarkerRows :: ByteString -&gt; [TmuxWindowRow]
+<span class="lineno">  639 </span><span class="decl"><span class="istickedoff">parseMarkerRows bs =</span>
+<span class="lineno">  640 </span><span class="spaces">  </span><span class="istickedoff">[ TmuxWindowRow</span>
+<span class="lineno">  641 </span><span class="spaces">      </span><span class="istickedoff">{ _twr_windowIndex = idx</span>
+<span class="lineno">  642 </span><span class="spaces">      </span><span class="istickedoff">, _twr_windowName  = name</span>
+<span class="lineno">  643 </span><span class="spaces">      </span><span class="istickedoff">, _twr_pclId       = pclId</span>
+<span class="lineno">  644 </span><span class="spaces">      </span><span class="istickedoff">, _twr_panePid     = readIntMaybe panePidT</span>
+<span class="lineno">  645 </span><span class="spaces">      </span><span class="istickedoff">, _twr_paneDead    = paneDeadT == &quot;1&quot;</span>
+<span class="lineno">  646 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">  647 </span><span class="spaces">  </span><span class="istickedoff">| line &lt;- BC.lines bs</span>
+<span class="lineno">  648 </span><span class="spaces">  </span><span class="istickedoff">, let fields = T.splitOn &quot;\t&quot; (TE.decodeUtf8Lenient line)</span>
+<span class="lineno">  649 </span><span class="spaces">  </span><span class="istickedoff">, (idxT : name : pclId : panePidT : paneDeadT : _) &lt;- [fields]</span>
+<span class="lineno">  650 </span><span class="spaces">  </span><span class="istickedoff">, Just idx &lt;- [readIntMaybe idxT]</span>
+<span class="lineno">  651 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  652 </span>
+<span class="lineno">  653 </span>-- | Read back a single window option value (e.g. @remain-on-exit@) for a named
+<span class="lineno">  654 </span>-- window via @show-options -w -v@. Returns an empty 'Text' on failure.
+<span class="lineno">  655 </span>showWindowOption :: Text -&gt; Text -&gt; Text -&gt; IO Text
+<span class="lineno">  656 </span><span class="decl"><span class="istickedoff">showWindowOption sessionName windowName optName = do</span>
+<span class="lineno">  657 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  658 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  659 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure &quot;&quot;</span></span>
+<span class="lineno">  660 </span><span class="spaces">    </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  661 </span><span class="spaces">      </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  662 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  663 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  664 </span><span class="spaces">                 </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  665 </span><span class="spaces">                     </span><span class="istickedoff">[ &quot;show-options&quot;, &quot;-w&quot;, &quot;-v&quot;</span>
+<span class="lineno">  666 </span><span class="spaces">                     </span><span class="istickedoff">, &quot;-t&quot;, T.pack (windowTarget sessionName windowName)</span>
+<span class="lineno">  667 </span><span class="spaces">                     </span><span class="istickedoff">, optName</span>
+<span class="lineno">  668 </span><span class="spaces">                     </span><span class="istickedoff">])</span>
+<span class="lineno">  669 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  670 </span><span class="spaces">      </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  671 </span><span class="spaces">        </span><span class="istickedoff">ExitSuccess   -&gt; pure (T.strip (TE.decodeUtf8Lenient (LBS.toStrict stdout)))</span>
+<span class="lineno">  672 </span><span class="spaces">        </span><span class="istickedoff">ExitFailure _ -&gt; <span class="nottickedoff">pure &quot;&quot;</span></span></span>
+<span class="lineno">  673 </span>
+<span class="lineno">  674 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  675 </span>-- Session listing + created-vs-existed lifecycle
+<span class="lineno">  676 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  677 </span>
+<span class="lineno">  678 </span>-- | List all tmux session names on the running server. Empty list if tmux is
+<span class="lineno">  679 </span>-- absent or no sessions exist.
+<span class="lineno">  680 </span>listTmuxSessions :: IO [Text]
+<span class="lineno">  681 </span><span class="decl"><span class="istickedoff">listTmuxSessions = do</span>
+<span class="lineno">  682 </span><span class="spaces">  </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  683 </span><span class="spaces">  </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  684 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure []</span></span>
+<span class="lineno">  685 </span><span class="spaces">    </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  686 </span><span class="spaces">      </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  687 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  688 </span><span class="spaces">                 </span><span class="istickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  689 </span><span class="spaces">                 </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  690 </span><span class="spaces">                     </span><span class="istickedoff">[&quot;list-sessions&quot;, &quot;-F&quot;, &quot;#{session_name}&quot;])</span>
+<span class="lineno">  691 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  692 </span><span class="spaces">      </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  693 </span><span class="spaces">        </span><span class="istickedoff">ExitFailure _ -&gt; pure []</span>
+<span class="lineno">  694 </span><span class="spaces">        </span><span class="istickedoff">ExitSuccess   -&gt;</span>
+<span class="lineno">  695 </span><span class="spaces">          </span><span class="istickedoff">pure [ T.strip ln</span>
+<span class="lineno">  696 </span><span class="spaces">               </span><span class="istickedoff">| line &lt;- BC.lines (LBS.toStrict stdout)</span>
+<span class="lineno">  697 </span><span class="spaces">               </span><span class="istickedoff">, let ln = TE.decodeUtf8Lenient line</span>
+<span class="lineno">  698 </span><span class="spaces">               </span><span class="istickedoff">, <span class="tickonlytrue">not (T.null (T.strip ln))</span></span>
+<span class="lineno">  699 </span><span class="spaces">               </span><span class="istickedoff">]</span></span>
+<span class="lineno">  700 </span>
+<span class="lineno">  701 </span>-- | Whether 'startTmuxSessionStatus' created a new session or found an
+<span class="lineno">  702 </span>-- existing one.
+<span class="lineno">  703 </span>data TmuxSessionStatus
+<span class="lineno">  704 </span>  = TmuxSessionCreated
+<span class="lineno">  705 </span>  | TmuxSessionExisted
+<span class="lineno">  706 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  707 </span>
+<span class="lineno">  708 </span>-- | Like 'startTmuxSession', but reports whether the session was newly created
+<span class="lineno">  709 </span>-- or already existed. Does NOT change 'startTmuxSession' (D-ADD-1).
+<span class="lineno">  710 </span>startTmuxSessionStatus :: Text -&gt; IO (Either HarnessError TmuxSessionStatus)
+<span class="lineno">  711 </span><span class="decl"><span class="istickedoff">startTmuxSessionStatus sessionName = do</span>
+<span class="lineno">  712 </span><span class="spaces">  </span><span class="istickedoff">tmuxCheck &lt;- requireTmux</span>
+<span class="lineno">  713 </span><span class="spaces">  </span><span class="istickedoff">case tmuxCheck of</span>
+<span class="lineno">  714 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  715 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  716 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- sessionExists sessionName</span>
+<span class="lineno">  717 </span><span class="spaces">      </span><span class="istickedoff">if exists</span>
+<span class="lineno">  718 </span><span class="spaces">        </span><span class="istickedoff">then pure (Right TmuxSessionExisted)</span>
+<span class="lineno">  719 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  720 </span><span class="spaces">          </span><span class="istickedoff">(exitCode, stderr) &lt;- runTmux</span>
+<span class="lineno">  721 </span><span class="spaces">            </span><span class="istickedoff">[ &quot;new-session&quot;, &quot;-d&quot;</span>
+<span class="lineno">  722 </span><span class="spaces">            </span><span class="istickedoff">, &quot;-s&quot;, T.unpack sessionName</span>
+<span class="lineno">  723 </span><span class="spaces">            </span><span class="istickedoff">, &quot;-x&quot;, &quot;300&quot;</span>
+<span class="lineno">  724 </span><span class="spaces">            </span><span class="istickedoff">, &quot;-y&quot;, &quot;100&quot;</span>
+<span class="lineno">  725 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">  726 </span><span class="spaces">          </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  727 </span><span class="spaces">            </span><span class="istickedoff">ExitSuccess   -&gt; pure (Right TmuxSessionCreated)</span>
+<span class="lineno">  728 </span><span class="spaces">            </span><span class="istickedoff">ExitFailure c -&gt; <span class="nottickedoff">pure (Left (HarnessTmuxNotAvailable</span></span>
+<span class="lineno">  729 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">(&quot;tmux new-session failed (exit &quot; &lt;&gt; T.pack (show c) &lt;&gt; &quot;): &quot;</span></span>
+<span class="lineno">  730 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; TE.decodeUtf8Lenient stderr)))</span></span></span>
+<span class="lineno">  731 </span>
+<span class="lineno">  732 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  733 </span>-- PID provenance
+<span class="lineno">  734 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  735 </span>
+<span class="lineno">  736 </span>-- | Given a pane shell PID and the flavour binary name (the @comm@ to match),
+<span class="lineno">  737 </span>-- find the harness process PID by walking the process subtree rooted at the
+<span class="lineno">  738 </span>-- pane PID and matching @comm@.
+<span class="lineno">  739 </span>--
+<span class="lineno">  740 </span>-- NEVER a global @pgrep@\/@grep@ (spike §11 METHOD: a global match kills
+<span class="lineno">  741 </span>-- unrelated processes). On macOS the wrapper exec-collapses so the binary is a
+<span class="lineno">  742 </span>-- direct child (spike §11 E2); on Linux it may be a grandchild via @sh -c@ —
+<span class="lineno">  743 </span>-- the recursive descent handles both.
+<span class="lineno">  744 </span>--
+<span class="lineno">  745 </span>-- Pure over @(pid, ppid, comm)@ rows; chooses the shallowest matching
+<span class="lineno">  746 </span>-- descendant (BFS) so a direct child wins over a deeper one.
+<span class="lineno">  747 </span>--
+<span class="lineno">  748 </span>-- The @(pid, ppid)@ table is untrusted (parsed from @ps@ output, or in tests
+<span class="lineno">  749 </span>-- from arbitrary fixtures) and may describe a cycle — a self-parent
+<span class="lineno">  750 </span>-- (@pid == ppid@), a mutual cycle, or any longer loop. A visited-set bounds the
+<span class="lineno">  751 </span>-- descent so it is total over arbitrary rows: every PID is enqueued at most
+<span class="lineno">  752 </span>-- once, so the BFS terminates on any cycle and still returns the correct
+<span class="lineno">  753 </span>-- shallowest match (or 'Nothing' when no descendant matches).
+<span class="lineno">  754 </span>selectHarnessPid :: Int -&gt; Text -&gt; [(Int, Int, Text)] -&gt; Maybe Int
+<span class="lineno">  755 </span><span class="decl"><span class="istickedoff">selectHarnessPid paneShellPid flavourComm rows =</span>
+<span class="lineno">  756 </span><span class="spaces">  </span><span class="istickedoff">bfs (Set.singleton paneShellPid) [paneShellPid]</span>
+<span class="lineno">  757 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  758 </span><span class="spaces">    </span><span class="istickedoff">-- BFS over the descendant frontier; at each level prefer a comm match.</span>
+<span class="lineno">  759 </span><span class="spaces">    </span><span class="istickedoff">-- @visited@ accumulates every PID already enqueued so a cyclic table cannot</span>
+<span class="lineno">  760 </span><span class="spaces">    </span><span class="istickedoff">-- re-enqueue a node and loop forever.</span>
+<span class="lineno">  761 </span><span class="spaces">    </span><span class="istickedoff">bfs :: Set Int -&gt; [Int] -&gt; Maybe Int</span>
+<span class="lineno">  762 </span><span class="spaces">    </span><span class="istickedoff">bfs _       []      = Nothing</span>
+<span class="lineno">  763 </span><span class="spaces">    </span><span class="istickedoff">bfs visited parents =</span>
+<span class="lineno">  764 </span><span class="spaces">      </span><span class="istickedoff">let kids = [ (pid, comm) | (pid, ppid, comm) &lt;- rows, ppid `elem` parents ]</span>
+<span class="lineno">  765 </span><span class="spaces">      </span><span class="istickedoff">in case [ pid | (pid, comm) &lt;- kids, comm == flavourComm ] of</span>
+<span class="lineno">  766 </span><span class="spaces">           </span><span class="istickedoff">(p : _) -&gt; Just p</span>
+<span class="lineno">  767 </span><span class="spaces">           </span><span class="istickedoff">[]      -&gt;</span>
+<span class="lineno">  768 </span><span class="spaces">             </span><span class="istickedoff">-- Descend only into children not yet visited; otherwise a cycle</span>
+<span class="lineno">  769 </span><span class="spaces">             </span><span class="istickedoff">-- (a ppid pointing back at an ancestor) would loop forever.</span>
+<span class="lineno">  770 </span><span class="spaces">             </span><span class="istickedoff">let nextPids = filter (`Set.notMember` visited) (map fst kids)</span>
+<span class="lineno">  771 </span><span class="spaces">             </span><span class="istickedoff">in bfs (foldr Set.insert visited nextPids) nextPids</span></span>
+<span class="lineno">  772 </span>
+<span class="lineno">  773 </span>-- | IO wrapper around 'selectHarnessPid': gather @(pid, ppid, comm)@ rows via
+<span class="lineno">  774 </span>-- @ps -axo pid=,ppid=,comm=@ and select the harness PID descending from the
+<span class="lineno">  775 </span>-- pane shell PID. Returns 'Nothing' if @ps@ is unavailable or no match is
+<span class="lineno">  776 </span>-- found.
+<span class="lineno">  777 </span>harnessPidOf :: Int -&gt; Text -&gt; IO (Maybe Int)
+<span class="lineno">  778 </span><span class="decl"><span class="istickedoff">harnessPidOf paneShellPid flavourComm = do</span>
+<span class="lineno">  779 </span><span class="spaces">  </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  780 </span><span class="spaces">             </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  781 </span><span class="spaces">             </span><span class="istickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  782 </span><span class="spaces">             </span><span class="istickedoff">$ P.proc &quot;ps&quot; [&quot;-axo&quot;, &quot;pid=,ppid=,comm=&quot;]</span>
+<span class="lineno">  783 </span><span class="spaces">  </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  784 </span><span class="spaces">  </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  785 </span><span class="spaces">    </span><span class="istickedoff">ExitFailure _ -&gt; <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  786 </span><span class="spaces">    </span><span class="istickedoff">ExitSuccess   -&gt; pure (selectHarnessPid paneShellPid <span class="nottickedoff">flavourComm</span> (parsePsRows (LBS.toStrict stdout)))</span></span>
+<span class="lineno">  787 </span>
+<span class="lineno">  788 </span>-- | Parse @ps -axo pid=,ppid=,comm=@ output into @(pid, ppid, comm)@ rows.
+<span class="lineno">  789 </span>-- Each line is whitespace-separated: pid, ppid, then the command (the basename
+<span class="lineno">  790 </span>-- of the executable path; tmux's @comm@ matching uses the basename).
+<span class="lineno">  791 </span>parsePsRows :: ByteString -&gt; [(Int, Int, Text)]
+<span class="lineno">  792 </span><span class="decl"><span class="istickedoff">parsePsRows bs =</span>
+<span class="lineno">  793 </span><span class="spaces">  </span><span class="istickedoff">[ (pid, ppid, comm)</span>
+<span class="lineno">  794 </span><span class="spaces">  </span><span class="istickedoff">| line &lt;- BC.lines bs</span>
+<span class="lineno">  795 </span><span class="spaces">  </span><span class="istickedoff">, let ws = T.words (TE.decodeUtf8Lenient line)</span>
+<span class="lineno">  796 </span><span class="spaces">  </span><span class="istickedoff">, (pidT : ppidT : rest) &lt;- [ws]</span>
+<span class="lineno">  797 </span><span class="spaces">  </span><span class="istickedoff">, not (null rest)</span>
+<span class="lineno">  798 </span><span class="spaces">  </span><span class="istickedoff">, let comm = lastSegment (T.unwords rest)</span>
+<span class="lineno">  799 </span><span class="spaces">  </span><span class="istickedoff">, Just pid  &lt;- [readIntMaybe pidT]</span>
+<span class="lineno">  800 </span><span class="spaces">  </span><span class="istickedoff">, Just ppid &lt;- [readIntMaybe ppidT]</span>
+<span class="lineno">  801 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  802 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  803 </span><span class="spaces">    </span><span class="istickedoff">-- comm may be a full path on some ps variants; take the basename so it</span>
+<span class="lineno">  804 </span><span class="spaces">    </span><span class="istickedoff">-- matches the flavour binary name (e.g. &quot;claude&quot;).</span>
+<span class="lineno">  805 </span><span class="spaces">    </span><span class="istickedoff">lastSegment = T.takeWhileEnd (/= '/')</span></span>
+<span class="lineno">  806 </span>
+<span class="lineno">  807 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  808 </span>-- Capability check
+<span class="lineno">  809 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  810 </span>
+<span class="lineno">  811 </span>-- | Confirm the running tmux supports the formats the registry depends on:
+<span class="lineno">  812 </span>-- the @pcl_id user-option and the @#{pane_dead}@ format variable. Probes by
+<span class="lineno">  813 </span>-- asking tmux to expand a format string and checking the output is well-formed
+<span class="lineno">  814 </span>-- (tmux leaves an unknown @#{...}@ literal, or errors, when unsupported).
+<span class="lineno">  815 </span>--
+<span class="lineno">  816 </span>-- Returns @Right ()@ when supported; @Left HarnessTmuxNotAvailable@ (with a
+<span class="lineno">  817 </span>-- diagnostic the caller can warn on and then degrade) otherwise.
+<span class="lineno">  818 </span>checkTmuxCapabilities :: IO (Either HarnessError ())
+<span class="lineno">  819 </span><span class="decl"><span class="istickedoff">checkTmuxCapabilities = do</span>
+<span class="lineno">  820 </span><span class="spaces">  </span><span class="istickedoff">tmuxCheck &lt;- requireTmux</span>
+<span class="lineno">  821 </span><span class="spaces">  </span><span class="istickedoff">case tmuxCheck of</span>
+<span class="lineno">  822 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (Left err)</span></span>
+<span class="lineno">  823 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  824 </span><span class="spaces">      </span><span class="istickedoff">mPath &lt;- findTmux</span>
+<span class="lineno">  825 </span><span class="spaces">      </span><span class="istickedoff">case mPath of</span>
+<span class="lineno">  826 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure (Left (HarnessTmuxNotAvailable &quot;tmux not found&quot;))</span></span>
+<span class="lineno">  827 </span><span class="spaces">        </span><span class="istickedoff">Just tmuxBin -&gt; do</span>
+<span class="lineno">  828 </span><span class="spaces">          </span><span class="istickedoff">-- Expand a probe format. A capable tmux substitutes #{pane_dead}</span>
+<span class="lineno">  829 </span><span class="spaces">          </span><span class="istickedoff">-- with 0/1 and #{@pcl_id} with the (empty) marker, yielding a line</span>
+<span class="lineno">  830 </span><span class="spaces">          </span><span class="istickedoff">-- that contains neither a literal &quot;#{&quot; nor &quot;pane_dead&quot;.</span>
+<span class="lineno">  831 </span><span class="spaces">          </span><span class="istickedoff">let config = P.setStdin P.closed</span>
+<span class="lineno">  832 </span><span class="spaces">                     </span><span class="istickedoff">$ P.setStdout P.byteStringOutput</span>
+<span class="lineno">  833 </span><span class="spaces">                     </span><span class="istickedoff">$ P.setStderr P.byteStringOutput</span>
+<span class="lineno">  834 </span><span class="spaces">                     </span><span class="istickedoff">$ tmuxProc (Command.authorizeTmuxCommand tmuxBin</span>
+<span class="lineno">  835 </span><span class="spaces">                         </span><span class="istickedoff">[ &quot;display-message&quot;, &quot;-p&quot;, &quot;PCLCAP:#{pane_dead}:#{@pcl_id}:&quot; ])</span>
+<span class="lineno">  836 </span><span class="spaces">          </span><span class="istickedoff">(exitCode, stdout, _stderr) &lt;- P.readProcess config</span>
+<span class="lineno">  837 </span><span class="spaces">          </span><span class="istickedoff">let out = TE.decodeUtf8Lenient (LBS.toStrict stdout)</span>
+<span class="lineno">  838 </span><span class="spaces">          </span><span class="istickedoff">case exitCode of</span>
+<span class="lineno">  839 </span><span class="spaces">            </span><span class="istickedoff">ExitFailure _ -&gt;</span>
+<span class="lineno">  840 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure (Left (HarnessTmuxNotAvailable</span></span>
+<span class="lineno">  841 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;tmux does not support the required @pcl_id/pane_dead formats&quot;))</span></span>
+<span class="lineno">  842 </span><span class="spaces">            </span><span class="istickedoff">ExitSuccess</span>
+<span class="lineno">  843 </span><span class="spaces">              </span><span class="istickedoff">| <span class="tickonlytrue">&quot;PCLCAP:&quot; `T.isInfixOf` out</span></span>
+<span class="lineno">  844 </span><span class="spaces">              </span><span class="istickedoff">, <span class="tickonlytrue">not (&quot;#{&quot; `T.isInfixOf` out)</span></span>
+<span class="lineno">  845 </span><span class="spaces">              </span><span class="istickedoff">, <span class="tickonlytrue">not (&quot;pane_dead&quot; `T.isInfixOf` out)</span> -&gt;</span>
+<span class="lineno">  846 </span><span class="spaces">                  </span><span class="istickedoff">pure (Right ())</span>
+<span class="lineno">  847 </span><span class="spaces">              </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> -&gt;</span>
+<span class="lineno">  848 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">pure (Left (HarnessTmuxNotAvailable</span></span>
+<span class="lineno">  849 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">&quot;tmux does not support the required @pcl_id/pane_dead formats&quot;))</span></span></span>
+
+</pre>
+</body>
+</html>

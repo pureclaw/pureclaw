@@ -1,0 +1,216 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Frontend.TabsView
+<span class="lineno">    3 </span>-- Description : Pure projection layer for the Active-Tabs list view.
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- This leaf module holds the 'TabSnapshot' type (the JSON-friendly
+<span class="lineno">    6 </span>-- point-in-time view of one tab), its 'ToJSON' instance, the text-mapping
+<span class="lineno">    7 </span>-- helpers that convert registry vocabulary ('Registry.Liveness',
+<span class="lineno">    8 </span>-- 'Registry.HarnessOrigin') to snapshot status strings, and the pure
+<span class="lineno">    9 </span>-- projection function 'tabSnapshotsFromRegistry' that drives the
+<span class="lineno">   10 </span>-- @GET /api/tabs@ response.
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>-- Everything here is /pure/ (no IO). The only callers that do IO are in
+<span class="lineno">   13 </span>-- &quot;PureClaw.Frontend.API&quot; (which reads the 'TabList' and registry into
+<span class="lineno">   14 </span>-- memory, then delegates to this module) and the tests (which inject
+<span class="lineno">   15 </span>-- in-memory lookup functions directly).
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- See the Tabs-as-View refactor (GitHub #79, WU3-FE) for the design context.
+<span class="lineno">   18 </span>module PureClaw.Frontend.TabsView
+<span class="lineno">   19 </span>  ( -- * Snapshot type
+<span class="lineno">   20 </span>    TabSnapshot (..)
+<span class="lineno">   21 </span>    -- * Vocabulary helpers
+<span class="lineno">   22 </span>  , livenessToTabStatus
+<span class="lineno">   23 </span>  , harnessOriginToText
+<span class="lineno">   24 </span>    -- * Pure projection
+<span class="lineno">   25 </span>  , tabSnapshotsFromRegistry
+<span class="lineno">   26 </span>  ) where
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>import Data.Aeson (ToJSON (..), object, (.=))
+<span class="lineno">   29 </span>import Data.Text (Text)
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>import PureClaw.Core.Types (unSessionId)
+<span class="lineno">   32 </span>import PureClaw.Harness.Registry qualified as Registry
+<span class="lineno">   33 </span>import PureClaw.Tabs.Types
+<span class="lineno">   34 </span>  ( Tab (..)
+<span class="lineno">   35 </span>  , TabList
+<span class="lineno">   36 </span>  , TabRef (..)
+<span class="lineno">   37 </span>  , TabStatus (..)
+<span class="lineno">   38 </span>  , toList
+<span class="lineno">   39 </span>  )
+<span class="lineno">   40 </span>import PureClaw.Handles.Tab (unTabIndex)
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   43 </span>-- TabSnapshot
+<span class="lineno">   44 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>-- | A point-in-time snapshot of a single tab, pre-resolved to
+<span class="lineno">   47 </span>-- JSON-friendly text values. The snapshot callback in 'FrontendEnv'
+<span class="lineno">   48 </span>-- produces these; the API layer simply serializes them.
+<span class="lineno">   49 </span>data TabSnapshot = TabSnapshot
+<span class="lineno">   50 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_index</span></span></span>     :: !Int
+<span class="lineno">   51 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_kind</span></span></span>      :: !Text
+<span class="lineno">   52 </span>    -- ^ @\&quot;provider\&quot;@, @\&quot;harness\&quot;@, or @\&quot;raw_shell\&quot;@.
+<span class="lineno">   53 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_label</span></span></span>     :: !(Maybe Text)
+<span class="lineno">   54 </span>    -- ^ Harness label fallback so a harness tab (whose session id can be
+<span class="lineno">   55 </span>    -- 'Nothing') never renders blank. 'Nothing' for session-backed tabs —
+<span class="lineno">   56 </span>    -- their display title derives from the session (via '_ts_sessionId').
+<span class="lineno">   57 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_status</span></span></span>    :: !Text
+<span class="lineno">   58 </span>    -- ^ Liveness word: @\&quot;running\&quot;@, @\&quot;idle\&quot;@, @\&quot;exited\&quot;@, or
+<span class="lineno">   59 </span>    -- @\&quot;orphaned\&quot;@ (Phase 2 split Exited\/Orphaned; see
+<span class="lineno">   60 </span>    -- 'livenessToTabStatus').
+<span class="lineno">   61 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_sessionId</span></span></span> :: !(Maybe Text)
+<span class="lineno">   62 </span>    -- ^ Session ID for session-backed tabs; 'Nothing' for raw shells.
+<span class="lineno">   63 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_extModified</span></span></span> :: !Bool
+<span class="lineno">   64 </span>    -- ^ The harness window was renamed out-of-band (the §7 ⚠ \&quot;edited\&quot;
+<span class="lineno">   65 </span>    -- pill). Orthogonal to liveness.
+<span class="lineno">   66 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_stale</span></span></span> :: !Bool
+<span class="lineno">   67 </span>    -- ^ Health could not be refreshed this cycle; the frontend holds the
+<span class="lineno">   68 </span>    -- last-known icon with a dimmed cue (§7).
+<span class="lineno">   69 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_origin</span></span></span> :: !Text
+<span class="lineno">   70 </span>    -- ^ How the harness entered the registry: @\&quot;spawned\&quot;@,
+<span class="lineno">   71 </span>    -- @\&quot;discovered\&quot;@, or @\&quot;adopted\&quot;@ (the §7 origin pill).
+<span class="lineno">   72 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ts_attachCommand</span></span></span> :: !(Maybe Text)
+<span class="lineno">   73 </span>    -- ^ Copyable @tmux attach@ command for live harness rows;
+<span class="lineno">   74 </span>    -- 'Nothing' for non-harness tabs.
+<span class="lineno">   75 </span>  }
+<span class="lineno">   76 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | Serialize a 'TabSnapshot'. The per-tab @name@ key is GONE — a tab's
+<span class="lineno">   79 </span>-- display title now derives from its bound session (frontend resolves it from
+<span class="lineno">   80 </span>-- @session_id@). Harness tabs keep a @label@ fallback so they never render
+<span class="lineno">   81 </span>-- blank. The Phase-2 health fields (@ext_modified@\/@stale@\/@origin@\/
+<span class="lineno">   82 </span>-- @attach_command@) remain. Consumers that ignore unknown keys keep working.
+<span class="lineno">   83 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">ToJSON TabSnapshot</span></span></span></span></span></span></span></span> where
+<span class="lineno">   84 </span>  <span class="decl"><span class="istickedoff">toJSON ts = object</span>
+<span class="lineno">   85 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;index&quot;          .= _ts_index ts</span>
+<span class="lineno">   86 </span><span class="spaces">    </span><span class="istickedoff">, &quot;kind&quot;           .= _ts_kind ts</span>
+<span class="lineno">   87 </span><span class="spaces">    </span><span class="istickedoff">, &quot;label&quot;          .= _ts_label ts</span>
+<span class="lineno">   88 </span><span class="spaces">    </span><span class="istickedoff">, &quot;status&quot;         .= _ts_status ts</span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="istickedoff">, &quot;session_id&quot;     .= _ts_sessionId ts</span>
+<span class="lineno">   90 </span><span class="spaces">    </span><span class="istickedoff">, &quot;ext_modified&quot;   .= _ts_extModified ts</span>
+<span class="lineno">   91 </span><span class="spaces">    </span><span class="istickedoff">, &quot;stale&quot;          .= _ts_stale ts</span>
+<span class="lineno">   92 </span><span class="spaces">    </span><span class="istickedoff">, &quot;origin&quot;         .= _ts_origin ts</span>
+<span class="lineno">   93 </span><span class="spaces">    </span><span class="istickedoff">, &quot;attach_command&quot; .= _ts_attachCommand ts</span>
+<span class="lineno">   94 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   97 </span>-- Vocabulary helpers
+<span class="lineno">   98 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   99 </span>
+<span class="lineno">  100 </span>-- | Map a registry 'Registry.Liveness' to the @TabSnapshot@ status vocabulary.
+<span class="lineno">  101 </span>-- Phase 2 (§7) SPLITS the former \&quot;crashed\&quot; bucket: 'Registry.LivenessExited'
+<span class="lineno">  102 </span>-- (the process exited; offer Restart\/Dismiss) and 'Registry.LivenessOrphaned'
+<span class="lineno">  103 </span>-- (the window vanished out-of-band; greyed, offer Dismiss) now map to distinct
+<span class="lineno">  104 </span>-- words so the frontend can render the state→visual table.
+<span class="lineno">  105 </span>livenessToTabStatus :: Registry.Liveness -&gt; Text
+<span class="lineno">  106 </span><span class="decl"><span class="istickedoff">livenessToTabStatus lv = case lv of</span>
+<span class="lineno">  107 </span><span class="spaces">  </span><span class="istickedoff">Registry.LivenessIdle          -&gt; &quot;idle&quot;</span>
+<span class="lineno">  108 </span><span class="spaces">  </span><span class="istickedoff">Registry.LivenessThinking      -&gt; &quot;running&quot;</span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff">Registry.LivenessAwaitingInput -&gt; &quot;running&quot;  -- distinct state shown via the activity dot, not the tab badge</span>
+<span class="lineno">  110 </span><span class="spaces">  </span><span class="istickedoff">Registry.LivenessExited        -&gt; &quot;exited&quot;</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff">Registry.LivenessOrphaned      -&gt; &quot;orphaned&quot;</span></span>
+<span class="lineno">  112 </span>
+<span class="lineno">  113 </span>-- | Map a registry 'Registry.HarnessOrigin' to the @TabSnapshot@ origin
+<span class="lineno">  114 </span>-- vocabulary (the §7 origin pill): @\&quot;spawned\&quot;@ (we launched it),
+<span class="lineno">  115 </span>-- @\&quot;discovered\&quot;@ (boot-reconstructed from a tagged window), or
+<span class="lineno">  116 </span>-- @\&quot;adopted\&quot;@ (taken over from another controller).
+<span class="lineno">  117 </span>harnessOriginToText :: Registry.HarnessOrigin -&gt; Text
+<span class="lineno">  118 </span><span class="decl"><span class="istickedoff">harnessOriginToText o = case o of</span>
+<span class="lineno">  119 </span><span class="spaces">  </span><span class="istickedoff">Registry.OriginSpawned    -&gt; &quot;spawned&quot;</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">Registry.OriginDiscovered -&gt; &quot;discovered&quot;</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">Registry.OriginAdopted    -&gt; &quot;adopted&quot;</span></span>
+<span class="lineno">  122 </span>
+<span class="lineno">  123 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  124 </span>-- Pure projection
+<span class="lineno">  125 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  126 </span>
+<span class="lineno">  127 </span>-- | Project the tab registry and the harness-entry lookup into a list of
+<span class="lineno">  128 </span>-- 'TabSnapshot' values, one per tab, in slot order.
+<span class="lineno">  129 </span>--
+<span class="lineno">  130 </span>-- The lookup argument is injected so this function is fully pure and
+<span class="lineno">  131 </span>-- testable without IO:
+<span class="lineno">  132 </span>--
+<span class="lineno">  133 </span>-- * @harnOf hid@ — look up the live 'Registry.HarnessEntry' for a harness-
+<span class="lineno">  134 </span>--   backed tab. 'Nothing' means the entry has vanished from the registry
+<span class="lineno">  135 </span>--   since the tab was created; the tab is projected as @exited\/stale@.
+<span class="lineno">  136 </span>--
+<span class="lineno">  137 </span>-- Provider tabs ('BoundSession') are projected purely from the 'Tab' record
+<span class="lineno">  138 </span>-- itself — no session-meta lookup is needed. This is a structural guarantee:
+<span class="lineno">  139 </span>-- the function takes no session-meta input, so no session metadata
+<span class="lineno">  140 </span>-- (@_sm_source@, channelUserId, credentials, etc.) can appear in a
+<span class="lineno">  141 </span>-- 'TabSnapshot' by construction.
+<span class="lineno">  142 </span>tabSnapshotsFromRegistry
+<span class="lineno">  143 </span>  :: TabList
+<span class="lineno">  144 </span>  -&gt; (Registry.HarnessId -&gt; Maybe Registry.HarnessEntry)
+<span class="lineno">  145 </span>  -&gt; [TabSnapshot]
+<span class="lineno">  146 </span><span class="decl"><span class="istickedoff">tabSnapshotsFromRegistry tl harnOf = map project (toList tl)</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  148 </span><span class="spaces">    </span><span class="istickedoff">project :: Tab -&gt; TabSnapshot</span>
+<span class="lineno">  149 </span><span class="spaces">    </span><span class="istickedoff">project tab = case _tab_ref tab of</span>
+<span class="lineno">  150 </span><span class="spaces">      </span><span class="istickedoff">BoundSession sid -&gt;</span>
+<span class="lineno">  151 </span><span class="spaces">        </span><span class="istickedoff">TabSnapshot</span>
+<span class="lineno">  152 </span><span class="spaces">          </span><span class="istickedoff">{ _ts_index         = unTabIndex (_tab_slot tab)</span>
+<span class="lineno">  153 </span><span class="spaces">          </span><span class="istickedoff">, _ts_kind          = &quot;provider&quot;</span>
+<span class="lineno">  154 </span><span class="spaces">          </span><span class="istickedoff">, _ts_label         = Nothing</span>
+<span class="lineno">  155 </span><span class="spaces">          </span><span class="istickedoff">, _ts_status        = case _tab_status tab of</span>
+<span class="lineno">  156 </span><span class="spaces">                                  </span><span class="istickedoff">Live -&gt; &quot;idle&quot;</span>
+<span class="lineno">  157 </span><span class="spaces">                                  </span><span class="istickedoff">Dead -&gt; &quot;exited&quot;</span>
+<span class="lineno">  158 </span><span class="spaces">          </span><span class="istickedoff">, _ts_sessionId     = Just (unSessionId sid)</span>
+<span class="lineno">  159 </span><span class="spaces">          </span><span class="istickedoff">, _ts_extModified   = False</span>
+<span class="lineno">  160 </span><span class="spaces">          </span><span class="istickedoff">, _ts_stale         = False</span>
+<span class="lineno">  161 </span><span class="spaces">          </span><span class="istickedoff">, _ts_origin        = &quot;&quot;</span>
+<span class="lineno">  162 </span><span class="spaces">          </span><span class="istickedoff">, _ts_attachCommand = Nothing</span>
+<span class="lineno">  163 </span><span class="spaces">          </span><span class="istickedoff">}</span>
+<span class="lineno">  164 </span><span class="spaces">      </span><span class="istickedoff">BoundHarness hid -&gt;</span>
+<span class="lineno">  165 </span><span class="spaces">        </span><span class="istickedoff">case harnOf hid of</span>
+<span class="lineno">  166 </span><span class="spaces">          </span><span class="istickedoff">Just e -&gt;</span>
+<span class="lineno">  167 </span><span class="spaces">            </span><span class="istickedoff">TabSnapshot</span>
+<span class="lineno">  168 </span><span class="spaces">              </span><span class="istickedoff">{ _ts_index         = unTabIndex (_tab_slot tab)</span>
+<span class="lineno">  169 </span><span class="spaces">              </span><span class="istickedoff">, _ts_kind          = &quot;harness&quot;</span>
+<span class="lineno">  170 </span><span class="spaces">              </span><span class="istickedoff">, _ts_label         = Just (Registry._he_label e)</span>
+<span class="lineno">  171 </span><span class="spaces">              </span><span class="istickedoff">, _ts_status        = livenessToTabStatus (Registry._he_liveness e)</span>
+<span class="lineno">  172 </span><span class="spaces">              </span><span class="istickedoff">, _ts_sessionId     = Registry._he_sessionId e</span>
+<span class="lineno">  173 </span><span class="spaces">              </span><span class="istickedoff">, _ts_extModified   = Registry._he_extModified e</span>
+<span class="lineno">  174 </span><span class="spaces">              </span><span class="istickedoff">, _ts_stale         = Registry._he_stale e</span>
+<span class="lineno">  175 </span><span class="spaces">              </span><span class="istickedoff">, _ts_origin        = harnessOriginToText (Registry._he_origin e)</span>
+<span class="lineno">  176 </span><span class="spaces">              </span><span class="istickedoff">, _ts_attachCommand = Just</span>
+<span class="lineno">  177 </span><span class="spaces">                  </span><span class="istickedoff">(&quot;tmux attach -t &quot;</span>
+<span class="lineno">  178 </span><span class="spaces">                    </span><span class="istickedoff">&lt;&gt; Registry._he_session e</span>
+<span class="lineno">  179 </span><span class="spaces">                    </span><span class="istickedoff">&lt;&gt; &quot;:&quot;</span>
+<span class="lineno">  180 </span><span class="spaces">                    </span><span class="istickedoff">&lt;&gt; Registry._he_windowName e)</span>
+<span class="lineno">  181 </span><span class="spaces">              </span><span class="istickedoff">}</span>
+<span class="lineno">  182 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  183 </span><span class="spaces">            </span><span class="istickedoff">TabSnapshot</span>
+<span class="lineno">  184 </span><span class="spaces">              </span><span class="istickedoff">{ _ts_index         = unTabIndex (_tab_slot tab)</span>
+<span class="lineno">  185 </span><span class="spaces">              </span><span class="istickedoff">, _ts_kind          = &quot;harness&quot;</span>
+<span class="lineno">  186 </span><span class="spaces">              </span><span class="istickedoff">, _ts_label         = Nothing</span>
+<span class="lineno">  187 </span><span class="spaces">              </span><span class="istickedoff">, _ts_status        = &quot;exited&quot;</span>
+<span class="lineno">  188 </span><span class="spaces">              </span><span class="istickedoff">, _ts_sessionId     = Nothing</span>
+<span class="lineno">  189 </span><span class="spaces">              </span><span class="istickedoff">, _ts_extModified   = False</span>
+<span class="lineno">  190 </span><span class="spaces">              </span><span class="istickedoff">, _ts_stale         = True</span>
+<span class="lineno">  191 </span><span class="spaces">              </span><span class="istickedoff">, _ts_origin        = &quot;&quot;</span>
+<span class="lineno">  192 </span><span class="spaces">              </span><span class="istickedoff">, _ts_attachCommand = Nothing</span>
+<span class="lineno">  193 </span><span class="spaces">              </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

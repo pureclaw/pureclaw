@@ -1,0 +1,140 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.ContextTracker
+<span class="lineno">    2 </span>  ( -- * Context status snapshot
+<span class="lineno">    3 </span>    ContextStatus (..)
+<span class="lineno">    4 </span>  , contextStatus
+<span class="lineno">    5 </span>    -- * Model context windows
+<span class="lineno">    6 </span>  , contextWindowForModel
+<span class="lineno">    7 </span>  , defaultContextWindow
+<span class="lineno">    8 </span>    -- * Utilization queries
+<span class="lineno">    9 </span>  , isContextHigh
+<span class="lineno">   10 </span>  , highUtilizationThreshold
+<span class="lineno">   11 </span>    -- * Formatting
+<span class="lineno">   12 </span>  , formatContextStatus
+<span class="lineno">   13 </span>  ) where
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>import Data.Text (Text)
+<span class="lineno">   16 </span>import Data.Text qualified as T
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import PureClaw.Agent.Context
+<span class="lineno">   19 </span>import PureClaw.Core.Types
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>-- | Snapshot of current context tracking state. Produced from a
+<span class="lineno">   22 </span>-- 'Context' and a 'ModelId' — purely computed, no IO.
+<span class="lineno">   23 </span>data ContextStatus = ContextStatus
+<span class="lineno">   24 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_estimatedTokens</span></span></span>  :: !Int
+<span class="lineno">   25 </span>    -- ^ Heuristic estimate of tokens in the current context window.
+<span class="lineno">   26 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_contextWindow</span></span></span>    :: !Int
+<span class="lineno">   27 </span>    -- ^ Maximum context window size for the active model.
+<span class="lineno">   28 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_messageCount</span></span></span>     :: !Int
+<span class="lineno">   29 </span>    -- ^ Number of messages in the conversation.
+<span class="lineno">   30 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_utilizationPct</span></span></span>   :: !Double
+<span class="lineno">   31 </span>    -- ^ Estimated tokens / context window, as a fraction (0.0–1.0).
+<span class="lineno">   32 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_totalInputTokens</span></span></span> :: !Int
+<span class="lineno">   33 </span>    -- ^ Cumulative input tokens reported by the provider.
+<span class="lineno">   34 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_totalOutputTokens</span></span></span> :: !Int
+<span class="lineno">   35 </span>    -- ^ Cumulative output tokens reported by the provider.
+<span class="lineno">   36 </span>  }
+<span class="lineno">   37 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | Compute a context status snapshot from the current model and context.
+<span class="lineno">   40 </span>contextStatus :: ModelId -&gt; Context -&gt; ContextStatus
+<span class="lineno">   41 </span><span class="decl"><span class="istickedoff">contextStatus model ctx =</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">let window    = contextWindowForModel model</span>
+<span class="lineno">   43 </span><span class="spaces">      </span><span class="istickedoff">estimated = contextTokenEstimate ctx</span>
+<span class="lineno">   44 </span><span class="spaces">      </span><span class="istickedoff">pct       = if <span class="tickonlytrue">window &gt; 0</span></span>
+<span class="lineno">   45 </span><span class="spaces">                  </span><span class="istickedoff">then fromIntegral estimated / fromIntegral window</span>
+<span class="lineno">   46 </span><span class="spaces">                  </span><span class="istickedoff">else <span class="nottickedoff">0.0</span></span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">in ContextStatus</span>
+<span class="lineno">   48 </span><span class="spaces">    </span><span class="istickedoff">{ _cs_estimatedTokens   = estimated</span>
+<span class="lineno">   49 </span><span class="spaces">    </span><span class="istickedoff">, _cs_contextWindow     = window</span>
+<span class="lineno">   50 </span><span class="spaces">    </span><span class="istickedoff">, _cs_messageCount      = contextMessageCount ctx</span>
+<span class="lineno">   51 </span><span class="spaces">    </span><span class="istickedoff">, _cs_utilizationPct    = pct</span>
+<span class="lineno">   52 </span><span class="spaces">    </span><span class="istickedoff">, _cs_totalInputTokens  = contextTotalInputTokens ctx</span>
+<span class="lineno">   53 </span><span class="spaces">    </span><span class="istickedoff">, _cs_totalOutputTokens = contextTotalOutputTokens ctx</span>
+<span class="lineno">   54 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Look up the context window size for a model. Uses prefix matching
+<span class="lineno">   57 </span>-- against known model families, falling back to 'defaultContextWindow'.
+<span class="lineno">   58 </span>contextWindowForModel :: ModelId -&gt; Int
+<span class="lineno">   59 </span><span class="decl"><span class="istickedoff">contextWindowForModel (ModelId mid) = go knownModels</span>
+<span class="lineno">   60 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   61 </span><span class="spaces">    </span><span class="istickedoff">go [] = defaultContextWindow</span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">go ((prefix, window):rest)</span>
+<span class="lineno">   63 </span><span class="spaces">      </span><span class="istickedoff">| prefix `T.isPrefixOf` mid = window</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = go rest</span></span>
+<span class="lineno">   65 </span>
+<span class="lineno">   66 </span>-- | Default context window for unknown models (128k — conservative).
+<span class="lineno">   67 </span>defaultContextWindow :: Int
+<span class="lineno">   68 </span><span class="decl"><span class="istickedoff">defaultContextWindow = 128000</span></span>
+<span class="lineno">   69 </span>
+<span class="lineno">   70 </span>-- | Known model families and their context window sizes.
+<span class="lineno">   71 </span>knownModels :: [(Text, Int)]
+<span class="lineno">   72 </span><span class="decl"><span class="istickedoff">knownModels =</span>
+<span class="lineno">   73 </span><span class="spaces">  </span><span class="istickedoff">-- Anthropic Claude</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="istickedoff">[ (&quot;claude-opus-4&quot;,          <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-sonnet-4&quot;,        200000)</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-3-7-sonnet&quot;,      <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   77 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-3-5-sonnet&quot;,      200000)</span>
+<span class="lineno">   78 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-3-5-haiku&quot;,       <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-3-opus&quot;,          <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   80 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-3-sonnet&quot;,        <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   81 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;claude-3-haiku&quot;,         <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   82 </span><span class="spaces">  </span><span class="istickedoff">-- OpenAI</span>
+<span class="lineno">   83 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;gpt-4o&quot;,                 128000)</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;gpt-4-turbo&quot;,            128000)</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;gpt-4-0125&quot;,             <span class="nottickedoff">128000</span>)</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;gpt-4-1106&quot;,             <span class="nottickedoff">128000</span>)</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;gpt-4&quot;,                    <span class="nottickedoff">8192</span>)</span>
+<span class="lineno">   88 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;gpt-3.5-turbo&quot;,          <span class="nottickedoff">16385</span>)</span>
+<span class="lineno">   89 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;o1&quot;,                     <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;o3&quot;,                     <span class="nottickedoff">200000</span>)</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">-- Ollama common defaults</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;llama3&quot;,                   <span class="nottickedoff">8192</span>)</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;mistral&quot;,                 <span class="nottickedoff">32768</span>)</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;mixtral&quot;,                 <span class="nottickedoff">32768</span>)</span>
+<span class="lineno">   95 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;deepseek&quot;,               <span class="nottickedoff">128000</span>)</span>
+<span class="lineno">   96 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   97 </span>
+<span class="lineno">   98 </span>-- | Threshold above which context utilization is considered high (80%).
+<span class="lineno">   99 </span>highUtilizationThreshold :: Double
+<span class="lineno">  100 </span><span class="decl"><span class="istickedoff">highUtilizationThreshold = 0.80</span></span>
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>-- | Check whether context utilization exceeds the high threshold.
+<span class="lineno">  103 </span>isContextHigh :: ModelId -&gt; Context -&gt; Bool
+<span class="lineno">  104 </span><span class="decl"><span class="istickedoff">isContextHigh model ctx =</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">let status = contextStatus model ctx</span>
+<span class="lineno">  106 </span><span class="spaces">  </span><span class="istickedoff">in _cs_utilizationPct status &gt;= highUtilizationThreshold</span></span>
+<span class="lineno">  107 </span>
+<span class="lineno">  108 </span>-- | Format a context status snapshot as human-readable text for display.
+<span class="lineno">  109 </span>formatContextStatus :: ContextStatus -&gt; Text
+<span class="lineno">  110 </span><span class="decl"><span class="istickedoff">formatContextStatus status = T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;Context window: &quot; &lt;&gt; T.pack (show (_cs_estimatedTokens status))</span>
+<span class="lineno">  112 </span><span class="spaces">      </span><span class="istickedoff">&lt;&gt; &quot; / &quot; &lt;&gt; T.pack (show (_cs_contextWindow status))</span>
+<span class="lineno">  113 </span><span class="spaces">      </span><span class="istickedoff">&lt;&gt; &quot; tokens (&quot; &lt;&gt; T.pack (show (round (100 * _cs_utilizationPct status) :: Int)) &lt;&gt; &quot;%)&quot;</span>
+<span class="lineno">  114 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Messages:       &quot; &lt;&gt; T.pack (show (_cs_messageCount status))</span>
+<span class="lineno">  115 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Total usage:    &quot; &lt;&gt; T.pack (show (_cs_totalInputTokens status)) &lt;&gt; &quot; in / &quot;</span>
+<span class="lineno">  116 </span><span class="spaces">      </span><span class="istickedoff">&lt;&gt; T.pack (show (_cs_totalOutputTokens status)) &lt;&gt; &quot; out&quot;</span>
+<span class="lineno">  117 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+
+</pre>
+</body>
+</html>

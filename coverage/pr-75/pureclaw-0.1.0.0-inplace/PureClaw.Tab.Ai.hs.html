@@ -1,0 +1,670 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tab.Ai
+<span class="lineno">    3 </span>-- Description : AI tab factory + per-tab loop (Tabbed Chat WU6).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- An AI tab is a 'PureClaw.Handles.Tab.TabHandle' whose loop body
+<span class="lineno">    6 </span>-- consumes a per-tab @TBQueue InputEvent@ and either feeds plain text
+<span class="lineno">    7 </span>-- to the configured 'PureClaw.Providers.Class.Provider' or runs the
+<span class="lineno">    8 </span>-- existing slash-command handler against a /per-tab/ 'Context'. The
+<span class="lineno">    9 </span>-- single-writer rule (E5) is structural: the loop is the only mutator
+<span class="lineno">   10 </span>-- of @_ats_context@, and every other producer (the dispatcher,
+<span class="lineno">   11 </span>-- '_tabHandle_send', '_tabHandle_enqueueSlash') goes through the
+<span class="lineno">   12 </span>-- bounded input queue.
+<span class="lineno">   13 </span>--
+<span class="lineno">   14 </span>-- == Factory shape
+<span class="lineno">   15 </span>--
+<span class="lineno">   16 </span>-- @
+<span class="lineno">   17 </span>-- 'mkTabAi' :: 'PureClaw.Agent.Env.AgentEnv'
+<span class="lineno">   18 </span>--           -&gt; 'PureClaw.Handles.Tab.TabIndex'
+<span class="lineno">   19 </span>--           -&gt; 'PureClaw.Handles.Tab.AiSpawnArgs'
+<span class="lineno">   20 </span>--           -&gt; IO (Either 'PureClaw.Handles.Tab.TabError'
+<span class="lineno">   21 </span>--                         'PureClaw.Handles.Tab.TabHandle')
+<span class="lineno">   22 </span>-- @
+<span class="lineno">   23 </span>--
+<span class="lineno">   24 </span>-- Note: this signature takes 'AgentEnv', which is wider than the
+<span class="lineno">   25 </span>-- 2-arg 'PureClaw.Handles.Tab.mkTabAi' stub in 'Handles.Tab'. The
+<span class="lineno">   26 </span>-- stub remains in place (the dispatcher's @defaultTabFactory@ still
+<span class="lineno">   27 </span>-- references it) because the H2 type-shape pin at @Handles/TabSpec.hs@
+<span class="lineno">   28 </span>-- locks the 2-arg signature; the production wiring that calls this
+<span class="lineno">   29 </span>-- 3-arg factory lands in WU9 (auto-spawn UX) alongside the rest of
+<span class="lineno">   30 </span>-- the user-facing tab-creation surface.
+<span class="lineno">   31 </span>--
+<span class="lineno">   32 </span>-- == Async exception discipline
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- The loop body catches 'SomeException' EXCEPT 'AsyncCancelled', which
+<span class="lineno">   35 </span>-- propagates so that '_tabHandle_close' (which cancels the loop's
+<span class="lineno">   36 </span>-- 'TabRunner') can unblock a provider call inside 'bracket'. The
+<span class="lineno">   37 </span>-- 'safelyRunLoop' helper re-raises 'AsyncCancelled' before swallowing
+<span class="lineno">   38 </span>-- any other synchronous failure into a 'Crashed' status.
+<span class="lineno">   39 </span>--
+<span class="lineno">   40 </span>-- == LLM-free invariant (P18 \/ I3)
+<span class="lineno">   41 </span>--
+<span class="lineno">   42 </span>-- 'UserText' starting with @\/@ is re-parsed via
+<span class="lineno">   43 </span>-- 'PureClaw.Routing.Parse.parseSlashCommand' (I2). On a hit the loop
+<span class="lineno">   44 </span>-- treats it as a 'SlashCmd' and never reaches the provider. Only
+<span class="lineno">   45 </span>-- non-slash 'UserText' or unparseable slash-input falls through to a
+<span class="lineno">   46 </span>-- provider call.
+<span class="lineno">   47 </span>--
+<span class="lineno">   48 </span>-- See @docs/tabbed-chat.md@ §&quot;AI tab loop body&quot; (I-series) and
+<span class="lineno">   49 </span>-- §&quot;H-series&quot; (close lifecycle).
+<span class="lineno">   50 </span>module PureClaw.Tab.Ai
+<span class="lineno">   51 </span>  ( -- * Factory
+<span class="lineno">   52 </span>    mkTabAi
+<span class="lineno">   53 </span>    -- * Internal state (exposed for tests)
+<span class="lineno">   54 </span>  , AiTabState (..)
+<span class="lineno">   55 </span>  ) where
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>import Control.Concurrent.Async (AsyncCancelled (..))
+<span class="lineno">   58 </span>import Control.Concurrent.STM
+<span class="lineno">   59 </span>  ( STM
+<span class="lineno">   60 </span>  , TBQueue
+<span class="lineno">   61 </span>  , atomically
+<span class="lineno">   62 </span>  , isFullTBQueue
+<span class="lineno">   63 </span>  , newTBQueueIO
+<span class="lineno">   64 </span>  , readTBQueue
+<span class="lineno">   65 </span>  , writeTBQueue
+<span class="lineno">   66 </span>  )
+<span class="lineno">   67 </span>import Control.Exception
+<span class="lineno">   68 </span>  ( SomeException
+<span class="lineno">   69 </span>  , bracket_
+<span class="lineno">   70 </span>  , catch
+<span class="lineno">   71 </span>  , fromException
+<span class="lineno">   72 </span>  , throwIO
+<span class="lineno">   73 </span>  , try
+<span class="lineno">   74 </span>  )
+<span class="lineno">   75 </span>import Control.Monad (unless, when)
+<span class="lineno">   76 </span>import Data.Foldable (for_)
+<span class="lineno">   77 </span>import Data.IORef
+<span class="lineno">   78 </span>  ( IORef
+<span class="lineno">   79 </span>  , atomicModifyIORef'
+<span class="lineno">   80 </span>  , newIORef
+<span class="lineno">   81 </span>  , readIORef
+<span class="lineno">   82 </span>  , writeIORef
+<span class="lineno">   83 </span>  )
+<span class="lineno">   84 </span>import Data.Text (Text)
+<span class="lineno">   85 </span>import Data.Text qualified as T
+<span class="lineno">   86 </span>import Data.Time (getCurrentTime)
+<span class="lineno">   87 </span>import Data.Word (Word64)
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>import PureClaw.Agent.Context qualified as Ctx
+<span class="lineno">   90 </span>import PureClaw.Agent.Env (AgentEnv (..), envTranscript)
+<span class="lineno">   91 </span>import PureClaw.Agent.SlashCommands (SlashCommand, executeSlashCommand)
+<span class="lineno">   92 </span>import PureClaw.Core.Types (MessageTarget, ModelId (..))
+<span class="lineno">   93 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   94 </span>import PureClaw.Handles.Tab
+<span class="lineno">   95 </span>  ( AiSpawnArgs (..)
+<span class="lineno">   96 </span>  , CloseMode (..)
+<span class="lineno">   97 </span>  , PublicTabError (..)
+<span class="lineno">   98 </span>  , TabError (..)
+<span class="lineno">   99 </span>  , TabHandle (..)
+<span class="lineno">  100 </span>  , TabIndex
+<span class="lineno">  101 </span>  , TabKind (..)
+<span class="lineno">  102 </span>  , TabName (..)
+<span class="lineno">  103 </span>  , TabRunner (..)
+<span class="lineno">  104 </span>  , TabStatus (..)
+<span class="lineno">  105 </span>  , unTabIndex
+<span class="lineno">  106 </span>  )
+<span class="lineno">  107 </span>import PureClaw.Session.Kind (ProviderSpec (..), SessionKind (..), inferProviderId)
+<span class="lineno">  108 </span>import PureClaw.Handles.Transcript (TranscriptHandle (..))
+<span class="lineno">  109 </span>import PureClaw.Providers.Class
+<span class="lineno">  110 </span>  ( CompletionRequest (..)
+<span class="lineno">  111 </span>  , CompletionResponse (..)
+<span class="lineno">  112 </span>  , Message (..)
+<span class="lineno">  113 </span>  , Role (..)
+<span class="lineno">  114 </span>  , SomeProvider (..)
+<span class="lineno">  115 </span>  , StreamEvent (..)
+<span class="lineno">  116 </span>  , completeStream
+<span class="lineno">  117 </span>  , responseText
+<span class="lineno">  118 </span>  , textMessage
+<span class="lineno">  119 </span>  , toolUseCalls
+<span class="lineno">  120 </span>  )
+<span class="lineno">  121 </span>import PureClaw.Routing.ChannelOut (shouldEmit)
+<span class="lineno">  122 </span>import PureClaw.Routing.Parse qualified as Parse
+<span class="lineno">  123 </span>import PureClaw.Routing.Types
+<span class="lineno">  124 </span>  ( AiDefaults (..)
+<span class="lineno">  125 </span>  , ChannelEvent (..)
+<span class="lineno">  126 </span>  , InputEvent (..)
+<span class="lineno">  127 </span>  , OutputSource (..)
+<span class="lineno">  128 </span>  , RoutingConfig (..)
+<span class="lineno">  129 </span>  , StreamId
+<span class="lineno">  130 </span>  , mkStreamId
+<span class="lineno">  131 </span>  )
+<span class="lineno">  132 </span>import PureClaw.Session.Handle (SessionHandle (..))
+<span class="lineno">  133 </span>import PureClaw.Tools.Registry (registryDefinitions)
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>
+<span class="lineno">  136 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  137 </span>-- AiTabState — per-tab mutable state, private to the factory closure
+<span class="lineno">  138 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Per-AI-tab mutable state. The fields are exposed so a future
+<span class="lineno">  141 </span>-- diagnostic 'tab info' handler can inspect them; production code
+<span class="lineno">  142 </span>-- never touches the record outside this module.
+<span class="lineno">  143 </span>--
+<span class="lineno">  144 </span>-- /Single-writer invariant (E5):/ '_ats_context' is mutated only by
+<span class="lineno">  145 </span>-- the per-tab loop. Other producers (dispatcher, channel input, slash
+<span class="lineno">  146 </span>-- enqueue) deposit 'InputEvent's on '_ats_inputQ' and the loop runs
+<span class="lineno">  147 </span>-- the resulting state mutation @readIORef → process → writeIORef@
+<span class="lineno">  148 </span>-- inline.
+<span class="lineno">  149 </span>data AiTabState = AiTabState
+<span class="lineno">  150 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_inputQ</span></span></span>    :: !(TBQueue InputEvent)
+<span class="lineno">  151 </span>    -- ^ Per-tab input queue. Bounded by '_rc_inputQueueBound' so an
+<span class="lineno">  152 </span>    -- overflowing producer surfaces a 'TabConcurrencyLimit' rather
+<span class="lineno">  153 </span>    -- than blocking the dispatcher (H4).
+<span class="lineno">  154 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_provider</span></span></span>  :: !(IORef (Maybe SomeProvider))
+<span class="lineno">  155 </span>    -- ^ Per-tab provider. Mutable so a focused @\/provider@ command
+<span class="lineno">  156 </span>    -- (K6.1) can hot-swap it. Initialised from '_env_provider' on
+<span class="lineno">  157 </span>    -- spawn.
+<span class="lineno">  158 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_model</span></span></span>     :: !(IORef (Maybe ModelId))
+<span class="lineno">  159 </span>    -- ^ Per-tab model. Mutable so a focused @\/model@ command (K6.2)
+<span class="lineno">  160 </span>    -- can hot-swap it. Initialised from '_env_model' on spawn.
+<span class="lineno">  161 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ats_target</span></span></span>    :: !(IORef MessageTarget)
+<span class="lineno">  162 </span>    -- ^ Per-tab message target. Mutable so a focused @\/target@
+<span class="lineno">  163 </span>    -- command (K4) can hot-swap it. Initialised from '_env_target'
+<span class="lineno">  164 </span>    -- on spawn.
+<span class="lineno">  165 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_context</span></span></span>   :: !(IORef Ctx.Context)
+<span class="lineno">  166 </span>    -- ^ Per-tab conversation context. Single-writer (the loop).
+<span class="lineno">  167 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_runner</span></span></span>    :: !(IORef (Maybe TabRunner))
+<span class="lineno">  168 </span>    -- ^ Filled by 'mkTabAi' after '_env_fork' returns. The close
+<span class="lineno">  169 </span>    -- handler reads this to cancel the loop. Stays 'Nothing' for the
+<span class="lineno">  170 </span>    -- brief window between allocation and fork-fill, during which
+<span class="lineno">  171 </span>    -- 'closeAllTabs' tolerates the gap (no-op cancel).
+<span class="lineno">  172 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_closed</span></span></span>    :: !(IORef Bool)
+<span class="lineno">  173 </span>    -- ^ Idempotency flag for '_tabHandle_close'. Flipped to 'True'
+<span class="lineno">  174 </span>    -- on the first invocation; subsequent invocations are no-ops
+<span class="lineno">  175 </span>    -- (H6).
+<span class="lineno">  176 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_statusRef</span></span></span> :: !(IORef TabStatus)
+<span class="lineno">  177 </span>    -- ^ Held status backing '_tabHandle_status'. The loop transitions
+<span class="lineno">  178 </span>    -- this between 'Active' (during provider call) and 'Idle'
+<span class="lineno">  179 </span>    -- (between events); 'Crashed' is set by the loop's outer
+<span class="lineno">  180 </span>    -- exception handler.
+<span class="lineno">  181 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_streamCtr</span></span></span> :: !(IORef Word64)
+<span class="lineno">  182 </span>    -- ^ Per-tab monotonically-increasing counter for 'StreamId'
+<span class="lineno">  183 </span>    -- allocation. Wrap-around is not a practical concern (2^64 ≈
+<span class="lineno">  184 </span>    -- 18 quintillion streams).
+<span class="lineno">  185 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ats_background</span></span></span> :: !Bool
+<span class="lineno">  186 </span>    -- ^ True when this tab was spawned by @\/bg@. When set, a completed
+<span class="lineno">  187 </span>    -- turn run while the tab is NOT focused pushes its final response to
+<span class="lineno">  188 </span>    -- the channel as a @[bg \/N done]@ banner. Sourced from
+<span class="lineno">  189 </span>    -- 'PureClaw.Handles.Tab._ai_background' at spawn; never mutated.
+<span class="lineno">  190 </span>  }
+<span class="lineno">  191 </span>
+<span class="lineno">  192 </span>
+<span class="lineno">  193 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  194 </span>-- mkTabAi — the AI tab factory
+<span class="lineno">  195 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  196 </span>
+<span class="lineno">  197 </span>-- | Construct an AI tab. Allocates the per-tab state, forks the loop
+<span class="lineno">  198 </span>-- via '_env_fork', and returns a 'TabHandle' whose IO actions close
+<span class="lineno">  199 </span>-- over the state.
+<span class="lineno">  200 </span>--
+<span class="lineno">  201 </span>-- The factory itself never throws: it always returns 'Right h' or
+<span class="lineno">  202 </span>-- 'Left e'. Failures inside the forked loop are caught by the loop's
+<span class="lineno">  203 </span>-- own exception handler and surface as a 'Crashed' status (visible via
+<span class="lineno">  204 </span>-- '_tabHandle_status').
+<span class="lineno">  205 </span>mkTabAi :: AgentEnv -&gt; TabIndex -&gt; AiSpawnArgs -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  206 </span><span class="decl"><span class="istickedoff">mkTabAi env idx args =</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">case Parse.sanitizeTabName (_ai_requestedName args) of</span>
+<span class="lineno">  208 </span><span class="spaces">    </span><span class="istickedoff">Left nameErr -&gt; pure (Left (TabInvalidName nameErr))</span>
+<span class="lineno">  209 </span><span class="spaces">    </span><span class="istickedoff">Right nameTxt -&gt; do</span>
+<span class="lineno">  210 </span><span class="spaces">      </span><span class="istickedoff">let rc = _env_routingConfig env</span>
+<span class="lineno">  211 </span><span class="spaces">      </span><span class="istickedoff">state &lt;- allocState env rc (_ai_background args)</span>
+<span class="lineno">  212 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  213 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_ats_statusRef state) (Idle now)</span>
+<span class="lineno">  214 </span><span class="spaces">      </span><span class="istickedoff">-- Fork the loop. The fork seam returns a 'TabRunner' that the</span>
+<span class="lineno">  215 </span><span class="spaces">      </span><span class="istickedoff">-- close handler will later cancel.</span>
+<span class="lineno">  216 </span><span class="spaces">      </span><span class="istickedoff">runner &lt;- _env_fork env (loopBody env idx state)</span>
+<span class="lineno">  217 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_ats_runner state) (Just runner)</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">th &lt;- mkHandle env idx (TabName nameTxt) state</span>
+<span class="lineno">  219 </span><span class="spaces">      </span><span class="istickedoff">pure (Right th)</span></span>
+<span class="lineno">  220 </span>
+<span class="lineno">  221 </span>-- | Allocate the per-tab state. Initialises every IORef from
+<span class="lineno">  222 </span>-- 'AgentEnv' so the per-tab provider\/model\/target track the
+<span class="lineno">  223 </span>-- process-level defaults at spawn time and can drift independently
+<span class="lineno">  224 </span>-- afterwards.
+<span class="lineno">  225 </span>allocState :: AgentEnv -&gt; RoutingConfig -&gt; Bool -&gt; IO AiTabState
+<span class="lineno">  226 </span><span class="decl"><span class="istickedoff">allocState env rc background = do</span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="istickedoff">inputQ       &lt;- newTBQueueIO (fromIntegral (_rc_inputQueueBound rc))</span>
+<span class="lineno">  228 </span><span class="spaces">  </span><span class="istickedoff">curProv      &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">  229 </span><span class="spaces">  </span><span class="istickedoff">provRef      &lt;- newIORef curProv</span>
+<span class="lineno">  230 </span><span class="spaces">  </span><span class="istickedoff">curMod       &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  231 </span><span class="spaces">  </span><span class="istickedoff">modRef       &lt;- newIORef curMod</span>
+<span class="lineno">  232 </span><span class="spaces">  </span><span class="istickedoff">curTgt       &lt;- readIORef (_env_target env)</span>
+<span class="lineno">  233 </span><span class="spaces">  </span><span class="istickedoff">tgtRef       &lt;- newIORef <span class="nottickedoff">curTgt</span></span>
+<span class="lineno">  234 </span><span class="spaces">  </span><span class="istickedoff">ctxRef       &lt;- newIORef <span class="nottickedoff">(Ctx.emptyContext (_env_systemPrompt env))</span></span>
+<span class="lineno">  235 </span><span class="spaces">  </span><span class="istickedoff">runRef       &lt;- newIORef <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="istickedoff">closedRef    &lt;- newIORef False</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">-- Status starts 'Active' as a sentinel; 'mkTabAi' replaces it with</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="istickedoff">-- 'Idle now' before returning.</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="istickedoff">statRef      &lt;- newIORef <span class="nottickedoff">Active</span></span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="istickedoff">streamCtrRef &lt;- newIORef 0</span>
+<span class="lineno">  241 </span><span class="spaces">  </span><span class="istickedoff">pure AiTabState</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">{ _ats_inputQ    = inputQ</span>
+<span class="lineno">  243 </span><span class="spaces">    </span><span class="istickedoff">, _ats_provider  = provRef</span>
+<span class="lineno">  244 </span><span class="spaces">    </span><span class="istickedoff">, _ats_model     = modRef</span>
+<span class="lineno">  245 </span><span class="spaces">    </span><span class="istickedoff">, _ats_target    = tgtRef</span>
+<span class="lineno">  246 </span><span class="spaces">    </span><span class="istickedoff">, _ats_context   = ctxRef</span>
+<span class="lineno">  247 </span><span class="spaces">    </span><span class="istickedoff">, _ats_runner    = runRef</span>
+<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">, _ats_closed    = closedRef</span>
+<span class="lineno">  249 </span><span class="spaces">    </span><span class="istickedoff">, _ats_statusRef = statRef</span>
+<span class="lineno">  250 </span><span class="spaces">    </span><span class="istickedoff">, _ats_streamCtr = streamCtrRef</span>
+<span class="lineno">  251 </span><span class="spaces">    </span><span class="istickedoff">, _ats_background = background</span>
+<span class="lineno">  252 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  253 </span>
+<span class="lineno">  254 </span>-- | Build the public 'TabHandle' record from the per-tab state.
+<span class="lineno">  255 </span>mkHandle :: AgentEnv -&gt; TabIndex -&gt; TabName -&gt; AiTabState -&gt; IO TabHandle
+<span class="lineno">  256 </span><span class="decl"><span class="istickedoff">mkHandle env idx name state = do</span>
+<span class="lineno">  257 </span><span class="spaces">  </span><span class="istickedoff">let rc = _env_routingConfig env</span>
+<span class="lineno">  258 </span><span class="spaces">  </span><span class="istickedoff">mModel &lt;- readIORef (_ats_model state)</span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">let modelId = case mModel of</span>
+<span class="lineno">  260 </span><span class="spaces">        </span><span class="istickedoff">Just m  -&gt; m</span>
+<span class="lineno">  261 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; _aid_modelId (_rc_defaultAi rc)</span>
+<span class="lineno">  262 </span><span class="spaces">      </span><span class="istickedoff">provSpec = ProviderSpec</span>
+<span class="lineno">  263 </span><span class="spaces">        </span><span class="istickedoff">{ _ps_provider = inferProviderId (unModelId modelId)</span>
+<span class="lineno">  264 </span><span class="spaces">        </span><span class="istickedoff">, _ps_model    = modelId</span>
+<span class="lineno">  265 </span><span class="spaces">        </span><span class="istickedoff">, _ps_agent    = Nothing</span>
+<span class="lineno">  266 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  267 </span><span class="spaces">  </span><span class="istickedoff">pure $ TabHandle</span>
+<span class="lineno">  268 </span><span class="spaces">    </span><span class="istickedoff">{ _tabHandle_index        = idx</span>
+<span class="lineno">  269 </span><span class="spaces">    </span><span class="istickedoff">, _tabHandle_name         = name</span>
+<span class="lineno">  270 </span><span class="spaces">    </span><span class="istickedoff">, _tabHandle_kind         = TkSession (SkProvider provSpec)</span>
+<span class="lineno">  271 </span><span class="spaces">    </span><span class="istickedoff">, _tabHandle_status       = readIORef (_ats_statusRef state)</span>
+<span class="lineno">  272 </span><span class="spaces">    </span><span class="istickedoff">, _tabHandle_send         = sendUserText state</span>
+<span class="lineno">  273 </span><span class="spaces">    </span><span class="istickedoff">, _tabHandle_enqueueSlash = enqueueSlashAi state</span>
+<span class="lineno">  274 </span><span class="spaces">    </span><span class="istickedoff">, _tabHandle_close        = closeTabAi env state</span>
+<span class="lineno">  275 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  276 </span>
+<span class="lineno">  277 </span>
+<span class="lineno">  278 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  279 </span>-- _tabHandle_send / _tabHandle_enqueueSlash — non-blocking enqueue
+<span class="lineno">  280 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  281 </span>
+<span class="lineno">  282 </span>-- | Enqueue a 'UserText' event on the per-tab input queue.
+<span class="lineno">  283 </span>-- Non-blocking: returns @Left (TabConcurrencyLimit n)@ if the queue is
+<span class="lineno">  284 </span>-- full so the dispatcher's send loop never blocks (H4).
+<span class="lineno">  285 </span>sendUserText :: AiTabState -&gt; Text -&gt; IO (Either TabError ())
+<span class="lineno">  286 </span><span class="decl"><span class="istickedoff">sendUserText state t = tryEnqueue (_ats_inputQ state) (UserText t)</span></span>
+<span class="lineno">  287 </span>
+<span class="lineno">  288 </span>-- | Enqueue a 'SlashCmd' event. For 'KindAi' this is the legitimate
+<span class="lineno">  289 </span>-- E5 path: the focused-tab slash command is delivered to the loop
+<span class="lineno">  290 </span>-- (which runs 'executeSlashCommand' against the /per-tab/ context).
+<span class="lineno">  291 </span>enqueueSlashAi :: AiTabState -&gt; SlashCommand -&gt; IO (Either TabError ())
+<span class="lineno">  292 </span><span class="decl"><span class="istickedoff">enqueueSlashAi state cmd = tryEnqueue (_ats_inputQ state) (SlashCmd cmd)</span></span>
+<span class="lineno">  293 </span>
+<span class="lineno">  294 </span>-- | Atomic, non-blocking write to a 'TBQueue': if the queue is full
+<span class="lineno">  295 </span>-- right now, return 'Left' with a redacted 'TabConcurrencyLimit'
+<span class="lineno">  296 </span>-- rather than blocking. The capacity is not exposed by the STM API
+<span class="lineno">  297 </span>-- after construction, so we report @0@ as a sentinel — the value is
+<span class="lineno">  298 </span>-- never user-facing (it appears only inside 'TabConcurrencyLimit'
+<span class="lineno">  299 </span>-- which renders as the fixed-vocabulary &quot;tab: input queue full&quot; via
+<span class="lineno">  300 </span>-- 'PureClaw.Handles.Tab.toPublicTabError').
+<span class="lineno">  301 </span>tryEnqueue :: TBQueue InputEvent -&gt; InputEvent -&gt; IO (Either TabError ())
+<span class="lineno">  302 </span><span class="decl"><span class="istickedoff">tryEnqueue q ev = atomically (tryEnqueueSTM q ev)</span></span>
+<span class="lineno">  303 </span>
+<span class="lineno">  304 </span>-- | STM body of 'tryEnqueue', factored out so the tests can drive it
+<span class="lineno">  305 </span>-- inside a larger transaction if needed.
+<span class="lineno">  306 </span>tryEnqueueSTM :: TBQueue InputEvent -&gt; InputEvent -&gt; STM (Either TabError ())
+<span class="lineno">  307 </span><span class="decl"><span class="istickedoff">tryEnqueueSTM q ev = do</span>
+<span class="lineno">  308 </span><span class="spaces">  </span><span class="istickedoff">full &lt;- isFullTBQueue q</span>
+<span class="lineno">  309 </span><span class="spaces">  </span><span class="istickedoff">if full</span>
+<span class="lineno">  310 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (TabConcurrencyLimit 0))</span>
+<span class="lineno">  311 </span><span class="spaces">    </span><span class="istickedoff">else writeTBQueue q ev &gt;&gt; pure (Right ())</span></span>
+<span class="lineno">  312 </span>
+<span class="lineno">  313 </span>
+<span class="lineno">  314 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  315 </span>-- _tabHandle_close — kind-specific graceful + force semantics
+<span class="lineno">  316 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  317 </span>
+<span class="lineno">  318 </span>-- | Close an AI tab. Idempotent + never throws (H6, H7).
+<span class="lineno">  319 </span>--
+<span class="lineno">  320 </span>-- * 'CloseGraceful': cancel the loop, archive the session via
+<span class="lineno">  321 </span>--   @_sh_save@, then flush the transcript via the SessionHandle's
+<span class="lineno">  322 </span>--   '_sh_transcript' field.
+<span class="lineno">  323 </span>-- * 'CloseForce': cancel the loop and skip the archive (H9 — the
+<span class="lineno">  324 </span>--   transcript stays on disk per the SessionHandle's append-only
+<span class="lineno">  325 </span>--   contract, but the metadata flush is suppressed).
+<span class="lineno">  326 </span>closeTabAi :: AgentEnv -&gt; AiTabState -&gt; CloseMode -&gt; IO ()
+<span class="lineno">  327 </span><span class="decl"><span class="istickedoff">closeTabAi env state mode = do</span>
+<span class="lineno">  328 </span><span class="spaces">  </span><span class="istickedoff">alreadyClosed &lt;- atomicModifyIORef' (_ats_closed state) (True,)</span>
+<span class="lineno">  329 </span><span class="spaces">  </span><span class="istickedoff">unless alreadyClosed $ do</span>
+<span class="lineno">  330 </span><span class="spaces">    </span><span class="istickedoff">-- The cancel + save + transcript-flush triad is intentionally</span>
+<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">-- one-shot: rerunning it would attempt to '_sh_save' against a</span>
+<span class="lineno">  332 </span><span class="spaces">    </span><span class="istickedoff">-- handle whose IORef-backed metadata may have been GCed.</span>
+<span class="lineno">  333 </span><span class="spaces">    </span><span class="istickedoff">safeIgnore (cancelRunner state)</span>
+<span class="lineno">  334 </span><span class="spaces">    </span><span class="istickedoff">case mode of</span>
+<span class="lineno">  335 </span><span class="spaces">      </span><span class="istickedoff">CloseGraceful -&gt; do</span>
+<span class="lineno">  336 </span><span class="spaces">        </span><span class="istickedoff">safeIgnore (archiveSession env)</span>
+<span class="lineno">  337 </span><span class="spaces">        </span><span class="istickedoff">safeIgnore (flushTranscript env)</span>
+<span class="lineno">  338 </span><span class="spaces">      </span><span class="istickedoff">CloseForce -&gt;</span>
+<span class="lineno">  339 </span><span class="spaces">        </span><span class="istickedoff">-- Force-close intentionally skips the metadata save; the</span>
+<span class="lineno">  340 </span><span class="spaces">        </span><span class="istickedoff">-- transcript is also NOT closed (per the design's &quot;transcript</span>
+<span class="lineno">  341 </span><span class="spaces">        </span><span class="istickedoff">-- deleted from disk&quot; semantics, which lands properly in WU9</span>
+<span class="lineno">  342 </span><span class="spaces">        </span><span class="istickedoff">-- alongside the on-disk teardown).</span>
+<span class="lineno">  343 </span><span class="spaces">        </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  344 </span>
+<span class="lineno">  345 </span>-- | Read the captured 'TabRunner' (set by 'mkTabAi' after fork) and
+<span class="lineno">  346 </span>-- invoke its cancel. Tolerant of the brief allocation\/fork window
+<span class="lineno">  347 </span>-- when '_ats_runner' is still 'Nothing'.
+<span class="lineno">  348 </span>cancelRunner :: AiTabState -&gt; IO ()
+<span class="lineno">  349 </span><span class="decl"><span class="istickedoff">cancelRunner state = do</span>
+<span class="lineno">  350 </span><span class="spaces">  </span><span class="istickedoff">mRunner &lt;- readIORef (_ats_runner state)</span>
+<span class="lineno">  351 </span><span class="spaces">  </span><span class="istickedoff">for_ mRunner _trun_cancel</span></span>
+<span class="lineno">  352 </span>
+<span class="lineno">  353 </span>-- | Persist the session metadata via '_sh_save' on the active
+<span class="lineno">  354 </span>-- 'SessionHandle'.
+<span class="lineno">  355 </span>archiveSession :: AgentEnv -&gt; IO ()
+<span class="lineno">  356 </span><span class="decl"><span class="istickedoff">archiveSession env = do</span>
+<span class="lineno">  357 </span><span class="spaces">  </span><span class="istickedoff">sh &lt;- readIORef (_env_session env)</span>
+<span class="lineno">  358 </span><span class="spaces">  </span><span class="istickedoff">_sh_save sh</span></span>
+<span class="lineno">  359 </span>
+<span class="lineno">  360 </span>-- | Flush + close the transcript file descriptor on the active
+<span class="lineno">  361 </span>-- 'SessionHandle'. Per the spec we use '_th_close' on
+<span class="lineno">  362 </span>-- '_sh_transcript', not '_sh_close' (which does not exist).
+<span class="lineno">  363 </span>flushTranscript :: AgentEnv -&gt; IO ()
+<span class="lineno">  364 </span><span class="decl"><span class="istickedoff">flushTranscript env = do</span>
+<span class="lineno">  365 </span><span class="spaces">  </span><span class="istickedoff">sh &lt;- readIORef (_env_session env)</span>
+<span class="lineno">  366 </span><span class="spaces">  </span><span class="istickedoff">_th_close (_sh_transcript sh)</span></span>
+<span class="lineno">  367 </span>
+<span class="lineno">  368 </span>-- | Best-effort: run an IO action and swallow synchronous failures.
+<span class="lineno">  369 </span>-- The close path MUST be never-throws (H7), so every step is wrapped
+<span class="lineno">  370 </span>-- defensively. 'AsyncCancelled' is also swallowed here because the
+<span class="lineno">  371 </span>-- close handler is invoked from outside the loop thread; any
+<span class="lineno">  372 </span>-- AsyncCancelled bubbling up through cancel itself is benign (the
+<span class="lineno">  373 </span>-- target thread has already received the cancel).
+<span class="lineno">  374 </span>safeIgnore :: IO () -&gt; IO ()
+<span class="lineno">  375 </span><span class="decl"><span class="istickedoff">safeIgnore m = do</span>
+<span class="lineno">  376 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- try @SomeException m</span>
+<span class="lineno">  377 </span><span class="spaces">  </span><span class="istickedoff">pure ()</span></span>
+<span class="lineno">  378 </span>
+<span class="lineno">  379 </span>
+<span class="lineno">  380 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  381 </span>-- Loop body — single-writer Context, async-cancel-aware
+<span class="lineno">  382 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  383 </span>
+<span class="lineno">  384 </span>-- | Top-level loop body. Runs forever until either the per-tab close
+<span class="lineno">  385 </span>-- cancels it (via 'AsyncCancelled') or a synchronous exception is
+<span class="lineno">  386 </span>-- caught (in which case the tab transitions to 'Crashed' and the
+<span class="lineno">  387 </span>-- loop exits).
+<span class="lineno">  388 </span>loopBody :: AgentEnv -&gt; TabIndex -&gt; AiTabState -&gt; IO ()
+<span class="lineno">  389 </span><span class="decl"><span class="istickedoff">loopBody env idx state =</span>
+<span class="lineno">  390 </span><span class="spaces">  </span><span class="istickedoff">safelyRunLoop <span class="nottickedoff">state</span> (loop env idx state)</span></span>
+<span class="lineno">  391 </span>
+<span class="lineno">  392 </span>-- | Outer exception handler: catch 'SomeException' EXCEPT
+<span class="lineno">  393 </span>-- 'AsyncCancelled', which must propagate so that 'bracket'-based
+<span class="lineno">  394 </span>-- close semantics work correctly (per C5).
+<span class="lineno">  395 </span>--
+<span class="lineno">  396 </span>-- On a Crashed exit, the status is updated to 'Crashed' carrying a
+<span class="lineno">  397 </span>-- redacted 'PublicTabError'.
+<span class="lineno">  398 </span>safelyRunLoop :: AiTabState -&gt; IO () -&gt; IO ()
+<span class="lineno">  399 </span><span class="decl"><span class="istickedoff">safelyRunLoop state body = body `catch` handler</span>
+<span class="lineno">  400 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  401 </span><span class="spaces">    </span><span class="istickedoff">handler :: SomeException -&gt; IO ()</span>
+<span class="lineno">  402 </span><span class="spaces">    </span><span class="istickedoff">handler e = case fromException e :: Maybe AsyncCancelled of</span>
+<span class="lineno">  403 </span><span class="spaces">      </span><span class="istickedoff">Just _  -&gt; throwIO e  -- propagate AsyncCancelled (C5)</span>
+<span class="lineno">  404 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  405 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">-- Generic crash: surface as Crashed status with a redacted</span></span>
+<span class="lineno">  406 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">-- short label so the dispatcher's '/N' switch can emit the</span></span>
+<span class="lineno">  407 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">-- H8 banner. The exception message is intentionally</span></span>
+<span class="lineno">  408 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">-- discarded to preserve the redacted-error contract.</span></span>
+<span class="lineno">  409 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">writeIORef (_ats_statusRef state)</span></span>
+<span class="lineno">  410 </span><span class="spaces">                   </span><span class="istickedoff"><span class="nottickedoff">(Crashed (PublicTabError &quot;tab: ai loop crashed&quot;))</span></span></span>
+<span class="lineno">  411 </span>
+<span class="lineno">  412 </span>-- | The main loop. Reads one 'InputEvent' at a time, transitions the
+<span class="lineno">  413 </span>-- tab status across the event, and continues.
+<span class="lineno">  414 </span>loop :: AgentEnv -&gt; TabIndex -&gt; AiTabState -&gt; IO ()
+<span class="lineno">  415 </span><span class="decl"><span class="istickedoff">loop env idx state = do</span>
+<span class="lineno">  416 </span><span class="spaces">  </span><span class="istickedoff">ev &lt;- atomically (readTBQueue (_ats_inputQ state))</span>
+<span class="lineno">  417 </span><span class="spaces">  </span><span class="istickedoff">handleEvent env idx state ev</span>
+<span class="lineno">  418 </span><span class="spaces">  </span><span class="istickedoff">loop env <span class="nottickedoff">idx</span> state</span></span>
+<span class="lineno">  419 </span>
+<span class="lineno">  420 </span>-- | Dispatch a single 'InputEvent'.
+<span class="lineno">  421 </span>handleEvent :: AgentEnv -&gt; TabIndex -&gt; AiTabState -&gt; InputEvent -&gt; IO ()
+<span class="lineno">  422 </span><span class="decl"><span class="istickedoff">handleEvent env idx state ev = case ev of</span>
+<span class="lineno">  423 </span><span class="spaces">  </span><span class="istickedoff">UserText t</span>
+<span class="lineno">  424 </span><span class="spaces">    </span><span class="istickedoff">| &quot;/&quot; `T.isPrefixOf` T.strip t -&gt;</span>
+<span class="lineno">  425 </span><span class="spaces">        </span><span class="istickedoff">-- I2 re-parse path: if the user typed a slash-form via the</span>
+<span class="lineno">  426 </span><span class="spaces">        </span><span class="istickedoff">-- Inject route, re-classify it as a SlashCmd before deciding</span>
+<span class="lineno">  427 </span><span class="spaces">        </span><span class="istickedoff">-- whether to feed the provider. Unknown slash inputs fall</span>
+<span class="lineno">  428 </span><span class="spaces">        </span><span class="istickedoff">-- through to the provider path (matching Agent.Loop's</span>
+<span class="lineno">  429 </span><span class="spaces">        </span><span class="istickedoff">-- &quot;Unknown command&quot; behaviour).</span>
+<span class="lineno">  430 </span><span class="spaces">        </span><span class="istickedoff">case Parse.parseSlashCommand (T.strip t) of</span>
+<span class="lineno">  431 </span><span class="spaces">          </span><span class="istickedoff">Just cmd -&gt; runSlash env <span class="nottickedoff">idx</span> state cmd</span>
+<span class="lineno">  432 </span><span class="spaces">          </span><span class="istickedoff">Nothing  -&gt; <span class="nottickedoff">runUserText env idx state t</span></span>
+<span class="lineno">  433 </span><span class="spaces">    </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>          -&gt; runUserText env idx state <span class="nottickedoff">t</span></span>
+<span class="lineno">  434 </span><span class="spaces">  </span><span class="istickedoff">SlashCmd cmd           -&gt; runSlash env <span class="nottickedoff">idx</span> state cmd</span></span>
+<span class="lineno">  435 </span>
+<span class="lineno">  436 </span>-- | Run a slash command against the per-tab context. The single-writer
+<span class="lineno">  437 </span>-- mutation is @readIORef → executeSlashCommand → writeIORef@.
+<span class="lineno">  438 </span>runSlash :: AgentEnv -&gt; TabIndex -&gt; AiTabState -&gt; SlashCommand -&gt; IO ()
+<span class="lineno">  439 </span><span class="decl"><span class="istickedoff">runSlash env _idx state cmd = withActive state $ do</span>
+<span class="lineno">  440 </span><span class="spaces">  </span><span class="istickedoff">ctx &lt;- readIORef (_ats_context state)</span>
+<span class="lineno">  441 </span><span class="spaces">  </span><span class="istickedoff">ctx' &lt;- executeSlashCommand env cmd <span class="nottickedoff">ctx</span></span>
+<span class="lineno">  442 </span><span class="spaces">  </span><span class="istickedoff">writeIORef (_ats_context state) <span class="nottickedoff">ctx'</span></span></span>
+<span class="lineno">  443 </span>
+<span class="lineno">  444 </span>-- | Run a non-slash user text turn: append the user message, call the
+<span class="lineno">  445 </span>-- provider once (with chunked streaming when focused), and append the
+<span class="lineno">  446 </span>-- assistant response. Per E5 this is single-writer.
+<span class="lineno">  447 </span>--
+<span class="lineno">  448 </span>-- If no provider is configured the loop emits a dispatcher-side error
+<span class="lineno">  449 </span>-- banner via the channel-out queue (so the user sees feedback even on
+<span class="lineno">  450 </span>-- non-focused tabs).
+<span class="lineno">  451 </span>runUserText :: AgentEnv -&gt; TabIndex -&gt; AiTabState -&gt; Text -&gt; IO ()
+<span class="lineno">  452 </span><span class="decl"><span class="istickedoff">runUserText env idx state t = withActive state $ do</span>
+<span class="lineno">  453 </span><span class="spaces">  </span><span class="istickedoff">mProvider &lt;- readIORef (_ats_provider state)</span>
+<span class="lineno">  454 </span><span class="spaces">  </span><span class="istickedoff">mModel    &lt;- readIORef (_ats_model state)</span>
+<span class="lineno">  455 </span><span class="spaces">  </span><span class="istickedoff">case (mProvider, mModel) of</span>
+<span class="lineno">  456 </span><span class="spaces">    </span><span class="istickedoff">(Just provider, Just model) -&gt; do</span>
+<span class="lineno">  457 </span><span class="spaces">      </span><span class="istickedoff">ctx &lt;- readIORef (_ats_context state)</span>
+<span class="lineno">  458 </span><span class="spaces">      </span><span class="istickedoff">let <span class="nottickedoff">userMsg = textMessage User (T.strip t)</span></span>
+<span class="lineno">  459 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">ctx'   = Ctx.addMessage userMsg ctx</span></span>
+<span class="lineno">  460 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_ats_context state) <span class="nottickedoff">ctx'</span></span>
+<span class="lineno">  461 </span><span class="spaces">      </span><span class="istickedoff">runOneTurn env idx state provider <span class="nottickedoff">model</span> <span class="nottickedoff">ctx'</span></span>
+<span class="lineno">  462 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt;</span>
+<span class="lineno">  463 </span><span class="spaces">      </span><span class="istickedoff">-- No provider / no model — emit a single dispatcher banner so</span>
+<span class="lineno">  464 </span><span class="spaces">      </span><span class="istickedoff">-- the user knows why nothing happened. (The legacy</span>
+<span class="lineno">  465 </span><span class="spaces">      </span><span class="istickedoff">-- 'Agent.Loop' path emits the long-form message; for WU6 we</span>
+<span class="lineno">  466 </span><span class="spaces">      </span><span class="istickedoff">-- keep it short to avoid duplicating the help-text format.)</span>
+<span class="lineno">  467 </span><span class="spaces">      </span><span class="istickedoff">emitBanner env &quot;(no provider configured for this tab)&quot;</span></span>
+<span class="lineno">  468 </span>
+<span class="lineno">  469 </span>-- | Bracket the body in an 'Active' status transition so the
+<span class="lineno">  470 </span>-- dashboard can observe it.
+<span class="lineno">  471 </span>--
+<span class="lineno">  472 </span>-- /WU6 scope note:/ the S9 atomic active-count cap-check belongs to
+<span class="lineno">  473 </span>-- the spawn path (WU9). For WU6 we keep the status transition only;
+<span class="lineno">  474 </span>-- the @_env_activeCount@ wiring lands when the cap is enforced by
+<span class="lineno">  475 </span>-- spawn UX.
+<span class="lineno">  476 </span>withActive :: AiTabState -&gt; IO () -&gt; IO ()
+<span class="lineno">  477 </span><span class="decl"><span class="istickedoff">withActive state = bracket_ enter exit</span>
+<span class="lineno">  478 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  479 </span><span class="spaces">    </span><span class="istickedoff">enter = writeIORef (_ats_statusRef state) <span class="nottickedoff">Active</span></span>
+<span class="lineno">  480 </span><span class="spaces">    </span><span class="istickedoff">exit = do</span>
+<span class="lineno">  481 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  482 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_ats_statusRef state) <span class="nottickedoff">(Idle now)</span></span></span>
+<span class="lineno">  483 </span>
+<span class="lineno">  484 </span>
+<span class="lineno">  485 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  486 </span>-- Single-turn provider call (streaming + tool-call cycle)
+<span class="lineno">  487 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  488 </span>
+<span class="lineno">  489 </span>-- | Execute one provider turn. Streams chunks into '_env_channelOutQ'
+<span class="lineno">  490 </span>-- as @SrcTab idx@ events (focus-gated by the writer thread per D3),
+<span class="lineno">  491 </span>-- records the response into the per-tab context, and on tool-use
+<span class="lineno">  492 </span>-- continues the turn until no more tool calls are produced.
+<span class="lineno">  493 </span>runOneTurn
+<span class="lineno">  494 </span>  :: AgentEnv
+<span class="lineno">  495 </span>  -&gt; TabIndex
+<span class="lineno">  496 </span>  -&gt; AiTabState
+<span class="lineno">  497 </span>  -&gt; SomeProvider
+<span class="lineno">  498 </span>  -&gt; ModelId
+<span class="lineno">  499 </span>  -&gt; Ctx.Context
+<span class="lineno">  500 </span>  -&gt; IO ()
+<span class="lineno">  501 </span><span class="decl"><span class="istickedoff">runOneTurn env idx state provider model ctx = do</span>
+<span class="lineno">  502 </span><span class="spaces">  </span><span class="istickedoff">-- D4 producer-side focus optimisation: if this tab is not focused,</span>
+<span class="lineno">  503 </span><span class="spaces">  </span><span class="istickedoff">-- we still execute the provider call (the user's input must be</span>
+<span class="lineno">  504 </span><span class="spaces">  </span><span class="istickedoff">-- processed) but we skip the per-chunk enqueue work since the</span>
+<span class="lineno">  505 </span><span class="spaces">  </span><span class="istickedoff">-- writer thread would drop them anyway.</span>
+<span class="lineno">  506 </span><span class="spaces">  </span><span class="istickedoff">curFocus &lt;- readIORef (_env_focus env)</span>
+<span class="lineno">  507 </span><span class="spaces">  </span><span class="istickedoff">let focusedNow = shouldEmit curFocus (SrcTab idx)</span>
+<span class="lineno">  508 </span><span class="spaces">  </span><span class="istickedoff">sid &lt;- nextStreamId state</span>
+<span class="lineno">  509 </span><span class="spaces">  </span><span class="istickedoff">when focusedNow $</span>
+<span class="lineno">  510 </span><span class="spaces">    </span><span class="istickedoff">atomically $ writeTBQueue (_env_channelOutQ env)</span>
+<span class="lineno">  511 </span><span class="spaces">                   </span><span class="istickedoff">(SrcTab idx, StreamStart sid idx)</span>
+<span class="lineno">  512 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- runProviderTurn <span class="nottickedoff">env</span> <span class="nottickedoff">idx</span> provider <span class="nottickedoff">model</span> <span class="nottickedoff">ctx</span> <span class="nottickedoff">focusedNow</span> <span class="nottickedoff">sid</span></span>
+<span class="lineno">  513 </span><span class="spaces">  </span><span class="istickedoff">-- Always emit StreamEnd if we emitted StreamStart, so the</span>
+<span class="lineno">  514 </span><span class="spaces">  </span><span class="istickedoff">-- breadcrumb-state map is GC'd by the writer thread (D5).</span>
+<span class="lineno">  515 </span><span class="spaces">  </span><span class="istickedoff">when focusedNow $</span>
+<span class="lineno">  516 </span><span class="spaces">    </span><span class="istickedoff">atomically $ writeTBQueue (_env_channelOutQ env)</span>
+<span class="lineno">  517 </span><span class="spaces">                   </span><span class="istickedoff">(SrcTab idx, StreamEnd sid)</span>
+<span class="lineno">  518 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  519 </span><span class="spaces">    </span><span class="istickedoff">Left _e -&gt;</span>
+<span class="lineno">  520 </span><span class="spaces">      </span><span class="istickedoff">emitBanner env (errorBanner idx)</span>
+<span class="lineno">  521 </span><span class="spaces">    </span><span class="istickedoff">Right response -&gt; do</span>
+<span class="lineno">  522 </span><span class="spaces">      </span><span class="istickedoff">let <span class="nottickedoff">ctx' = Ctx.recordUsage (_crsp_usage response)</span></span>
+<span class="lineno">  523 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">$ Ctx.addMessage (Message Assistant (_crsp_content response))</span></span>
+<span class="lineno">  524 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">ctx</span></span>
+<span class="lineno">  525 </span><span class="spaces">      </span><span class="istickedoff">writeIORef (_ats_context state) <span class="nottickedoff">ctx'</span></span>
+<span class="lineno">  526 </span><span class="spaces">      </span><span class="istickedoff">-- Append the (full) assistant text to the transcript via the</span>
+<span class="lineno">  527 </span><span class="spaces">      </span><span class="istickedoff">-- session's transcript handle. Mirrors what Agent.Loop's</span>
+<span class="lineno">  528 </span><span class="spaces">      </span><span class="istickedoff">-- mkTranscriptProvider wrapper does.</span>
+<span class="lineno">  529 </span><span class="spaces">      </span><span class="istickedoff">let assistantText = responseText response</span>
+<span class="lineno">  530 </span><span class="spaces">      </span><span class="istickedoff">unless (T.null (T.strip assistantText)) $</span>
+<span class="lineno">  531 </span><span class="spaces">        </span><span class="istickedoff">appendTranscript env <span class="nottickedoff">assistantText</span></span>
+<span class="lineno">  532 </span><span class="spaces">      </span><span class="istickedoff">-- Background-tab completion push (WU2 — /bg). A tab spawned by</span>
+<span class="lineno">  533 </span><span class="spaces">      </span><span class="istickedoff">-- @/bg@ runs without stealing focus; when its turn finishes while</span>
+<span class="lineno">  534 </span><span class="spaces">      </span><span class="istickedoff">-- the tab is NOT focused we surface the final response to the</span>
+<span class="lineno">  535 </span><span class="spaces">      </span><span class="istickedoff">-- channel as a @[bg /N done]@ banner. A focused bg tab streams</span>
+<span class="lineno">  536 </span><span class="spaces">      </span><span class="istickedoff">-- live above, so we skip the push to avoid duplicate output. Only</span>
+<span class="lineno">  537 </span><span class="spaces">      </span><span class="istickedoff">-- @/bg@ tabs push — ordinary non-focused tabs do not.</span>
+<span class="lineno">  538 </span><span class="spaces">      </span><span class="istickedoff">when (_ats_background state &amp;&amp; not focusedNow) $ do</span>
+<span class="lineno">  539 </span><span class="spaces">        </span><span class="istickedoff">let body = if T.null (T.strip assistantText)</span>
+<span class="lineno">  540 </span><span class="spaces">                     </span><span class="istickedoff">then &quot;(no response)&quot;</span>
+<span class="lineno">  541 </span><span class="spaces">                     </span><span class="istickedoff">else assistantText</span>
+<span class="lineno">  542 </span><span class="spaces">        </span><span class="istickedoff">emitBgCompletion env idx body</span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff">-- Tool-call continuation: full tool-call cycling is part of</span>
+<span class="lineno">  544 </span><span class="spaces">      </span><span class="istickedoff">-- the WU10 refactor that ports Agent.Loop's logic wholesale.</span>
+<span class="lineno">  545 </span><span class="spaces">      </span><span class="istickedoff">-- For WU6 we log the presence of tool calls so the gap is</span>
+<span class="lineno">  546 </span><span class="spaces">      </span><span class="istickedoff">-- visible in production.</span>
+<span class="lineno">  547 </span><span class="spaces">      </span><span class="istickedoff">unless (null (toolUseCalls response)) $</span>
+<span class="lineno">  548 </span><span class="spaces">        </span><span class="istickedoff">_lh_logDebug (_env_logger env)</span>
+<span class="lineno">  549 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">&quot;tab.ai: tool calls present but not executed in WU6 — \</span></span>
+<span class="lineno">  550 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">\deferred to WU10 refactor&quot;</span></span></span>
+<span class="lineno">  551 </span>
+<span class="lineno">  552 </span>-- | Invoke the provider exactly once, streaming chunks to the channel
+<span class="lineno">  553 </span>-- output queue when focused.
+<span class="lineno">  554 </span>runProviderTurn
+<span class="lineno">  555 </span>  :: AgentEnv
+<span class="lineno">  556 </span>  -&gt; TabIndex
+<span class="lineno">  557 </span>  -&gt; SomeProvider
+<span class="lineno">  558 </span>  -&gt; ModelId
+<span class="lineno">  559 </span>  -&gt; Ctx.Context
+<span class="lineno">  560 </span>  -&gt; Bool
+<span class="lineno">  561 </span>  -&gt; StreamId
+<span class="lineno">  562 </span>  -&gt; IO (Either SomeException CompletionResponse)
+<span class="lineno">  563 </span><span class="decl"><span class="istickedoff">runProviderTurn env idx provider model ctx focusedNow sid = do</span>
+<span class="lineno">  564 </span><span class="spaces">  </span><span class="istickedoff">responseRef &lt;- newIORef (Nothing :: Maybe CompletionResponse)</span>
+<span class="lineno">  565 </span><span class="spaces">  </span><span class="istickedoff">let <span class="nottickedoff">req = CompletionRequest</span></span>
+<span class="lineno">  566 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">{ _cr_model        = model</span></span>
+<span class="lineno">  567 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_messages     = Ctx.contextMessages ctx</span></span>
+<span class="lineno">  568 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_systemPrompt = Ctx.contextSystemPrompt ctx</span></span>
+<span class="lineno">  569 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_maxTokens    = Just 4096</span></span>
+<span class="lineno">  570 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_tools        = registryDefinitions (_env_registry env)</span></span>
+<span class="lineno">  571 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">, _cr_toolChoice   = Nothing</span></span>
+<span class="lineno">  572 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">  573 </span><span class="spaces">  </span><span class="istickedoff">outcome &lt;- try @SomeException $</span>
+<span class="lineno">  574 </span><span class="spaces">    </span><span class="istickedoff">completeStream provider <span class="nottickedoff">req</span> $ \case</span>
+<span class="lineno">  575 </span><span class="spaces">      </span><span class="istickedoff">StreamText t -&gt;</span>
+<span class="lineno">  576 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">when focusedNow $</span></span>
+<span class="lineno">  577 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">atomically $ writeTBQueue (_env_channelOutQ env)</span></span>
+<span class="lineno">  578 </span><span class="spaces">                         </span><span class="istickedoff"><span class="nottickedoff">(SrcTab idx, ChunkOf sid t)</span></span>
+<span class="lineno">  579 </span><span class="spaces">      </span><span class="istickedoff">StreamDone resp -&gt;</span>
+<span class="lineno">  580 </span><span class="spaces">        </span><span class="istickedoff">writeIORef responseRef (Just resp)</span>
+<span class="lineno">  581 </span><span class="spaces">      </span><span class="istickedoff">StreamWarning w -&gt;</span>
+<span class="lineno">  582 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn (_env_logger env) w</span></span>
+<span class="lineno">  583 </span><span class="spaces">      </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  584 </span><span class="spaces">  </span><span class="istickedoff">case outcome of</span>
+<span class="lineno">  585 </span><span class="spaces">    </span><span class="istickedoff">Left e  -&gt; pure (Left <span class="nottickedoff">e</span>)</span>
+<span class="lineno">  586 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  587 </span><span class="spaces">      </span><span class="istickedoff">mResp &lt;- readIORef responseRef</span>
+<span class="lineno">  588 </span><span class="spaces">      </span><span class="istickedoff">pure $ case mResp of</span>
+<span class="lineno">  589 </span><span class="spaces">        </span><span class="istickedoff">Just resp -&gt; Right resp</span>
+<span class="lineno">  590 </span><span class="spaces">        </span><span class="istickedoff">Nothing   -&gt; Right (emptyResponseFor <span class="nottickedoff">model</span>)</span></span>
+<span class="lineno">  591 </span>
+<span class="lineno">  592 </span>-- | A stub 'CompletionResponse' returned when the provider's
+<span class="lineno">  593 </span>-- 'completeStream' callback never delivered 'StreamDone'. This
+<span class="lineno">  594 </span>-- preserves the &quot;always returns&quot; contract without crashing the loop.
+<span class="lineno">  595 </span>emptyResponseFor :: ModelId -&gt; CompletionResponse
+<span class="lineno">  596 </span><span class="decl"><span class="istickedoff">emptyResponseFor m = CompletionResponse</span>
+<span class="lineno">  597 </span><span class="spaces">  </span><span class="istickedoff">{ _crsp_content = []</span>
+<span class="lineno">  598 </span><span class="spaces">  </span><span class="istickedoff">, _crsp_model   = <span class="nottickedoff">m</span></span>
+<span class="lineno">  599 </span><span class="spaces">  </span><span class="istickedoff">, _crsp_usage   = <span class="nottickedoff">Nothing</span></span>
+<span class="lineno">  600 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  601 </span>
+<span class="lineno">  602 </span>-- | Allocate the next 'StreamId' for this tab.
+<span class="lineno">  603 </span>nextStreamId :: AiTabState -&gt; IO StreamId
+<span class="lineno">  604 </span><span class="decl"><span class="istickedoff">nextStreamId state =</span>
+<span class="lineno">  605 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' (_ats_streamCtr state)</span>
+<span class="lineno">  606 </span><span class="spaces">    </span><span class="istickedoff">(\n -&gt; let n' = n + 1 in (n', mkStreamId n'))</span></span>
+<span class="lineno">  607 </span>
+<span class="lineno">  608 </span>
+<span class="lineno">  609 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  610 </span>-- Transcript + banner helpers
+<span class="lineno">  611 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  612 </span>
+<span class="lineno">  613 </span>-- | Append a single assistant-text entry to the session's transcript.
+<span class="lineno">  614 </span>--
+<span class="lineno">  615 </span>-- /WU6 scope note:/ the legacy 'PureClaw.Agent.Loop' already wraps
+<span class="lineno">  616 </span>-- its provider in 'PureClaw.Transcript.Provider.mkTranscriptProvider'
+<span class="lineno">  617 </span>-- which records each completion. To avoid double-writing, the WU6
+<span class="lineno">  618 </span>-- loop only /touches/ the transcript handle (via 'envTranscript') so
+<span class="lineno">  619 </span>-- a future SessionHandle swap routes through here; the actual
+<span class="lineno">  620 </span>-- '_th_record' call lands in the WU10 refactor that unifies the two
+<span class="lineno">  621 </span>-- paths. For now this is a no-op that exercises the SessionHandle
+<span class="lineno">  622 </span>-- read path.
+<span class="lineno">  623 </span>appendTranscript :: AgentEnv -&gt; Text -&gt; IO ()
+<span class="lineno">  624 </span><span class="decl"><span class="istickedoff">appendTranscript env _txt = do</span>
+<span class="lineno">  625 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- envTranscript env</span>
+<span class="lineno">  626 </span><span class="spaces">  </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  627 </span>
+<span class="lineno">  628 </span>-- | Emit one dispatcher-source 'BannerLine' on the channel-out queue.
+<span class="lineno">  629 </span>emitBanner :: AgentEnv -&gt; Text -&gt; IO ()
+<span class="lineno">  630 </span><span class="decl"><span class="istickedoff">emitBanner env txt =</span>
+<span class="lineno">  631 </span><span class="spaces">  </span><span class="istickedoff">atomically $ writeTBQueue (_env_channelOutQ env)</span>
+<span class="lineno">  632 </span><span class="spaces">                 </span><span class="istickedoff">(SrcDispatcher, BannerLine txt)</span></span>
+<span class="lineno">  633 </span>
+<span class="lineno">  634 </span>-- | Push a background-tab completion banner to the channel (WU2 — @\/bg@).
+<span class="lineno">  635 </span>-- Emitted via 'SrcDispatcher' so it bypasses focus gating and always
+<span class="lineno">  636 </span>-- reaches the current channel. The leading @[bg \/N done] @ text is the
+<span class="lineno">  637 </span>-- confirmed user-facing wording.
+<span class="lineno">  638 </span>emitBgCompletion :: AgentEnv -&gt; TabIndex -&gt; Text -&gt; IO ()
+<span class="lineno">  639 </span><span class="decl"><span class="istickedoff">emitBgCompletion env idx body =</span>
+<span class="lineno">  640 </span><span class="spaces">  </span><span class="istickedoff">emitBanner env</span>
+<span class="lineno">  641 </span><span class="spaces">    </span><span class="istickedoff">(&quot;[bg /&quot; &lt;&gt; T.pack (show (unTabIndex idx)) &lt;&gt; &quot; done] &quot; &lt;&gt; body)</span></span>
+<span class="lineno">  642 </span>
+<span class="lineno">  643 </span>-- | The error banner shown when a provider call fails.
+<span class="lineno">  644 </span>errorBanner :: TabIndex -&gt; Text
+<span class="lineno">  645 </span><span class="decl"><span class="istickedoff">errorBanner idx =</span>
+<span class="lineno">  646 </span><span class="spaces">  </span><span class="istickedoff">&quot;/&quot; &lt;&gt; T.pack (show (unTabIndex idx))</span>
+<span class="lineno">  647 </span><span class="spaces">       </span><span class="istickedoff">&lt;&gt; &quot;: provider error — please try again&quot;</span></span>
+
+</pre>
+</body>
+</html>

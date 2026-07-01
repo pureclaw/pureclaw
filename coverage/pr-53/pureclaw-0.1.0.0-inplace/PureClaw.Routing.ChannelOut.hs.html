@@ -1,0 +1,285 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.ChannelOut
+<span class="lineno">    3 </span>-- Description : Single-writer channel-emission thread for Tabbed Chat (WU4).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- A dedicated writer thread that consumes from
+<span class="lineno">    6 </span>-- 'PureClaw.Agent.Env._env_channelOutQ' and, for each
+<span class="lineno">    7 </span>-- @('OutputSource', 'ChannelEvent')@ pair, decides whether to emit to
+<span class="lineno">    8 </span>-- the underlying 'ChannelHandle' or drop the event based on the
+<span class="lineno">    9 </span>-- current '_env_focus'.
+<span class="lineno">   10 </span>--
+<span class="lineno">   11 </span>-- == Behaviour
+<span class="lineno">   12 </span>--
+<span class="lineno">   13 </span>-- * 'SrcDispatcher' events emit unconditionally (switch confirms,
+<span class="lineno">   14 </span>--   dashboards, errors, breadcrumbs).
+<span class="lineno">   15 </span>-- * 'SrcTab' @n@ events emit only when @_env_focus == Just n@;
+<span class="lineno">   16 </span>--   otherwise they are dropped.
+<span class="lineno">   17 </span>-- * Per the D5 mid-stream switch breadcrumb rule: on the FIRST drop of
+<span class="lineno">   18 </span>--   an AI-tab stream (identified by 'StreamId') the writer emits one
+<span class="lineno">   19 </span>--   @SrcDispatcher BannerLine &quot;/N has new output - /N to view&quot;@.
+<span class="lineno">   20 </span>--   Subsequent drops of the same 'StreamId' are silent. 'StreamEnd'
+<span class="lineno">   21 </span>--   cleans up the breadcrumb state.
+<span class="lineno">   22 </span>-- * Dropped 'FullMsg' events (from non-AI tabs) do NOT emit a
+<span class="lineno">   23 </span>--   breadcrumb — shell\/ssh output is line-oriented and per-line
+<span class="lineno">   24 </span>--   breadcrumbs would be noisy (per D5 backend rule).
+<span class="lineno">   25 </span>--
+<span class="lineno">   26 </span>-- == Public API
+<span class="lineno">   27 </span>--
+<span class="lineno">   28 </span>-- * 'runChannelOutThread' — the writer loop body (runs forever until
+<span class="lineno">   29 </span>--   asynchronously cancelled).
+<span class="lineno">   30 </span>-- * 'startChannelOut' — fork the loop via @_env_fork@ and return the
+<span class="lineno">   31 </span>--   resulting 'TabRunner'.
+<span class="lineno">   32 </span>-- * 'shouldEmit' — producer-side focus pre-check helper exposed so tab
+<span class="lineno">   33 </span>--   loops (WU6\/7\/8) can skip enqueue work when not focused (D4).
+<span class="lineno">   34 </span>-- * 'breadcrumbText' — public for test assertions; the exact wording
+<span class="lineno">   35 </span>--   required by D5.
+<span class="lineno">   36 </span>--
+<span class="lineno">   37 </span>-- See @docs\/tabbed-chat.md@ §&quot;Channel emission via ChannelOut writer&quot;
+<span class="lineno">   38 </span>-- and the D-series DoDs for the full design.
+<span class="lineno">   39 </span>module PureClaw.Routing.ChannelOut
+<span class="lineno">   40 </span>  ( -- * Writer thread
+<span class="lineno">   41 </span>    runChannelOutThread
+<span class="lineno">   42 </span>  , startChannelOut
+<span class="lineno">   43 </span>    -- * Producer-side helper (D4)
+<span class="lineno">   44 </span>  , shouldEmit
+<span class="lineno">   45 </span>    -- * Breadcrumb wording (exposed for tests)
+<span class="lineno">   46 </span>  , breadcrumbText
+<span class="lineno">   47 </span>    -- * Internal state (exposed for tests)
+<span class="lineno">   48 </span>  , BreadcrumbState (..)
+<span class="lineno">   49 </span>    -- * Test seam — drive one iteration with an explicit state ref.
+<span class="lineno">   50 </span>    -- Exposed so unit tests can run the loop body a finite number of
+<span class="lineno">   51 </span>    -- times without spawning a thread that would otherwise never
+<span class="lineno">   52 </span>    -- return ('runChannelOutThread' loops forever).
+<span class="lineno">   53 </span>  , oneStep
+<span class="lineno">   54 </span>  , newBreadcrumbStateRef
+<span class="lineno">   55 </span>  ) where
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>import Control.Concurrent.STM (atomically, readTBQueue)
+<span class="lineno">   58 </span>import Control.Monad (forever, when)
+<span class="lineno">   59 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+<span class="lineno">   60 </span>import Data.Map.Strict (Map)
+<span class="lineno">   61 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   62 </span>import Data.Text (Text)
+<span class="lineno">   63 </span>import Data.Text qualified as T
+<span class="lineno">   64 </span>
+<span class="lineno">   65 </span>import PureClaw.Agent.Env
+<span class="lineno">   66 </span>import PureClaw.Handles.Channel
+<span class="lineno">   67 </span>import PureClaw.Handles.Tab
+<span class="lineno">   68 </span>import PureClaw.Routing.Types
+<span class="lineno">   69 </span>
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   72 </span>-- BreadcrumbState
+<span class="lineno">   73 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>-- | Per-'StreamId' state tracking whether the writer has already
+<span class="lineno">   76 </span>-- emitted a mid-stream-switch breadcrumb for that stream.
+<span class="lineno">   77 </span>--
+<span class="lineno">   78 </span>-- * 'Pending' — the stream's owner has been focused so far (the writer
+<span class="lineno">   79 </span>--   has emitted at least one event for this 'StreamId' without
+<span class="lineno">   80 </span>--   dropping any). The next drop will produce a breadcrumb.
+<span class="lineno">   81 </span>-- * 'Emitted' — a breadcrumb has already been emitted for this
+<span class="lineno">   82 </span>--   'StreamId'; subsequent drops are silent.
+<span class="lineno">   83 </span>--
+<span class="lineno">   84 </span>-- The map entry is removed when the writer observes 'StreamEnd' for
+<span class="lineno">   85 </span>-- the stream (regardless of emit\/drop outcome).
+<span class="lineno">   86 </span>data BreadcrumbState
+<span class="lineno">   87 </span>  = Pending
+<span class="lineno">   88 </span>  | Emitted
+<span class="lineno">   89 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   93 </span>-- Producer-side helper (D4)
+<span class="lineno">   94 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- | Decide whether a producer should bother enqueueing a channel event
+<span class="lineno">   97 </span>-- given the current focus.
+<span class="lineno">   98 </span>--
+<span class="lineno">   99 </span>-- This is an OPTIMISATION, not the authoritative focus gate: the
+<span class="lineno">  100 </span>-- writer thread re-applies the same predicate on dequeue (D3). Tab
+<span class="lineno">  101 </span>-- loops use this to avoid building large 'ChannelEvent' values for
+<span class="lineno">  102 </span>-- non-focused streams (e.g. a fast-streaming non-focused tab would
+<span class="lineno">  103 </span>-- otherwise saturate the bounded @_env_channelOutQ@).
+<span class="lineno">  104 </span>--
+<span class="lineno">  105 </span>-- The focus argument is the current value of @_env_focus@ (an
+<span class="lineno">  106 </span>-- @'IORef' ('Maybe' 'TabIndex')@); the source argument is the
+<span class="lineno">  107 </span>-- 'OutputSource' the producer is about to enqueue.
+<span class="lineno">  108 </span>--
+<span class="lineno">  109 </span>-- * 'SrcDispatcher' events are ALWAYS eligible to emit (dispatcher
+<span class="lineno">  110 </span>--   breadcrumbs, switch confirms, errors must never be dropped).
+<span class="lineno">  111 </span>-- * 'SrcTab' @n@ events are eligible only when the focus equals
+<span class="lineno">  112 </span>--   @'Just' n@.
+<span class="lineno">  113 </span>shouldEmit :: Maybe TabIndex -&gt; OutputSource -&gt; Bool
+<span class="lineno">  114 </span><span class="decl"><span class="istickedoff">shouldEmit _     SrcDispatcher = True</span>
+<span class="lineno">  115 </span><span class="spaces"></span><span class="istickedoff">shouldEmit focus (SrcTab n)    = focus == Just n</span></span>
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>
+<span class="lineno">  118 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  119 </span>-- Breadcrumb wording (D5)
+<span class="lineno">  120 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  121 </span>
+<span class="lineno">  122 </span>-- | The exact breadcrumb text emitted on the first drop of an AI-tab
+<span class="lineno">  123 </span>-- stream. Format: @&quot;/N has new output - /N to view&quot;@ where @N@ is the
+<span class="lineno">  124 </span>-- owner tab's index.
+<span class="lineno">  125 </span>--
+<span class="lineno">  126 </span>-- Exposed publicly so tests can pin the wording without re-deriving
+<span class="lineno">  127 </span>-- it. Status-neutral phrasing per D5.
+<span class="lineno">  128 </span>breadcrumbText :: TabIndex -&gt; Text
+<span class="lineno">  129 </span><span class="decl"><span class="istickedoff">breadcrumbText idx =</span>
+<span class="lineno">  130 </span><span class="spaces">  </span><span class="istickedoff">let nTxt = T.pack (show (unTabIndex idx))</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">in &quot;/&quot; &lt;&gt; nTxt &lt;&gt; &quot; has new output - /&quot; &lt;&gt; nTxt &lt;&gt; &quot; to view&quot;</span></span>
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>
+<span class="lineno">  134 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  135 </span>-- Writer thread
+<span class="lineno">  136 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  137 </span>
+<span class="lineno">  138 </span>-- | Run the channel-out writer loop forever.
+<span class="lineno">  139 </span>--
+<span class="lineno">  140 </span>-- Repeatedly:
+<span class="lineno">  141 </span>--
+<span class="lineno">  142 </span>-- 1. Reads one @('OutputSource', 'ChannelEvent')@ pair off
+<span class="lineno">  143 </span>--    @_env_channelOutQ@ (STM-blocking).
+<span class="lineno">  144 </span>-- 2. Reads @_env_focus@ to decide emit vs drop.
+<span class="lineno">  145 </span>-- 3. Emits via the underlying 'ChannelHandle' or updates the
+<span class="lineno">  146 </span>--    breadcrumb state, per the D-series rules.
+<span class="lineno">  147 </span>--
+<span class="lineno">  148 </span>-- The loop never terminates on its own — it must be cancelled
+<span class="lineno">  149 </span>-- asynchronously via the 'TabRunner' returned by 'startChannelOut'.
+<span class="lineno">  150 </span>runChannelOutThread :: AgentEnv -&gt; IO ()
+<span class="lineno">  151 </span><span class="decl"><span class="istickedoff">runChannelOutThread env = do</span>
+<span class="lineno">  152 </span><span class="spaces">  </span><span class="istickedoff">stateRef &lt;- newBreadcrumbStateRef</span>
+<span class="lineno">  153 </span><span class="spaces">  </span><span class="istickedoff">forever (oneStep env <span class="nottickedoff">stateRef</span>)</span></span>
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>-- | Spawn the writer loop using the environment's @_env_fork@ test
+<span class="lineno">  156 </span>-- seam, returning the 'TabRunner' through which the caller can cancel
+<span class="lineno">  157 </span>-- or wait on the writer.
+<span class="lineno">  158 </span>--
+<span class="lineno">  159 </span>-- The writer is intended to be started once at dispatcher boot (WU5)
+<span class="lineno">  160 </span>-- and torn down via the same @bracket@ that cancels the per-tab
+<span class="lineno">  161 </span>-- runners.
+<span class="lineno">  162 </span>startChannelOut :: AgentEnv -&gt; IO TabRunner
+<span class="lineno">  163 </span><span class="decl"><span class="istickedoff">startChannelOut env = _env_fork env (runChannelOutThread env)</span></span>
+<span class="lineno">  164 </span>
+<span class="lineno">  165 </span>
+<span class="lineno">  166 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  167 </span>-- One iteration (factored out for clarity + testability)
+<span class="lineno">  168 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Allocate a fresh, empty breadcrumb-state 'IORef'. Exposed so unit
+<span class="lineno">  171 </span>-- tests can drive 'oneStep' a finite number of times with their own
+<span class="lineno">  172 </span>-- state ref; production code paths obtain the ref implicitly via
+<span class="lineno">  173 </span>-- 'runChannelOutThread'.
+<span class="lineno">  174 </span>newBreadcrumbStateRef :: IO (IORef (Map StreamId BreadcrumbState))
+<span class="lineno">  175 </span><span class="decl"><span class="istickedoff">newBreadcrumbStateRef = newIORef Map.empty</span></span>
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>-- | Process exactly one queue entry.
+<span class="lineno">  178 </span>--
+<span class="lineno">  179 </span>-- Exposed as a test seam ('runChannelOutThread' loops forever and so
+<span class="lineno">  180 </span>-- is awkward to drive deterministically in a unit test). Production
+<span class="lineno">  181 </span>-- code paths invoke this transitively via 'runChannelOutThread'.
+<span class="lineno">  182 </span>oneStep :: AgentEnv -&gt; IORef (Map StreamId BreadcrumbState) -&gt; IO ()
+<span class="lineno">  183 </span><span class="decl"><span class="istickedoff">oneStep env stateRef = do</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">(src, ev) &lt;- atomically (readTBQueue (_env_channelOutQ env))</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">focus &lt;- readIORef (_env_focus env)</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">case src of</span>
+<span class="lineno">  187 </span><span class="spaces">    </span><span class="istickedoff">SrcDispatcher -&gt; emitEvent (_env_channel env) ev</span>
+<span class="lineno">  188 </span><span class="spaces">    </span><span class="istickedoff">SrcTab n</span>
+<span class="lineno">  189 </span><span class="spaces">      </span><span class="istickedoff">| focus == Just n -&gt; emitWithStreamTracking (_env_channel env) stateRef ev</span>
+<span class="lineno">  190 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>       -&gt; dropWithBreadcrumb (_env_channel env) stateRef n ev</span></span>
+<span class="lineno">  191 </span>
+<span class="lineno">  192 </span>-- | Emit a 'ChannelEvent' that originated from the focused tab,
+<span class="lineno">  193 </span>-- updating the breadcrumb-state map for stream lifecycle bookkeeping
+<span class="lineno">  194 </span>-- (so that a later focus change mid-stream is correctly noticed).
+<span class="lineno">  195 </span>emitWithStreamTracking
+<span class="lineno">  196 </span>  :: ChannelHandle
+<span class="lineno">  197 </span>  -&gt; IORef (Map StreamId BreadcrumbState)
+<span class="lineno">  198 </span>  -&gt; ChannelEvent
+<span class="lineno">  199 </span>  -&gt; IO ()
+<span class="lineno">  200 </span><span class="decl"><span class="istickedoff">emitWithStreamTracking ch stateRef ev = do</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">case ev of</span>
+<span class="lineno">  202 </span><span class="spaces">    </span><span class="istickedoff">StreamStart sid _ -&gt;</span>
+<span class="lineno">  203 </span><span class="spaces">      </span><span class="istickedoff">-- The owner tab is currently focused; register the stream as</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">-- 'Pending' so a later drop emits exactly one breadcrumb.</span>
+<span class="lineno">  205 </span><span class="spaces">      </span><span class="istickedoff">atomicModifyIORef' stateRef</span>
+<span class="lineno">  206 </span><span class="spaces">        </span><span class="istickedoff">(\m -&gt; (Map.insert sid Pending m, ()))</span>
+<span class="lineno">  207 </span><span class="spaces">    </span><span class="istickedoff">StreamEnd sid -&gt;</span>
+<span class="lineno">  208 </span><span class="spaces">      </span><span class="istickedoff">-- GC the breadcrumb state on stream end (regardless of focus).</span>
+<span class="lineno">  209 </span><span class="spaces">      </span><span class="istickedoff">atomicModifyIORef' stateRef</span>
+<span class="lineno">  210 </span><span class="spaces">        </span><span class="istickedoff">(\m -&gt; (Map.delete sid m, ()))</span>
+<span class="lineno">  211 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">emitEvent ch ev</span></span>
+<span class="lineno">  213 </span>
+<span class="lineno">  214 </span>-- | Handle a dropped 'SrcTab' event (focus does not match the source
+<span class="lineno">  215 </span>-- tab). For stream-bearing events on an AI tab we may emit one
+<span class="lineno">  216 </span>-- breadcrumb; for 'FullMsg' (non-AI tabs) we always drop silently.
+<span class="lineno">  217 </span>dropWithBreadcrumb
+<span class="lineno">  218 </span>  :: ChannelHandle
+<span class="lineno">  219 </span>  -&gt; IORef (Map StreamId BreadcrumbState)
+<span class="lineno">  220 </span>  -&gt; TabIndex
+<span class="lineno">  221 </span>  -&gt; ChannelEvent
+<span class="lineno">  222 </span>  -&gt; IO ()
+<span class="lineno">  223 </span><span class="decl"><span class="istickedoff">dropWithBreadcrumb ch stateRef owner ev =</span>
+<span class="lineno">  224 </span><span class="spaces">  </span><span class="istickedoff">case ev of</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="istickedoff">StreamStart sid _ -&gt; handleStreamDrop ch stateRef owner sid</span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="istickedoff">ChunkOf sid _     -&gt; handleStreamDrop ch stateRef owner sid</span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff">StreamEnd sid     -&gt;</span>
+<span class="lineno">  228 </span><span class="spaces">      </span><span class="istickedoff">-- Drop AND clean up: even if the stream's body went unread the</span>
+<span class="lineno">  229 </span><span class="spaces">      </span><span class="istickedoff">-- map entry must not leak.</span>
+<span class="lineno">  230 </span><span class="spaces">      </span><span class="istickedoff">atomicModifyIORef' stateRef</span>
+<span class="lineno">  231 </span><span class="spaces">        </span><span class="istickedoff">(\m -&gt; (Map.delete sid m, ()))</span>
+<span class="lineno">  232 </span><span class="spaces">    </span><span class="istickedoff">FullMsg{}   -&gt; pure <span class="nottickedoff">()</span>  -- non-AI tab drops never breadcrumb (D5).</span>
+<span class="lineno">  233 </span><span class="spaces">    </span><span class="istickedoff">BannerLine{} -&gt; pure <span class="nottickedoff">()</span></span></span> -- BannerLine should only ever arrive on
+<span class="lineno">  234 </span>                            -- SrcDispatcher; defensive no-op here.
+<span class="lineno">  235 </span>
+<span class="lineno">  236 </span>-- | Common breadcrumb logic shared by 'StreamStart' and 'ChunkOf'
+<span class="lineno">  237 </span>-- drops. Emits a breadcrumb iff the stream has not already been
+<span class="lineno">  238 </span>-- breadcrumbed; updates the state map in lock-step with the emission
+<span class="lineno">  239 </span>-- decision.
+<span class="lineno">  240 </span>handleStreamDrop
+<span class="lineno">  241 </span>  :: ChannelHandle
+<span class="lineno">  242 </span>  -&gt; IORef (Map StreamId BreadcrumbState)
+<span class="lineno">  243 </span>  -&gt; TabIndex
+<span class="lineno">  244 </span>  -&gt; StreamId
+<span class="lineno">  245 </span>  -&gt; IO ()
+<span class="lineno">  246 </span><span class="decl"><span class="istickedoff">handleStreamDrop ch stateRef owner sid = do</span>
+<span class="lineno">  247 </span><span class="spaces">  </span><span class="istickedoff">shouldBreadcrumb &lt;- atomicModifyIORef' stateRef $ \m -&gt;</span>
+<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">case Map.lookup sid m of</span>
+<span class="lineno">  249 </span><span class="spaces">      </span><span class="istickedoff">Just Emitted -&gt; (m, False)</span>
+<span class="lineno">  250 </span><span class="spaces">      </span><span class="istickedoff">_            -&gt; (Map.insert sid Emitted m, True)</span>
+<span class="lineno">  251 </span><span class="spaces">  </span><span class="istickedoff">when shouldBreadcrumb (emitEvent ch (BannerLine (breadcrumbText owner)))</span></span>
+<span class="lineno">  252 </span>
+<span class="lineno">  253 </span>-- | Translate a 'ChannelEvent' into the underlying 'ChannelHandle'
+<span class="lineno">  254 </span>-- calls. 'StreamStart' is metadata for the writer's state machine and
+<span class="lineno">  255 </span>-- has no on-channel representation.
+<span class="lineno">  256 </span>emitEvent :: ChannelHandle -&gt; ChannelEvent -&gt; IO ()
+<span class="lineno">  257 </span><span class="decl"><span class="istickedoff">emitEvent ch ev = case ev of</span>
+<span class="lineno">  258 </span><span class="spaces">  </span><span class="istickedoff">StreamStart{}   -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">ChunkOf _ t     -&gt; _ch_sendChunk ch (ChunkText t)</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">StreamEnd _     -&gt; _ch_sendChunk ch ChunkDone</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="istickedoff">FullMsg _ t     -&gt; _ch_send ch (OutgoingMessage t)</span>
+<span class="lineno">  262 </span><span class="spaces">  </span><span class="istickedoff">BannerLine t    -&gt; _ch_send ch (OutgoingMessage t)</span></span>
+
+</pre>
+</body>
+</html>

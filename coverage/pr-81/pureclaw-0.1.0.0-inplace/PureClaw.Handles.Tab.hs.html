@@ -1,0 +1,533 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE PatternSynonyms #-}
+<span class="lineno">    2 </span>-- |
+<span class="lineno">    3 </span>-- Module      : PureClaw.Handles.Tab
+<span class="lineno">    4 </span>-- Description : Tabbed Chat type layer (WU1) — user-facing primitive: a tab.
+<span class="lineno">    5 </span>--
+<span class="lineno">    6 </span>-- A 'TabHandle' is the universal Handle-pattern carrier for one tab in
+<span class="lineno">    7 </span>-- the Tabbed Chat surface. Each tab carries a 'TabKind' discriminator
+<span class="lineno">    8 </span>-- that classifies it as either a /session-backed/ tab
+<span class="lineno">    9 </span>-- (@'TkSession' sk@, where @sk@ is a 'PureClaw.Session.Kind.SessionKind')
+<span class="lineno">   10 </span>-- or a /raw terminal-backend/ tab
+<span class="lineno">   11 </span>-- (@'TkRawShell' tb@, where @tb@ is a 'PureClaw.Session.Kind.TerminalBackend').
+<span class="lineno">   12 </span>-- The dispatcher routes user input to the focused tab and per-tab
+<span class="lineno">   13 </span>-- output to the channel (focus-gated).
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- == Spec-vs-runtime layering (T6)
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- 'PureClaw.Session.Kind.SessionKind' and its component types
+<span class="lineno">   18 </span>-- ('ProviderSpec', 'HarnessSpec', 'TerminalBackend', etc.) are
+<span class="lineno">   19 </span>-- /serialisation-safe specs/ — they carry configuration data that can
+<span class="lineno">   20 </span>-- be round-tripped through JSON or TOML without IO.
+<span class="lineno">   21 </span>--
+<span class="lineno">   22 </span>-- Runtime-validated types ('SafePath', 'SshTarget', 'AuthorizedCommand',
+<span class="lineno">   23 </span>-- etc.) live in the factory and transport layers
+<span class="lineno">   24 </span>-- ('PureClaw.Tab.Ai', 'PureClaw.Tab.Backend', 'PureClaw.Tab.Harness')
+<span class="lineno">   25 </span>-- and are never stored in 'TabKind'. This module sits at the boundary:
+<span class="lineno">   26 </span>-- 'TabKind' references the spec layer but never exposes the runtime
+<span class="lineno">   27 </span>-- layer.
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- == Scope of WU1
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- This module currently lands the type layer only: 'TabHandle' record
+<span class="lineno">   32 </span>-- shape, smart constructors, error ADTs (with the manually-written
+<span class="lineno">   33 </span>-- redacted 'Show' instance for 'TabError' required by H14), and the
+<span class="lineno">   34 </span>-- per-kind factory signatures. Factory bodies are stubbed with
+<span class="lineno">   35 </span>-- @'error' \&quot;not implemented\&quot;@ — the real bodies land in WU6 ('Tab.Ai'),
+<span class="lineno">   36 </span>-- WU7 ('Tab.Harness'), and WU8 ('Tab.Backend').
+<span class="lineno">   37 </span>--
+<span class="lineno">   38 </span>-- == Field-naming convention
+<span class="lineno">   39 </span>--
+<span class="lineno">   40 </span>-- The handle record uses the @_tabHandle_*@ field-name prefix (NOT the
+<span class="lineno">   41 </span>-- terser @_th_*@ used in some older draft notes). This was decided
+<span class="lineno">   42 </span>-- during WU0 planning to keep the prefix self-describing when the field
+<span class="lineno">   43 </span>-- name is grepped in isolation.
+<span class="lineno">   44 </span>--
+<span class="lineno">   45 </span>-- See @docs\/tabbed-chat.md@ for the full design (sections
+<span class="lineno">   46 </span>-- \&quot;TabHandle abstraction (H-series)\&quot; and \&quot;Channel output\&quot;).
+<span class="lineno">   47 </span>module PureClaw.Handles.Tab
+<span class="lineno">   48 </span>  ( -- * Tab index
+<span class="lineno">   49 </span>    TabIndex
+<span class="lineno">   50 </span>  , mkTabIndex
+<span class="lineno">   51 </span>  , unTabIndex
+<span class="lineno">   52 </span>    -- * Tab kind
+<span class="lineno">   53 </span>  , TabKind (..)
+<span class="lineno">   54 </span>    -- ** Legacy pattern synonyms (backward compatibility)
+<span class="lineno">   55 </span>  , pattern KindAi
+<span class="lineno">   56 </span>  , pattern KindHarness
+<span class="lineno">   57 </span>  , pattern KindShell
+<span class="lineno">   58 </span>  , pattern KindSsh
+<span class="lineno">   59 </span>  , pattern KindTmux
+<span class="lineno">   60 </span>    -- * Tab status
+<span class="lineno">   61 </span>  , TabStatus (..)
+<span class="lineno">   62 </span>    -- * Tab handle
+<span class="lineno">   63 </span>  , TabHandle (..)
+<span class="lineno">   64 </span>  , TabName (..)
+<span class="lineno">   65 </span>  , CloseMode (..)
+<span class="lineno">   66 </span>    -- * Tab runner (cancel + wait pair, used by spawn machinery)
+<span class="lineno">   67 </span>  , TabRunner (..)
+<span class="lineno">   68 </span>    -- * Errors
+<span class="lineno">   69 </span>  , TabError (..)
+<span class="lineno">   70 </span>  , NameError (..)
+<span class="lineno">   71 </span>  , PublicTabError (..)
+<span class="lineno">   72 </span>  , toPublicTabError
+<span class="lineno">   73 </span>    -- * Placeholder payload types
+<span class="lineno">   74 </span>    -- These are placeholder ADTs that future WUs will refine \/ promote
+<span class="lineno">   75 </span>    -- to their own modules. They are kept here so 'TabError' compiles
+<span class="lineno">   76 </span>    -- without forward-referencing modules that do not yet exist.
+<span class="lineno">   77 </span>  , SessionError (..)
+<span class="lineno">   78 </span>  , PublicAuthError (..)
+<span class="lineno">   79 </span>    -- * Factory signatures (stubbed in WU1; bodies filled in by WU6\/7\/8)
+<span class="lineno">   80 </span>  , AiSpawnArgs (..)
+<span class="lineno">   81 </span>  , HarnessSpawnArgs (..)
+<span class="lineno">   82 </span>  , BackendSpawnArgs (..)
+<span class="lineno">   83 </span>  , mkTabAi
+<span class="lineno">   84 </span>  , mkTabHarness
+<span class="lineno">   85 </span>  , mkRawShellTab
+<span class="lineno">   86 </span>  ) where
+<span class="lineno">   87 </span>
+<span class="lineno">   88 </span>import Data.Text (Text)
+<span class="lineno">   89 </span>import Data.Time (UTCTime)
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>import PureClaw.Agent.SlashCommands qualified as Slash
+<span class="lineno">   92 </span>import PureClaw.Handles.Backend qualified as Backend
+<span class="lineno">   93 </span>import PureClaw.Core.Types (ModelId (..), ProviderId (..))
+<span class="lineno">   94 </span>import PureClaw.Session.Kind
+<span class="lineno">   95 </span>  ( HarnessFlavour (..)
+<span class="lineno">   96 </span>  , HarnessSpec (..)
+<span class="lineno">   97 </span>  , ProviderSpec (..)
+<span class="lineno">   98 </span>  , SessionKind (..)
+<span class="lineno">   99 </span>  , SshConfig (..)
+<span class="lineno">  100 </span>  , TerminalBackend (..)
+<span class="lineno">  101 </span>  , TmuxConfig (..)
+<span class="lineno">  102 </span>  )
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>
+<span class="lineno">  105 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  106 </span>-- TabIndex
+<span class="lineno">  107 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  108 </span>
+<span class="lineno">  109 </span>-- | Validated tab index. The data constructor is intentionally NOT
+<span class="lineno">  110 </span>-- exported; obtain values via 'mkTabIndex' (which bounds-checks against
+<span class="lineno">  111 </span>-- the configured @_rc_maxTabs@ ceiling) or by pattern-matching on the
+<span class="lineno">  112 </span>-- newtype via 'unTabIndex'.
+<span class="lineno">  113 </span>--
+<span class="lineno">  114 </span>-- The underlying 'Int' is non-negative on every value produced by
+<span class="lineno">  115 </span>-- 'mkTabIndex' (@0 &lt;= n@). Bounds-checking against @_rc_maxTabs@ is
+<span class="lineno">  116 </span>-- performed at the parser layer (WU2) using the 'RoutingConfig' in
+<span class="lineno">  117 </span>-- scope; the smart constructor here enforces the floor only.
+<span class="lineno">  118 </span>newtype TabIndex = TabIndex { <span class="istickedoff"><span class="decl"><span class="istickedoff">unTabIndex</span></span></span> :: Int }
+<span class="lineno">  119 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- | The only way to construct a 'TabIndex'. Returns 'Nothing' for
+<span class="lineno">  122 </span>-- negative inputs.
+<span class="lineno">  123 </span>mkTabIndex :: Int -&gt; Maybe TabIndex
+<span class="lineno">  124 </span><span class="decl"><span class="istickedoff">mkTabIndex n</span>
+<span class="lineno">  125 </span><span class="spaces">  </span><span class="istickedoff">| n &lt; 0     = Nothing</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Just (TabIndex n)</span></span>
+<span class="lineno">  127 </span>
+<span class="lineno">  128 </span>
+<span class="lineno">  129 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  130 </span>-- TabKind
+<span class="lineno">  131 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | Kind of tab — two-level discriminator (WU-5 refactor, T4).
+<span class="lineno">  134 </span>--
+<span class="lineno">  135 </span>-- * @'TkSession' sk@ — session-backed tab. The 'SessionKind' payload
+<span class="lineno">  136 </span>--   ('SkProvider' or 'SkHarness') is a serialisation-safe /spec/
+<span class="lineno">  137 </span>--   (declared in &quot;PureClaw.Session.Kind&quot;); runtime-validated types
+<span class="lineno">  138 </span>--   ('SafePath', 'SshTarget', etc.) live in factory\/transport layers.
+<span class="lineno">  139 </span>--   This module sits at the boundary: 'TabKind' references the spec
+<span class="lineno">  140 </span>--   layer but never exposes the runtime layer (T6).
+<span class="lineno">  141 </span>--
+<span class="lineno">  142 </span>-- * @'TkRawShell' tb@ — raw terminal-backend tab (local shell, SSH,
+<span class="lineno">  143 </span>--   or tmux). The 'TerminalBackend' payload carries connection
+<span class="lineno">  144 </span>--   coordinates; the backend factory validates and connects.
+<span class="lineno">  145 </span>data TabKind
+<span class="lineno">  146 </span>  = TkSession  !SessionKind
+<span class="lineno">  147 </span>  | TkRawShell !TerminalBackend
+<span class="lineno">  148 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  149 </span>
+<span class="lineno">  150 </span>-- | @KindAi@ matches any provider-backed session tab. When used as
+<span class="lineno">  151 </span>-- an expression it constructs a 'TkSession' with a placeholder
+<span class="lineno">  152 </span>-- 'ProviderSpec' — production code should prefer the explicit
+<span class="lineno">  153 </span>-- constructor with a real spec.
+<span class="lineno">  154 </span>pattern KindAi :: TabKind
+<span class="lineno">  155 </span>pattern KindAi &lt;- <span class="istickedoff">TkSession (SkProvider {})</span>
+<span class="lineno">  156 </span>  where KindAi = <span class="istickedoff">TkSession (SkProvider defaultProviderSpec)</span>
+<span class="lineno">  157 </span>
+<span class="lineno">  158 </span>-- | @KindHarness@ matches any harness-backed session tab. When used
+<span class="lineno">  159 </span>-- as an expression it constructs a 'TkSession' with a placeholder
+<span class="lineno">  160 </span>-- 'HarnessSpec'.
+<span class="lineno">  161 </span>pattern KindHarness :: TabKind
+<span class="lineno">  162 </span>pattern KindHarness &lt;- <span class="nottickedoff">TkSession (SkHarness {})</span>
+<span class="lineno">  163 </span>  where KindHarness = <span class="istickedoff">TkSession (SkHarness defaultHarnessSpec)</span>
+<span class="lineno">  164 </span>
+<span class="lineno">  165 </span>-- | @KindShell@ matches a local-shell backend tab.
+<span class="lineno">  166 </span>pattern KindShell :: TabKind
+<span class="lineno">  167 </span>pattern KindShell = <span class="nottickedoff"><span class="istickedoff">TkRawShell TbLocal</span></span>
+<span class="lineno">  168 </span>
+<span class="lineno">  169 </span>-- | @KindSsh@ matches an SSH backend tab. When used as an expression
+<span class="lineno">  170 </span>-- it constructs a 'TkRawShell' with a placeholder 'SshConfig'.
+<span class="lineno">  171 </span>pattern KindSsh :: TabKind
+<span class="lineno">  172 </span>pattern KindSsh &lt;- <span class="nottickedoff">TkRawShell (TbSsh {})</span>
+<span class="lineno">  173 </span>  where KindSsh = <span class="istickedoff">TkRawShell (TbSsh defaultSshConfig)</span>
+<span class="lineno">  174 </span>
+<span class="lineno">  175 </span>-- | @KindTmux@ matches a tmux backend tab. When used as an expression
+<span class="lineno">  176 </span>-- it constructs a 'TkRawShell' with a placeholder 'TmuxConfig'.
+<span class="lineno">  177 </span>pattern KindTmux :: TabKind
+<span class="lineno">  178 </span>pattern KindTmux &lt;- <span class="nottickedoff">TkRawShell (TbTmux {})</span>
+<span class="lineno">  179 </span>  where KindTmux = <span class="istickedoff">TkRawShell (TbTmux defaultTmuxConfig)</span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- | Default 'ProviderSpec' used by the 'KindAi' pattern synonym.
+<span class="lineno">  182 </span>defaultProviderSpec :: ProviderSpec
+<span class="lineno">  183 </span><span class="decl"><span class="istickedoff">defaultProviderSpec = ProviderSpec</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">{ _ps_provider = ProviderId &quot;anthropic&quot;</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">, _ps_model    = ModelId &quot;placeholder&quot;</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">, _ps_agent    = Nothing</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  188 </span>
+<span class="lineno">  189 </span>-- | Default 'HarnessSpec' used by the 'KindHarness' pattern synonym.
+<span class="lineno">  190 </span>defaultHarnessSpec :: HarnessSpec
+<span class="lineno">  191 </span><span class="decl"><span class="istickedoff">defaultHarnessSpec = HarnessSpec</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="istickedoff">{ _h_flavour   = HClaudeCode</span>
+<span class="lineno">  193 </span><span class="spaces">  </span><span class="istickedoff">, _h_backend   = TbLocal</span>
+<span class="lineno">  194 </span><span class="spaces">  </span><span class="istickedoff">, _h_cwd       = Nothing</span>
+<span class="lineno">  195 </span><span class="spaces">  </span><span class="istickedoff">, _h_args      = []</span>
+<span class="lineno">  196 </span><span class="spaces">  </span><span class="istickedoff">, _h_harnessId = Nothing</span>
+<span class="lineno">  197 </span><span class="spaces">  </span><span class="istickedoff">, _h_claudeSessionUuid = Nothing</span>
+<span class="lineno">  198 </span><span class="spaces">  </span><span class="istickedoff">, _h_canonicalCwd      = Nothing</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  200 </span>
+<span class="lineno">  201 </span>-- | Default 'SshConfig' used by the 'KindSsh' pattern synonym.
+<span class="lineno">  202 </span>defaultSshConfig :: SshConfig
+<span class="lineno">  203 </span><span class="decl"><span class="istickedoff">defaultSshConfig = SshConfig</span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="istickedoff">{ _sc_user = &quot;placeholder&quot;</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">, _sc_host = &quot;placeholder&quot;</span>
+<span class="lineno">  206 </span><span class="spaces">  </span><span class="istickedoff">, _sc_port = Nothing</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  208 </span>
+<span class="lineno">  209 </span>-- | Default 'TmuxConfig' used by the 'KindTmux' pattern synonym.
+<span class="lineno">  210 </span>defaultTmuxConfig :: TmuxConfig
+<span class="lineno">  211 </span><span class="decl"><span class="istickedoff">defaultTmuxConfig = TmuxConfig</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">{ _tc_session = &quot;placeholder&quot;</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">, _tc_window  = &quot;placeholder&quot;</span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">, _tc_pane    = Nothing</span>
+<span class="lineno">  215 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  216 </span>
+<span class="lineno">  217 </span>
+<span class="lineno">  218 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  219 </span>-- TabName
+<span class="lineno">  220 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  221 </span>
+<span class="lineno">  222 </span>-- | A redaction-safe, length-capped friendly label for a tab.
+<span class="lineno">  223 </span>--
+<span class="lineno">  224 </span>-- Construction must go through @sanitizeTabName@ (lands in WU2,
+<span class="lineno">  225 </span>-- @PureClaw.Routing.Parse@) — every code path that sets
+<span class="lineno">  226 </span>-- '_tabHandle_name' on a 'TabHandle' routes through that function per
+<span class="lineno">  227 </span>-- H11. The newtype here is the type-level carrier so the contract
+<span class="lineno">  228 </span>-- survives refactoring; the validating constructor itself lives in the
+<span class="lineno">  229 </span>-- parser module so it can share the @NameError@ vocabulary with the
+<span class="lineno">  230 </span>-- @\/tab rename@ handler.
+<span class="lineno">  231 </span>newtype TabName = TabName { <span class="istickedoff"><span class="decl"><span class="istickedoff">unTabName</span></span></span> :: Text }
+<span class="lineno">  232 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  233 </span>
+<span class="lineno">  234 </span>
+<span class="lineno">  235 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  236 </span>-- TabStatus
+<span class="lineno">  237 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  238 </span>
+<span class="lineno">  239 </span>-- | Runtime status of a tab.
+<span class="lineno">  240 </span>--
+<span class="lineno">  241 </span>-- * 'Active' — a provider call or tool execution is in flight, OR a
+<span class="lineno">  242 </span>--   backend recv is waiting for output. The dashboard does not
+<span class="lineno">  243 </span>--   distinguish these sub-cases.
+<span class="lineno">  244 </span>-- * 'Idle' — the tab is waiting for input; carries the timestamp of
+<span class="lineno">  245 </span>--   the last observed input (for sort / display).
+<span class="lineno">  246 </span>-- * 'Crashed' — the tab loop hit a synchronous exception and exited;
+<span class="lineno">  247 </span>--   the wrapped 'PublicTabError' is the channel-safe summary. The
+<span class="lineno">  248 </span>--   registry entry persists until @\/tab close N@ or
+<span class="lineno">  249 </span>--   @\/tab resume \&lt;session\&gt;@.
+<span class="lineno">  250 </span>data TabStatus
+<span class="lineno">  251 </span>  = Active
+<span class="lineno">  252 </span>  | Idle !UTCTime
+<span class="lineno">  253 </span>  | Crashed !PublicTabError
+<span class="lineno">  254 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  255 </span>
+<span class="lineno">  256 </span>
+<span class="lineno">  257 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  258 </span>-- CloseMode
+<span class="lineno">  259 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  260 </span>
+<span class="lineno">  261 </span>-- | Close semantics requested by the caller of '_tabHandle_close'.
+<span class="lineno">  262 </span>--
+<span class="lineno">  263 </span>-- * 'CloseGraceful' — kind-specific graceful close: for AI sessions
+<span class="lineno">  264 </span>--   ('TkSession (SkProvider _)') archives the session via @_sh_save@;
+<span class="lineno">  265 </span>--   for non-AI kinds runs the underlying destructive close (e.g.
+<span class="lineno">  266 </span>--   @_bh_close@, @_hh_stop@).
+<span class="lineno">  267 </span>-- * 'CloseForce' — for AI sessions skips the archive (transcript
+<span class="lineno">  268 </span>--   deleted from disk); for non-AI kinds is a no-op distinct from
+<span class="lineno">  269 </span>--   'CloseGraceful' because close is already destructive there.
+<span class="lineno">  270 </span>data CloseMode
+<span class="lineno">  271 </span>  = CloseGraceful
+<span class="lineno">  272 </span>  | CloseForce
+<span class="lineno">  273 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  274 </span>
+<span class="lineno">  275 </span>
+<span class="lineno">  276 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  277 </span>-- TabRunner
+<span class="lineno">  278 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  279 </span>
+<span class="lineno">  280 </span>-- | The cancel + wait pair returned by the @_env_fork@ test seam.
+<span class="lineno">  281 </span>--
+<span class="lineno">  282 </span>-- Cannot be an 'Control.Concurrent.Async.Async' directly because:
+<span class="lineno">  283 </span>-- (a) the synchronous test variant runs the body inline and has no
+<span class="lineno">  284 </span>-- live async to wrap; (b) the IORef-Bool cancel-observability primitive
+<span class="lineno">  285 </span>-- used by tests needs a uniform shape across sync and async variants.
+<span class="lineno">  286 </span>--
+<span class="lineno">  287 </span>-- See the @TabRunner bootstrapping during spawn@ section of the design
+<span class="lineno">  288 </span>-- doc and the WU0 scaffold in @Test.Fake.TabFactory@.
+<span class="lineno">  289 </span>data TabRunner = TabRunner
+<span class="lineno">  290 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_trun_cancel</span></span></span> :: IO ()
+<span class="lineno">  291 </span>    -- ^ Idempotent cancel. Safe to call multiple times; safe to call
+<span class="lineno">  292 </span>    --   on a runner whose body has already exited.
+<span class="lineno">  293 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_trun_wait</span></span></span>   :: IO ()
+<span class="lineno">  294 </span>    -- ^ Block until the tab loop's body exits. In the synchronous
+<span class="lineno">  295 </span>    --   test variant returns immediately because the body has
+<span class="lineno">  296 </span>    --   already run inline.
+<span class="lineno">  297 </span>  }
+<span class="lineno">  298 </span>
+<span class="lineno">  299 </span>
+<span class="lineno">  300 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  301 </span>-- TabHandle
+<span class="lineno">  302 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  303 </span>
+<span class="lineno">  304 </span>-- | Universal Handle-pattern carrier for one tab.
+<span class="lineno">  305 </span>--
+<span class="lineno">  306 </span>-- Pure fields ('_tabHandle_index', '_tabHandle_name', '_tabHandle_kind')
+<span class="lineno">  307 </span>-- are bound at construction time. IO-action fields are kind-specific:
+<span class="lineno">  308 </span>-- 'TkSession (SkProvider _)' enqueues into a per-tab @TBQueue InputEvent@; non-AI kinds
+<span class="lineno">  309 </span>-- write to a 'PureClaw.Handles.Backend.BackendHandle' or
+<span class="lineno">  310 </span>-- 'PureClaw.Handles.Harness.HarnessHandle'.
+<span class="lineno">  311 </span>--
+<span class="lineno">  312 </span>-- '_tabHandle_close' is idempotent and never throws (parallel to the
+<span class="lineno">  313 </span>-- @_bh_close@ contract on 'PureClaw.Handles.Backend.BackendHandle').
+<span class="lineno">  314 </span>data TabHandle = TabHandle
+<span class="lineno">  315 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_index</span></span></span>         :: !TabIndex
+<span class="lineno">  316 </span>    -- ^ Pure: tab's slot in the registry (H12-adjacent).
+<span class="lineno">  317 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_name</span></span></span>          :: !TabName
+<span class="lineno">  318 </span>    -- ^ Pure: redacted friendly label (H11). Constructed via
+<span class="lineno">  319 </span>    --   @sanitizeTabName@ (WU2) at the factory site.
+<span class="lineno">  320 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_kind</span></span></span>          :: !TabKind
+<span class="lineno">  321 </span>    -- ^ Pure: H12. Read without IO.
+<span class="lineno">  322 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_status</span></span></span>        :: IO TabStatus
+<span class="lineno">  323 </span>    -- ^ H5: returns 'Active' \/ 'Idle' \/ 'Crashed'.
+<span class="lineno">  324 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_send</span></span></span>          :: Text -&gt; IO (Either TabError ())
+<span class="lineno">  325 </span>    -- ^ H4: enqueue a 'UserText' input event. Bounded by
+<span class="lineno">  326 </span>    --   @_rc_inputQueueBound@; overflow returns
+<span class="lineno">  327 </span>    --   'Left' (e.g. 'TabConcurrencyLimit') so the dispatcher never
+<span class="lineno">  328 </span>    --   blocks.
+<span class="lineno">  329 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_enqueueSlash</span></span></span>  :: Slash.SlashCommand -&gt; IO (Either TabError ())
+<span class="lineno">  330 </span>    -- ^ H13: enqueue a 'SlashCmd' input event. For AI sessions the tab
+<span class="lineno">  331 </span>    --   loop runs @executeSlashCommand@ against its own per-tab
+<span class="lineno">  332 </span>    --   context; for non-AI kinds the implementation returns
+<span class="lineno">  333 </span>    --   @Left ('TabUnsupportedCommand' cmd)@ immediately without
+<span class="lineno">  334 </span>    --   enqueueing.
+<span class="lineno">  335 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tabHandle_close</span></span></span>         :: CloseMode -&gt; IO ()
+<span class="lineno">  336 </span>    -- ^ H6 \/ H7 \/ H8 \/ H9 \/ H10: idempotent, never throws,
+<span class="lineno">  337 </span>    --   kind-specific semantics. The 'CloseMode' selects graceful
+<span class="lineno">  338 </span>    --   vs forced archive behaviour for AI sessions.
+<span class="lineno">  339 </span>  }
+<span class="lineno">  340 </span>
+<span class="lineno">  341 </span>
+<span class="lineno">  342 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  343 </span>-- NameError
+<span class="lineno">  344 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>-- | Why a tab-name sanitization attempt failed.
+<span class="lineno">  347 </span>--
+<span class="lineno">  348 </span>-- A redacted ADT, never raw user input — appears as the payload of
+<span class="lineno">  349 </span>-- 'TabInvalidName'. The actual sanitization function ('sanitizeTabName')
+<span class="lineno">  350 </span>-- lands in WU2 alongside the parser; this enum is here so 'TabError'
+<span class="lineno">  351 </span>-- can refer to it.
+<span class="lineno">  352 </span>data NameError
+<span class="lineno">  353 </span>  = NameTooLong
+<span class="lineno">  354 </span>  | NameContainsControlBytes
+<span class="lineno">  355 </span>  | NameContainsAnsi
+<span class="lineno">  356 </span>  | NameRedactedToEmpty
+<span class="lineno">  357 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  358 </span>
+<span class="lineno">  359 </span>
+<span class="lineno">  360 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  361 </span>-- Placeholder error payload types
+<span class="lineno">  362 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  363 </span>
+<span class="lineno">  364 </span>-- | Placeholder for the session-creation error vocabulary. The
+<span class="lineno">  365 </span>-- definitive shape lives with the session machinery in WU6 (the AI tab
+<span class="lineno">  366 </span>-- factory is what creates new sessions). For WU1 we expose a single
+<span class="lineno">  367 </span>-- opaque constructor so 'TabSessionCreateFailed' has somewhere to
+<span class="lineno">  368 </span>-- park its payload while the type layer compiles.
+<span class="lineno">  369 </span>data SessionError = SessionError
+<span class="lineno">  370 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  371 </span>
+<span class="lineno">  372 </span>-- | Placeholder for the spawn-time authorization-failure vocabulary
+<span class="lineno">  373 </span>-- (channel-safe). The definitive shape lands in WU8 alongside
+<span class="lineno">  374 </span>-- 'mkRawShellTab' (which performs the 'authorize' check per S1). For
+<span class="lineno">  375 </span>-- WU1 we expose a single opaque constructor so 'TabSpawnAuthDenied'
+<span class="lineno">  376 </span>-- has somewhere to park its payload while the type layer compiles.
+<span class="lineno">  377 </span>data PublicAuthError = PublicAuthError
+<span class="lineno">  378 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  379 </span>
+<span class="lineno">  380 </span>
+<span class="lineno">  381 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  382 </span>-- TabError
+<span class="lineno">  383 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  384 </span>
+<span class="lineno">  385 </span>-- | Construction-time and runtime errors on a tab.
+<span class="lineno">  386 </span>--
+<span class="lineno">  387 </span>-- Every constructor's payload is itself a redaction-safe ADT or a
+<span class="lineno">  388 </span>-- bounded primitive — no constructor carries a free 'Data.Text.Text',
+<span class="lineno">  389 </span>-- a raw 'Control.Exception.SomeException' message, or a raw filesystem
+<span class="lineno">  390 </span>-- path. The hand-written 'Show' below (H14) elides every payload value
+<span class="lineno">  391 </span>-- so accidental @show@ of a 'TabError' in a log line cannot leak
+<span class="lineno">  392 </span>-- hostnames, paths, or stderr fragments.
+<span class="lineno">  393 </span>--
+<span class="lineno">  394 </span>-- The exhaustive constructor list is enforced by H3.
+<span class="lineno">  395 </span>data TabError
+<span class="lineno">  396 </span>  = TabIndexInUse !TabIndex
+<span class="lineno">  397 </span>  | TabIndexOutOfRange !Int
+<span class="lineno">  398 </span>  | TabLimitExceeded !Int
+<span class="lineno">  399 </span>  | TabBackendConstructFailed !Backend.BackendError
+<span class="lineno">  400 </span>  | TabSessionCreateFailed !SessionError
+<span class="lineno">  401 </span>  | TabSpawnAuthDenied !PublicAuthError
+<span class="lineno">  402 </span>  | TabNotFound !Int
+<span class="lineno">  403 </span>  | TabConcurrencyLimit !Int
+<span class="lineno">  404 </span>  | TabInvalidName !NameError
+<span class="lineno">  405 </span>  | TabUnsupportedCommand !Slash.SlashCommand
+<span class="lineno">  406 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  407 </span>
+<span class="lineno">  408 </span>-- | Hand-written 'Show' for 'TabError' per H14: constructor names only,
+<span class="lineno">  409 </span>-- payload values elided. Adding a new constructor here requires adding
+<span class="lineno">  410 </span>-- a new branch in this 'Show' instance (H3 enumerates the exhaustive
+<span class="lineno">  411 </span>-- set), so accidentally regressing to @deriving Show@ would surface as
+<span class="lineno">  412 </span>-- a build error from the @-Wincomplete-patterns@ flag.
+<span class="lineno">  413 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show TabError</span></span></span></span> where
+<span class="lineno">  414 </span>  <span class="decl"><span class="istickedoff">show e = case e of</span>
+<span class="lineno">  415 </span><span class="spaces">    </span><span class="istickedoff">TabIndexInUse{}             -&gt; &quot;TabIndexInUse&quot;</span>
+<span class="lineno">  416 </span><span class="spaces">    </span><span class="istickedoff">TabIndexOutOfRange{}        -&gt; &quot;TabIndexOutOfRange&quot;</span>
+<span class="lineno">  417 </span><span class="spaces">    </span><span class="istickedoff">TabLimitExceeded{}          -&gt; &quot;TabLimitExceeded&quot;</span>
+<span class="lineno">  418 </span><span class="spaces">    </span><span class="istickedoff">TabBackendConstructFailed{} -&gt; &quot;TabBackendConstructFailed&quot;</span>
+<span class="lineno">  419 </span><span class="spaces">    </span><span class="istickedoff">TabSessionCreateFailed{}    -&gt; &quot;TabSessionCreateFailed&quot;</span>
+<span class="lineno">  420 </span><span class="spaces">    </span><span class="istickedoff">TabSpawnAuthDenied{}        -&gt; &quot;TabSpawnAuthDenied&quot;</span>
+<span class="lineno">  421 </span><span class="spaces">    </span><span class="istickedoff">TabNotFound{}               -&gt; &quot;TabNotFound&quot;</span>
+<span class="lineno">  422 </span><span class="spaces">    </span><span class="istickedoff">TabConcurrencyLimit{}       -&gt; &quot;TabConcurrencyLimit&quot;</span>
+<span class="lineno">  423 </span><span class="spaces">    </span><span class="istickedoff">TabInvalidName{}            -&gt; &quot;TabInvalidName&quot;</span>
+<span class="lineno">  424 </span><span class="spaces">    </span><span class="istickedoff">TabUnsupportedCommand{}     -&gt; &quot;TabUnsupportedCommand&quot;</span></span>
+<span class="lineno">  425 </span>
+<span class="lineno">  426 </span>
+<span class="lineno">  427 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  428 </span>-- PublicTabError
+<span class="lineno">  429 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  430 </span>
+<span class="lineno">  431 </span>-- | Channel-safe projection of a 'TabError'.
+<span class="lineno">  432 </span>--
+<span class="lineno">  433 </span>-- The wrapped 'Data.Text.Text' is short, fixed-vocabulary, and
+<span class="lineno">  434 </span>-- contains no hostnames, paths, or secrets. This is what reaches the
+<span class="lineno">  435 </span>-- user via 'PureClaw.Handles.Channel.ChannelHandle' when a tab
+<span class="lineno">  436 </span>-- operation fails.
+<span class="lineno">  437 </span>newtype PublicTabError = PublicTabError { <span class="istickedoff"><span class="decl"><span class="istickedoff">unPublicTabError</span></span></span> :: Text }
+<span class="lineno">  438 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  439 </span>
+<span class="lineno">  440 </span>-- | Project a 'TabError' to its user-visible form.
+<span class="lineno">  441 </span>--
+<span class="lineno">  442 </span>-- The mapping is intentionally coarse: similar failure modes collapse
+<span class="lineno">  443 </span>-- to the same short label so a future audit of channel-bound strings
+<span class="lineno">  444 </span>-- has a small surface to grep.
+<span class="lineno">  445 </span>toPublicTabError :: TabError -&gt; PublicTabError
+<span class="lineno">  446 </span><span class="decl"><span class="istickedoff">toPublicTabError e = PublicTabError $ case e of</span>
+<span class="lineno">  447 </span><span class="spaces">  </span><span class="istickedoff">TabIndexInUse{}             -&gt; &quot;tab: index already in use&quot;</span>
+<span class="lineno">  448 </span><span class="spaces">  </span><span class="istickedoff">TabIndexOutOfRange{}        -&gt; <span class="nottickedoff">&quot;tab: index out of range&quot;</span></span>
+<span class="lineno">  449 </span><span class="spaces">  </span><span class="istickedoff">TabLimitExceeded{}          -&gt; &quot;tab: maximum tab count reached&quot;</span>
+<span class="lineno">  450 </span><span class="spaces">  </span><span class="istickedoff">TabBackendConstructFailed{} -&gt; &quot;tab: backend construction failed&quot;</span>
+<span class="lineno">  451 </span><span class="spaces">  </span><span class="istickedoff">TabSessionCreateFailed{}    -&gt; &quot;tab: session creation failed&quot;</span>
+<span class="lineno">  452 </span><span class="spaces">  </span><span class="istickedoff">TabSpawnAuthDenied{}        -&gt; &quot;tab: spawn authorization denied&quot;</span>
+<span class="lineno">  453 </span><span class="spaces">  </span><span class="istickedoff">TabNotFound{}               -&gt; &quot;tab: not found&quot;</span>
+<span class="lineno">  454 </span><span class="spaces">  </span><span class="istickedoff">TabConcurrencyLimit{}       -&gt; &quot;tab: input queue full&quot;</span>
+<span class="lineno">  455 </span><span class="spaces">  </span><span class="istickedoff">TabInvalidName{}            -&gt; &quot;tab: invalid name&quot;</span>
+<span class="lineno">  456 </span><span class="spaces">  </span><span class="istickedoff">TabUnsupportedCommand{}     -&gt; <span class="nottickedoff">&quot;tab: command not supported on this tab kind&quot;</span></span></span>
+<span class="lineno">  457 </span>
+<span class="lineno">  458 </span>
+<span class="lineno">  459 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  460 </span>-- Factory signatures
+<span class="lineno">  461 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  462 </span>
+<span class="lineno">  463 </span>-- | Construction arguments for an AI tab.
+<span class="lineno">  464 </span>--
+<span class="lineno">  465 </span>-- WU1 lands the signature only; the field set is intentionally minimal
+<span class="lineno">  466 </span>-- here and will be extended by WU6 ('PureClaw.Tab.Ai') when the AI tab
+<span class="lineno">  467 </span>-- loop body lands. The record exists so the H2 type-shape test can
+<span class="lineno">  468 </span>-- pin down @mkTabAi :: ... -&gt; IO (Either TabError TabHandle)@ without
+<span class="lineno">  469 </span>-- forward-referencing WU6's full argument list.
+<span class="lineno">  470 </span>data AiSpawnArgs = AiSpawnArgs
+<span class="lineno">  471 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ai_requestedName</span></span></span> :: !Text
+<span class="lineno">  472 </span>    -- ^ Caller-supplied friendly label before 'sanitizeTabName' (H11).
+<span class="lineno">  473 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ai_background</span></span></span>    :: !Bool
+<span class="lineno">  474 </span>    -- ^ True when spawned by @\/bg@; its completed turn is pushed to the
+<span class="lineno">  475 </span>    -- channel.
+<span class="lineno">  476 </span>  }
+<span class="lineno">  477 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  478 </span>
+<span class="lineno">  479 </span>-- | Construction arguments for a harness tab. See 'AiSpawnArgs' note
+<span class="lineno">  480 </span>-- on WU1 minimality; WU7 will extend.
+<span class="lineno">  481 </span>data HarnessSpawnArgs = HarnessSpawnArgs
+<span class="lineno">  482 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_harness_requestedName</span></span></span> :: !Text
+<span class="lineno">  483 </span>  }
+<span class="lineno">  484 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  485 </span>
+<span class="lineno">  486 </span>-- | Construction arguments for a backend (shell \/ ssh \/ tmux) tab.
+<span class="lineno">  487 </span>-- WU8 will extend.
+<span class="lineno">  488 </span>data BackendSpawnArgs = BackendSpawnArgs
+<span class="lineno">  489 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_backend_requestedName</span></span></span> :: !Text
+<span class="lineno">  490 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_backend_args</span></span></span>          :: ![Text]
+<span class="lineno">  491 </span>  }
+<span class="lineno">  492 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  493 </span>
+<span class="lineno">  494 </span>-- | AI tab factory. WU6 fills in the body.
+<span class="lineno">  495 </span>mkTabAi :: TabIndex -&gt; AiSpawnArgs -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  496 </span><span class="decl"><span class="istickedoff">mkTabAi _ _ = error &quot;PureClaw.Handles.Tab.mkTabAi: not implemented \</span>
+<span class="lineno">  497 </span><span class="spaces">                    </span><span class="istickedoff">\— filled in by WU6 (PureClaw.Tab.Ai)&quot;</span></span>
+<span class="lineno">  498 </span>
+<span class="lineno">  499 </span>-- | Harness tab factory. WU7 fills in the body.
+<span class="lineno">  500 </span>mkTabHarness :: TabIndex -&gt; HarnessSpawnArgs -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  501 </span><span class="decl"><span class="istickedoff">mkTabHarness _ _ = error &quot;PureClaw.Handles.Tab.mkTabHarness: not implemented \</span>
+<span class="lineno">  502 </span><span class="spaces">                         </span><span class="istickedoff">\— filled in by WU7 (PureClaw.Tab.Harness)&quot;</span></span>
+<span class="lineno">  503 </span>
+<span class="lineno">  504 </span>-- | Raw-shell tab factory (F4). Dispatches at construction time on
+<span class="lineno">  505 </span>-- 'TerminalBackend' ('TbLocal' \/ 'TbSsh' \/ 'TbTmux'). WU8 fills in
+<span class="lineno">  506 </span>-- the body.
+<span class="lineno">  507 </span>mkRawShellTab :: TabIndex -&gt; TerminalBackend -&gt; BackendSpawnArgs
+<span class="lineno">  508 </span>              -&gt; IO (Either TabError TabHandle)
+<span class="lineno">  509 </span><span class="decl"><span class="istickedoff">mkRawShellTab _ _ _ = error &quot;PureClaw.Handles.Tab.mkRawShellTab: not implemented \</span>
+<span class="lineno">  510 </span><span class="spaces">                            </span><span class="istickedoff">\— filled in by WU8 (PureClaw.Tab.Backend)&quot;</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,299 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.Types
+<span class="lineno">    3 </span>-- Description : Routing-layer types for Tabbed Chat (WU1).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- This module defines the shared ADTs that the routing parser
+<span class="lineno">    6 </span>-- ('PureClaw.Routing.Parse', WU2), the dispatcher
+<span class="lineno">    7 </span>-- ('PureClaw.Routing.Dispatcher', WU5), the channel-out writer
+<span class="lineno">    8 </span>-- ('PureClaw.Routing.ChannelOut', WU4), and the tab factories
+<span class="lineno">    9 </span>-- ('PureClaw.Tab.*', WU6\/7\/8) all depend on.
+<span class="lineno">   10 </span>--
+<span class="lineno">   11 </span>-- == Scope of WU1
+<span class="lineno">   12 </span>--
+<span class="lineno">   13 </span>-- Type declarations only. No parser, no dispatcher, no writer thread —
+<span class="lineno">   14 </span>-- those land in WU2 \/ WU4 \/ WU5. Tests that depend on these types
+<span class="lineno">   15 </span>-- being present stay 'pending' until their respective implementations
+<span class="lineno">   16 </span>-- land.
+<span class="lineno">   17 </span>--
+<span class="lineno">   18 </span>-- See @docs\/tabbed-chat.md@ for the full design (sections
+<span class="lineno">   19 </span>-- \&quot;Routing Grammar (v1)\&quot;, \&quot;AgentEnv additions\&quot;, \&quot;RoutingConfig\&quot;,
+<span class="lineno">   20 </span>-- and \&quot;Channel emission via ChannelOut writer\&quot;).
+<span class="lineno">   21 </span>module PureClaw.Routing.Types
+<span class="lineno">   22 </span>  ( -- * Routing configuration
+<span class="lineno">   23 </span>    RoutingConfig (..)
+<span class="lineno">   24 </span>  , AiDefaults (..)
+<span class="lineno">   25 </span>  , ShellDefaults (..)
+<span class="lineno">   26 </span>    -- * Spawn errors (depth limiting)
+<span class="lineno">   27 </span>  , SpawnError (..)
+<span class="lineno">   28 </span>  , checkPureClawDepth
+<span class="lineno">   29 </span>    -- * Routing errors
+<span class="lineno">   30 </span>  , RoutingError (..)
+<span class="lineno">   31 </span>  , ParseError (..)
+<span class="lineno">   32 </span>    -- * Parsed input
+<span class="lineno">   33 </span>  , ParsedInput (..)
+<span class="lineno">   34 </span>    -- * Input events (tab-loop input queue)
+<span class="lineno">   35 </span>  , InputEvent (..)
+<span class="lineno">   36 </span>    -- * Channel output
+<span class="lineno">   37 </span>  , OutputSource (..)
+<span class="lineno">   38 </span>  , StreamId
+<span class="lineno">   39 </span>  , mkStreamId
+<span class="lineno">   40 </span>  , unStreamId
+<span class="lineno">   41 </span>  , ChannelEvent (..)
+<span class="lineno">   42 </span>  ) where
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>import Data.Text (Text)
+<span class="lineno">   45 </span>import Data.Word (Word64)
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>import PureClaw.Agent.SlashCommands qualified as Slash
+<span class="lineno">   48 </span>import PureClaw.Core.Types qualified as Core
+<span class="lineno">   49 </span>import PureClaw.Handles.Tab qualified as Tab
+<span class="lineno">   50 </span>
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   53 </span>-- RoutingConfig
+<span class="lineno">   54 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Defaults applied when auto-spawning an AI tab.
+<span class="lineno">   57 </span>--
+<span class="lineno">   58 </span>-- WU1 lands the type shape; WU3 loads values from
+<span class="lineno">   59 </span>-- @~\/.pureclaw\/config.toml [routing]@ via 'PureClaw.Routing.Config'.
+<span class="lineno">   60 </span>data AiDefaults = AiDefaults
+<span class="lineno">   61 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_aid_providerId</span></span></span> :: !Core.ProviderId
+<span class="lineno">   62 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_aid_modelId</span></span></span>    :: !Core.ModelId
+<span class="lineno">   63 </span>  }
+<span class="lineno">   64 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   65 </span>
+<span class="lineno">   66 </span>-- | Defaults applied when auto-spawning a shell tab.
+<span class="lineno">   67 </span>--
+<span class="lineno">   68 </span>-- WU1 lands the type shape; the field set is intentionally minimal
+<span class="lineno">   69 </span>-- here and may be extended by WU8 ('PureClaw.Tab.Backend').
+<span class="lineno">   70 </span>data ShellDefaults = ShellDefaults
+<span class="lineno">   71 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sd_command</span></span></span> :: !Text
+<span class="lineno">   72 </span>    -- ^ Default shell binary (e.g. @\&quot;bash\&quot;@).
+<span class="lineno">   73 </span>  }
+<span class="lineno">   74 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | Routing-layer configuration, loaded once at process start.
+<span class="lineno">   77 </span>--
+<span class="lineno">   78 </span>-- All caps are enforced by various WUs: '_rc_maxTabs' by the parser
+<span class="lineno">   79 </span>-- (WU2) and the spawn machinery (WU5\/WU9); '_rc_inputQueueBound' by
+<span class="lineno">   80 </span>-- the AI tab factory (WU6); '_rc_channelOutQBound' by AgentEnv
+<span class="lineno">   81 </span>-- construction (WU3); '_rc_spawnRateLimit' \/ '_rc_maxConcurrentActive'
+<span class="lineno">   82 </span>-- \/ '_rc_maxNameLen' by their respective S-series enforcement points.
+<span class="lineno">   83 </span>--
+<span class="lineno">   84 </span>-- Runtime mutation via @\/config@ is v1.5+.
+<span class="lineno">   85 </span>data RoutingConfig = RoutingConfig
+<span class="lineno">   86 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_defaultKind</span></span></span>         :: !Tab.TabKind
+<span class="lineno">   87 </span>    -- ^ Pre-shipped as @'Tab.TkSession' ('SkProvider' ...)@.
+<span class="lineno">   88 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_defaultAi</span></span></span>           :: !AiDefaults
+<span class="lineno">   89 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_defaultShell</span></span></span>        :: !ShellDefaults
+<span class="lineno">   90 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_switchRecap</span></span></span>         :: !Int
+<span class="lineno">   91 </span>    -- ^ Default 3 recent messages emitted on @\/N@ switch.
+<span class="lineno">   92 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_maxTabs</span></span></span>             :: !Int
+<span class="lineno">   93 </span>    -- ^ Default 36, matching the single-char @[0-9a-z]@ index
+<span class="lineno">   94 </span>    --   alphabet of the @\/N@ routing grammar (10 digits + 26
+<span class="lineno">   95 </span>    --   lowercase letters). Parser bounds-checks against this;
+<span class="lineno">   96 </span>    --   dispatcher refuses to spawn beyond this cap with
+<span class="lineno">   97 </span>    --   'Tab.TabLimitExceeded'. Configuring a value above 36 is
+<span class="lineno">   98 </span>    --   permitted but only the first 36 slots are addressable
+<span class="lineno">   99 </span>    --   through the @\/N@ shortcut; the higher slots remain
+<span class="lineno">  100 </span>    --   reachable through @\/tab focus N@ and the dashboard.
+<span class="lineno">  101 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_inputQueueBound</span></span></span>     :: !Int
+<span class="lineno">  102 </span>    -- ^ Default 64. Per-tab @TBQueue InputEvent@ capacity.
+<span class="lineno">  103 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_channelOutQBound</span></span></span>    :: !Int
+<span class="lineno">  104 </span>    -- ^ Default 1024. Process-wide @TBQueue (OutputSource, ChannelEvent)@
+<span class="lineno">  105 </span>    --   capacity.
+<span class="lineno">  106 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_spawnRateLimit</span></span></span>      :: !Int
+<span class="lineno">  107 </span>    -- ^ Default 10 spawns per minute per chat user.
+<span class="lineno">  108 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_maxConcurrentActive</span></span></span> :: !Int
+<span class="lineno">  109 </span>    -- ^ Default 4. S9 cap on tabs in 'Tab.Active' status simultaneously.
+<span class="lineno">  110 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_maxNameLen</span></span></span>          :: !Int
+<span class="lineno">  111 </span>    -- ^ Default 32. S10 length cap on tab names.
+<span class="lineno">  112 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_sshIdentityKey</span></span></span>      :: !Text
+<span class="lineno">  113 </span>    -- ^ Default @&quot;default-ssh-key&quot;@. Vault slot from which the ssh
+<span class="lineno">  114 </span>    --   identity is loaded (no inline identities permitted per S4).
+<span class="lineno">  115 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_maxPureClawDepth</span></span></span>   :: !Int
+<span class="lineno">  116 </span>    -- ^ Maximum recursion depth for HPureClaw harness sessions.
+<span class="lineno">  117 </span>    --   Default 2. Spawning is refused when
+<span class="lineno">  118 </span>    --   @'_rc_pureClawDepth' &gt;= '_rc_maxPureClawDepth'@.
+<span class="lineno">  119 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_pureClawDepth</span></span></span>      :: !Int
+<span class="lineno">  120 </span>    -- ^ Current recursion depth. 0 at top level. Incremented via
+<span class="lineno">  121 </span>    --   the @--depth@ CLI flag when PureClaw spawns a child process.
+<span class="lineno">  122 </span>  }
+<span class="lineno">  123 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>
+<span class="lineno">  126 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  127 </span>-- Spawn errors (depth limiting)
+<span class="lineno">  128 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  129 </span>
+<span class="lineno">  130 </span>-- | Errors that prevent spawning a new HPureClaw harness session.
+<span class="lineno">  131 </span>data SpawnError
+<span class="lineno">  132 </span>  = MaxPureClawDepthExceeded !Int !Int
+<span class="lineno">  133 </span>    -- ^ @MaxPureClawDepthExceeded current max@ — the current recursion
+<span class="lineno">  134 </span>    --   depth equals or exceeds the configured maximum.
+<span class="lineno">  135 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">  136 </span>
+<span class="lineno">  137 </span>-- | Pure guard that checks whether the current recursion depth allows
+<span class="lineno">  138 </span>-- spawning another HPureClaw session. Returns @'Left'
+<span class="lineno">  139 </span>-- 'MaxPureClawDepthExceeded'@ when @'_rc_pureClawDepth' &gt;=
+<span class="lineno">  140 </span>-- '_rc_maxPureClawDepth'@.
+<span class="lineno">  141 </span>checkPureClawDepth :: RoutingConfig -&gt; Either SpawnError ()
+<span class="lineno">  142 </span><span class="decl"><span class="istickedoff">checkPureClawDepth cfg</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">| _rc_pureClawDepth cfg &gt;= _rc_maxPureClawDepth cfg =</span>
+<span class="lineno">  144 </span><span class="spaces">      </span><span class="istickedoff">Left (MaxPureClawDepthExceeded (_rc_pureClawDepth cfg) (_rc_maxPureClawDepth cfg))</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Right ()</span></span>
+<span class="lineno">  146 </span>
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  149 </span>-- Errors
+<span class="lineno">  150 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | Parser-level errors produced by @parseInput@ (WU2).
+<span class="lineno">  153 </span>--
+<span class="lineno">  154 </span>-- Constructors carry only bounded primitives — no free 'Text', no raw
+<span class="lineno">  155 </span>-- input — so the redacted-error contract is preserved when these
+<span class="lineno">  156 </span>-- bubble up into 'RoutingError'.
+<span class="lineno">  157 </span>--
+<span class="lineno">  158 </span>-- The legacy 'ParseErrorLeadingZero' code was removed when the
+<span class="lineno">  159 </span>-- routing grammar switched from multi-digit indices to single-char
+<span class="lineno">  160 </span>-- @[0-9a-z]@ indices — multi-char shapes (@\/01@, @\/12@, @\/1a@)
+<span class="lineno">  161 </span>-- now surface as 'ParseErrorMalformed'.
+<span class="lineno">  162 </span>data ParseError
+<span class="lineno">  163 </span>  = ParseErrorIndexOutOfRange !Int
+<span class="lineno">  164 </span>    -- ^ Parsed index @&gt;= _rc_maxTabs@.
+<span class="lineno">  165 </span>  | ParseErrorInvalidSessionId
+<span class="lineno">  166 </span>    -- ^ @\/tab resume \&lt;id\&gt;@ where @\&lt;id\&gt;@ contains @\/@, @\\@,
+<span class="lineno">  167 </span>    --   @..@, NUL, or any character outside @[a-zA-Z0-9_-]@.
+<span class="lineno">  168 </span>  | ParseErrorEmptyInput
+<span class="lineno">  169 </span>    -- ^ Empty or whitespace-only input.
+<span class="lineno">  170 </span>  | ParseErrorMalformed
+<span class="lineno">  171 </span>    -- ^ Catch-all for shapes that match no production in the grammar.
+<span class="lineno">  172 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>-- | Routing-layer errors. Wraps 'ParseError' for parser failures and
+<span class="lineno">  175 </span>-- carries higher-level dispatcher\/registry failures.
+<span class="lineno">  176 </span>data RoutingError
+<span class="lineno">  177 </span>  = RoutingParseError !ParseError
+<span class="lineno">  178 </span>  | RoutingTabError !Tab.TabError
+<span class="lineno">  179 </span>    -- ^ Bubbled up from the tab layer (e.g. spawn failure).
+<span class="lineno">  180 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  181 </span>
+<span class="lineno">  182 </span>
+<span class="lineno">  183 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  184 </span>-- ParsedInput
+<span class="lineno">  185 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  186 </span>
+<span class="lineno">  187 </span>-- | The classification @parseInput@ produces (WU2).
+<span class="lineno">  188 </span>--
+<span class="lineno">  189 </span>-- The 'Switch' \/ 'Inject' \/ 'ParsedSlashCmd' branches do NOT reach
+<span class="lineno">  190 </span>-- a provider — that's the LLM-free invariant P18. Only 'Default' text
+<span class="lineno">  191 </span>-- ever feeds a provider call.
+<span class="lineno">  192 </span>--
+<span class="lineno">  193 </span>-- Note on the constructor name 'ParsedSlashCmd' (vs the design doc's
+<span class="lineno">  194 </span>-- @SlashCmd@): Haskell does not permit two constructors with the same
+<span class="lineno">  195 </span>-- name in the same module, and 'InputEvent' already owns 'SlashCmd'.
+<span class="lineno">  196 </span>-- Both carry the same 'Slash.SlashCommand' payload; the dispatcher
+<span class="lineno">  197 </span>-- maps @ParsedSlashCmd cmd@ to @SlashCmd cmd@ when enqueueing onto a
+<span class="lineno">  198 </span>-- tab's input queue.
+<span class="lineno">  199 </span>data ParsedInput
+<span class="lineno">  200 </span>  = Switch !Tab.TabIndex
+<span class="lineno">  201 </span>    -- ^ @\/N@ — focus the tab at index @N@ (or auto-spawn per A-series).
+<span class="lineno">  202 </span>  | Inject !Tab.TabIndex !Text
+<span class="lineno">  203 </span>    -- ^ @\/N \&lt;payload\&gt;@ — enqueue payload on tab @N@ without
+<span class="lineno">  204 </span>    --   changing focus.
+<span class="lineno">  205 </span>  | Default !Text
+<span class="lineno">  206 </span>    -- ^ Plain text — routed to the current focused tab.
+<span class="lineno">  207 </span>  | ParsedSlashCmd !Slash.SlashCommand
+<span class="lineno">  208 </span>    -- ^ Existing slash command (or the new @\/tab*@ family) parsed by
+<span class="lineno">  209 </span>    --   the shared slash-command grammar.
+<span class="lineno">  210 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  211 </span>
+<span class="lineno">  212 </span>
+<span class="lineno">  213 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  214 </span>-- InputEvent
+<span class="lineno">  215 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  216 </span>
+<span class="lineno">  217 </span>-- | One event in a tab's per-tab input queue.
+<span class="lineno">  218 </span>--
+<span class="lineno">  219 </span>-- The dispatcher (WU5) enqueues 'UserText' for free-form text and
+<span class="lineno">  220 </span>-- 'SlashCmd' for Context-mutating commands (per E5). Each tab loop
+<span class="lineno">  221 </span>-- (WU6 for 'Tab.KindAi') is the sole consumer.
+<span class="lineno">  222 </span>data InputEvent
+<span class="lineno">  223 </span>  = UserText !Text
+<span class="lineno">  224 </span>  | SlashCmd !Slash.SlashCommand
+<span class="lineno">  225 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  226 </span>
+<span class="lineno">  227 </span>
+<span class="lineno">  228 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  229 </span>-- Channel output
+<span class="lineno">  230 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  231 </span>
+<span class="lineno">  232 </span>-- | Origin of a 'ChannelEvent' on the channel-out queue.
+<span class="lineno">  233 </span>--
+<span class="lineno">  234 </span>-- A writer reads 'OutputSource' on dequeue and uses it as the focus
+<span class="lineno">  235 </span>-- gate: 'SrcDispatcher' events emit unconditionally
+<span class="lineno">  236 </span>-- ('PureClaw.Handles.Channel.ChannelHandle' always sees them), while
+<span class="lineno">  237 </span>-- 'SrcTab' events are dropped when the focused tab is not @Just n@.
+<span class="lineno">  238 </span>data OutputSource
+<span class="lineno">  239 </span>  = SrcDispatcher
+<span class="lineno">  240 </span>  | SrcTab !Tab.TabIndex
+<span class="lineno">  241 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  242 </span>
+<span class="lineno">  243 </span>-- | Identifier for one logical multi-chunk message on the channel.
+<span class="lineno">  244 </span>--
+<span class="lineno">  245 </span>-- The data constructor is intentionally NOT exported; obtain values
+<span class="lineno">  246 </span>-- via 'mkStreamId' (a monotonically-increasing allocator lands in WU4
+<span class="lineno">  247 </span>-- alongside the writer thread). The 'Word64' carrier is large enough
+<span class="lineno">  248 </span>-- that wrap-around is not a practical concern.
+<span class="lineno">  249 </span>newtype StreamId = StreamId { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unStreamId</span></span></span> :: Word64 }
+<span class="lineno">  250 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  251 </span>
+<span class="lineno">  252 </span>-- | The only way to construct a 'StreamId'. Callers (typically the
+<span class="lineno">  253 </span>-- 'PureClaw.Routing.ChannelOut' allocator) bump a 'Word64' counter and
+<span class="lineno">  254 </span>-- pass the result here.
+<span class="lineno">  255 </span>mkStreamId :: Word64 -&gt; StreamId
+<span class="lineno">  256 </span><span class="decl"><span class="istickedoff">mkStreamId = StreamId</span></span>
+<span class="lineno">  257 </span>
+<span class="lineno">  258 </span>-- | Events that flow through the bounded channel-out queue feeding the
+<span class="lineno">  259 </span>-- writer thread.
+<span class="lineno">  260 </span>--
+<span class="lineno">  261 </span>-- AI tab loops emit @'StreamStart' sid n@ once per logical message,
+<span class="lineno">  262 </span>-- then a sequence of @'ChunkOf' sid chunk@, then @'StreamEnd' sid@.
+<span class="lineno">  263 </span>-- Non-AI tab loops (KindShell\/Ssh\/Tmux\/Harness) emit one
+<span class="lineno">  264 </span>-- @'FullMsg' n payload@ per @_bh_recv@\/harness-recv return — no
+<span class="lineno">  265 </span>-- streaming, no breadcrumb (per D5 backend rule).
+<span class="lineno">  266 </span>--
+<span class="lineno">  267 </span>-- 'BannerLine' is reserved for one-shot dispatcher messages: switch
+<span class="lineno">  268 </span>-- confirmations, dashboards, command errors, and mid-stream
+<span class="lineno">  269 </span>-- breadcrumbs.
+<span class="lineno">  270 </span>data ChannelEvent
+<span class="lineno">  271 </span>  = StreamStart !StreamId !Tab.TabIndex
+<span class="lineno">  272 </span>  | ChunkOf !StreamId !Text
+<span class="lineno">  273 </span>  | StreamEnd !StreamId
+<span class="lineno">  274 </span>  | FullMsg !Tab.TabIndex !Text
+<span class="lineno">  275 </span>  | BannerLine !Text
+<span class="lineno">  276 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+
+</pre>
+</body>
+</html>

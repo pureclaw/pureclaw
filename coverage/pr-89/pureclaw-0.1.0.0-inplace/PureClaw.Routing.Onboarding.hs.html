@@ -1,0 +1,237 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.Onboarding
+<span class="lineno">    3 </span>-- Description : User-facing onboarding for Tabbed Chat
+<span class="lineno">    4 </span>--               (Issue #51, WU11, O-series).
+<span class="lineno">    5 </span>--
+<span class="lineno">    6 </span>-- Owns the user-discoverable surface area introduced by Tabbed Chat:
+<span class="lineno">    7 </span>--
+<span class="lineno">    8 </span>--   * @\/start@ handler ('handleStart') — Telegram's onboarding
+<span class="lineno">    9 </span>--     convention. Emits a single-message orientation that names the
+<span class="lineno">   10 </span>--     three principal slash-prefix surfaces users need to know about:
+<span class="lineno">   11 </span>--     @\/0@ (the first tab once spawned), @\/tab new shell@ (allocate
+<span class="lineno">   12 </span>--     a shell tab at the next free slot), and @\/tabs@ (dashboard).
+<span class="lineno">   13 </span>--     The message is sent via 'ChannelHandle' @_ch_send@ which works
+<span class="lineno">   14 </span>--     on every channel implementation (CLI, Signal, Telegram).
+<span class="lineno">   15 </span>--     Non-Telegram channels degrade gracefully — they receive the same
+<span class="lineno">   16 </span>--     orientation text even though they have no BotFather autocomplete
+<span class="lineno">   17 </span>--     behind the @\/start@ keyword (O1).
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>--   * @\/help@ \&quot;Tab commands\&quot; subsection ('helpTabSection') — pure
+<span class="lineno">   20 </span>--     text appended by @executeSlashCommand env CmdHelp@ in
+<span class="lineno">   21 </span>--     &quot;PureClaw.Agent.SlashCommands&quot; so users see the new vocabulary
+<span class="lineno">   22 </span>--     enumerated alongside the existing slash commands (O2). The
+<span class="lineno">   23 </span>--     subsection is intentionally lightweight; the full per-command
+<span class="lineno">   24 </span>--     reference still lives in the existing command-spec table.
+<span class="lineno">   25 </span>--
+<span class="lineno">   26 </span>--   * BotFather command registration list ('botFatherCommandList') —
+<span class="lineno">   27 </span>--     the @(command, description)@ tuples Telegram's @setMyCommands@
+<span class="lineno">   28 </span>--     API consumes at channel-startup time. Pinning this as a top-
+<span class="lineno">   29 </span>--     level pure binding lets the O3 test compare it against the
+<span class="lineno">   30 </span>--     golden enumeration in @docs\/tabbed-chat.md@ without spinning
+<span class="lineno">   31 </span>--     up a live channel (O3).
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>-- == Design constraints (per WU11 spec)
+<span class="lineno">   34 </span>--
+<span class="lineno">   35 </span>--   * The module imports only 'AgentEnv', 'ChannelHandle', and 'Text'
+<span class="lineno">   36 </span>--     so it can be imported safely by 'PureClaw.Agent.SlashCommands'
+<span class="lineno">   37 </span>--     (which owns 'CmdStart' and the @\/help@ renderer) without
+<span class="lineno">   38 </span>--     dragging in the dispatcher or any tab factory.
+<span class="lineno">   39 </span>--   * 'handleStart' is non-blocking and has no side effects beyond
+<span class="lineno">   40 </span>--     a single channel emit. It does NOT spawn a tab, move the tab
+<span class="lineno">   41 </span>--     cursor, or touch the tab registry — those flows are owned by
+<span class="lineno">   42 </span>--     'PureClaw.Routing.Dispatcher' \/ 'PureClaw.Routing.AutoSpawn'
+<span class="lineno">   43 </span>--     and trigger automatically on the user's next slash command.
+<span class="lineno">   44 </span>--   * No 'forkIO'. The handler runs synchronously on the caller's
+<span class="lineno">   45 </span>--     thread (the dispatcher thread when invoked via
+<span class="lineno">   46 </span>--     'PureClaw.Routing.Dispatcher.dispatchSlash', or whatever thread
+<span class="lineno">   47 </span>--     &quot;PureClaw.Agent.SlashCommands&quot; runs on for the legacy single-
+<span class="lineno">   48 </span>--     tab execution path).
+<span class="lineno">   49 </span>--
+<span class="lineno">   50 </span>-- See @docs\/tabbed-chat.md@ §\&quot;Onboarding (O-series)\&quot; for the
+<span class="lineno">   51 </span>-- normative DoDs (O1, O2, O3).
+<span class="lineno">   52 </span>module PureClaw.Routing.Onboarding
+<span class="lineno">   53 </span>  ( -- * @\/start@ handler
+<span class="lineno">   54 </span>    handleStart
+<span class="lineno">   55 </span>  , onboardingMessage
+<span class="lineno">   56 </span>    -- * @\/help@ subsection (consumed by Agent.SlashCommands)
+<span class="lineno">   57 </span>  , helpTabSection
+<span class="lineno">   58 </span>    -- * BotFather command registration (consumed by Channels.Telegram)
+<span class="lineno">   59 </span>  , botFatherCommandList
+<span class="lineno">   60 </span>  ) where
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>import Data.Text (Text)
+<span class="lineno">   63 </span>import qualified Data.Text as T
+<span class="lineno">   64 </span>
+<span class="lineno">   65 </span>import PureClaw.Agent.Env (AgentEnv (..))
+<span class="lineno">   66 </span>import PureClaw.Handles.Channel (ChannelHandle (..), OutgoingMessage (..))
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   70 </span>-- /start handler (O1)
+<span class="lineno">   71 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>-- | Handle the @\/start@ slash command. Emits the orientation message
+<span class="lineno">   74 </span>-- ('onboardingMessage') via the channel's @_ch_send@ once.
+<span class="lineno">   75 </span>--
+<span class="lineno">   76 </span>-- O1 requires the response to include:
+<span class="lineno">   77 </span>--
+<span class="lineno">   78 </span>--   * a one-line value prop,
+<span class="lineno">   79 </span>--   * @\/0@ (the first tab once spawned),
+<span class="lineno">   80 </span>--   * @\/tab new shell@ (the shell-tab allocation form),
+<span class="lineno">   81 </span>--   * @\/tabs@ (the dashboard alias).
+<span class="lineno">   82 </span>--
+<span class="lineno">   83 </span>-- All four are baked into 'onboardingMessage' so the @\/start@ output
+<span class="lineno">   84 </span>-- is a fixed, golden-comparable string the test can assert verbatim
+<span class="lineno">   85 </span>-- substrings against.
+<span class="lineno">   86 </span>--
+<span class="lineno">   87 </span>-- == Channel portability
+<span class="lineno">   88 </span>--
+<span class="lineno">   89 </span>-- Per the WU11 spec, non-Telegram channels @degrade gracefully@: they
+<span class="lineno">   90 </span>-- still receive the orientation text. The implementation uses only
+<span class="lineno">   91 </span>-- 'ChannelHandle' @_ch_send@ which every channel implements, so
+<span class="lineno">   92 </span>-- nothing special is required for CLI \/ Signal — the user just sees
+<span class="lineno">   93 </span>-- the same help text Telegram users see, minus the BotFather
+<span class="lineno">   94 </span>-- autocomplete affordance.
+<span class="lineno">   95 </span>handleStart :: AgentEnv -&gt; IO ()
+<span class="lineno">   96 </span><span class="decl"><span class="istickedoff">handleStart env =</span>
+<span class="lineno">   97 </span><span class="spaces">  </span><span class="istickedoff">_ch_send (_env_channel env) (OutgoingMessage onboardingMessage)</span></span>
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>-- | The fixed orientation message delivered by 'handleStart'.
+<span class="lineno">  100 </span>--
+<span class="lineno">  101 </span>-- Authored as a single 'Text' so the O1 test can assert against
+<span class="lineno">  102 </span>-- specific substrings without re-deriving them from a builder.
+<span class="lineno">  103 </span>-- Mentions all three slash-prefix surfaces explicitly (value prop,
+<span class="lineno">  104 </span>-- @\/0@, @\/tab new shell@, @\/tabs@). The @\/N@ shortcut accepts
+<span class="lineno">  105 </span>-- any single digit @0-9@ or lowercase letter @a-z@ (36 tabs total).
+<span class="lineno">  106 </span>--
+<span class="lineno">  107 </span>-- Tabs follow a tmux-style packing model: they always occupy the
+<span class="lineno">  108 </span>-- lowest slots, so the first tab is always at @\/0@ and closing tab N
+<span class="lineno">  109 </span>-- renumbers the rest. The orientation copy mentions this so users
+<span class="lineno">  110 </span>-- don't expect to pick a slot themselves.
+<span class="lineno">  111 </span>onboardingMessage :: Text
+<span class="lineno">  112 </span><span class="decl"><span class="istickedoff">onboardingMessage = T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;Welcome to PureClaw.&quot;</span>
+<span class="lineno">  114 </span><span class="spaces">  </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  115 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Tabbed Chat lets you drive multiple agents from one chat thread.&quot;</span>
+<span class="lineno">  116 </span><span class="spaces">  </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  117 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Quick start:&quot;</span>
+<span class="lineno">  118 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  hello there        \x2014 just type to talk (an AI tab is auto-spawned)&quot;</span>
+<span class="lineno">  119 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  /tab new shell     \x2014 open a shell tab at the next free slot&quot;</span>
+<span class="lineno">  120 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  /0                 \x2014 switch focus to tab 0 (must already exist)&quot;</span>
+<span class="lineno">  121 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  /tabs              \x2014 list your tabs&quot;</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Tabs are always packed in the lowest slots; closing tab N&quot;</span>
+<span class="lineno">  124 </span><span class="spaces">  </span><span class="istickedoff">, &quot;renumbers the rest (tmux-style).&quot;</span>
+<span class="lineno">  125 </span><span class="spaces">  </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Tab shortcut /N accepts any digit 0-9 or lowercase letter a-z&quot;</span>
+<span class="lineno">  127 </span><span class="spaces">  </span><span class="istickedoff">, &quot;(36 tabs total). /N only works for tabs that already exist \x2014&quot;</span>
+<span class="lineno">  128 </span><span class="spaces">  </span><span class="istickedoff">, &quot;use /tab new to create one.&quot;</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">, &quot;&quot;</span>
+<span class="lineno">  130 </span><span class="spaces">  </span><span class="istickedoff">, &quot;See /help for the full command reference.&quot;</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>
+<span class="lineno">  134 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  135 </span>-- /help &quot;Tab commands&quot; subsection (O2)
+<span class="lineno">  136 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  137 </span>
+<span class="lineno">  138 </span>-- | The @Tab commands@ subsection appended to @\/help@ output by
+<span class="lineno">  139 </span>-- 'PureClaw.Agent.SlashCommands.renderHelpText'. Pure text so the O2
+<span class="lineno">  140 </span>-- assertion can pin the literal substrings @\&quot;Tab commands\&quot;@ and
+<span class="lineno">  141 </span>-- @\&quot;\/tabs\&quot;@ verbatim.
+<span class="lineno">  142 </span>--
+<span class="lineno">  143 </span>-- The format mirrors the existing @\/help@ group layout — two-space
+<span class="lineno">  144 </span>-- indented heading followed by a four-space-indented body — so the
+<span class="lineno">  145 </span>-- subsection visually merges with the surrounding renderer output.
+<span class="lineno">  146 </span>--
+<span class="lineno">  147 </span>-- All Tab-Chat verbs enumerated per O2: @\/N@, @\/N \&lt;payload\&gt;@,
+<span class="lineno">  148 </span>-- @\/tabs@, @\/tab new@, @\/tab close@, @\/tab focus@, @\/tab resume@,
+<span class="lineno">  149 </span>-- @\/tab rename@.
+<span class="lineno">  150 </span>--
+<span class="lineno">  151 </span>-- The leading-line note documents the @\/N@ grammar (single char,
+<span class="lineno">  152 </span>-- digit @0-9@ or lowercase letter @a-z@; 36 tabs maximum).
+<span class="lineno">  153 </span>helpTabSection :: Text
+<span class="lineno">  154 </span><span class="decl"><span class="istickedoff">helpTabSection = T.intercalate &quot;\n&quot;</span>
+<span class="lineno">  155 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;&quot;</span>
+<span class="lineno">  156 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  Tab commands (N is one char: digit 0-9 or letter a-z; 36 tabs max):&quot;</span>
+<span class="lineno">  157 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  Tabs are tmux-style packed: they always occupy the lowest slots;&quot;</span>
+<span class="lineno">  158 </span><span class="spaces">  </span><span class="istickedoff">, &quot;  closing tab N renumbers the rest down by one.&quot;</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /N                          Switch focus to tab N (error if missing)&quot;</span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /N &lt;payload&gt;                Direct-inject payload to tab N (focus unchanged)&quot;</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /tabs                       List all tabs (alias of /tab list)&quot;</span>
+<span class="lineno">  162 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /tab new [&lt;kind&gt;]           Open a new tab at the next free slot (kinds: ai, harness, shell, ssh, tmux)&quot;</span>
+<span class="lineno">  163 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /tab close &lt;N&gt; [--force]    Close tab N (--force skips archive on AI tabs); remaining tabs renumber&quot;</span>
+<span class="lineno">  164 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /tab focus &lt;N&gt;              Switch focus to tab N (alias of /N)&quot;</span>
+<span class="lineno">  165 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /tab resume &lt;session-id&gt;    Resume an archived session into a new tab&quot;</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">, &quot;    /tab rename &lt;N&gt; &lt;name&gt;      Rename tab N (input is sanitized)&quot;</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  168 </span>
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  171 </span>-- BotFather command registration list (O3)
+<span class="lineno">  172 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>-- | The @(command, description)@ tuples PureClaw's Telegram channel
+<span class="lineno">  175 </span>-- registers with BotFather (via the Telegram @setMyCommands@ API) at
+<span class="lineno">  176 </span>-- channel-startup time.
+<span class="lineno">  177 </span>--
+<span class="lineno">  178 </span>-- Pinning this as a top-level pure value lets the O3 test compare it
+<span class="lineno">  179 </span>-- against the golden enumeration in
+<span class="lineno">  180 </span>-- @docs\/tabbed-chat.md@ §\&quot;Channel autocomplete (Telegram-specific)\&quot;
+<span class="lineno">  181 </span>-- without spinning up a live channel.
+<span class="lineno">  182 </span>--
+<span class="lineno">  183 </span>-- The 36 single-char tab-switch shortcuts (@\/0@..@\/9@, @\/a@..@\/z@)
+<span class="lineno">  184 </span>-- are emitted in their full glory because Telegram's
+<span class="lineno">  185 </span>-- @setMyCommands@ API permits up to 100 entries per bot and visible
+<span class="lineno">  186 </span>-- autocomplete on mobile is the primary discovery affordance for the
+<span class="lineno">  187 </span>-- @\/N@ grammar. The 36 + 3 long-form entries fit comfortably under
+<span class="lineno">  188 </span>-- the limit (39 total).
+<span class="lineno">  189 </span>--
+<span class="lineno">  190 </span>-- Per O3 the descriptions are:
+<span class="lineno">  191 </span>--
+<span class="lineno">  192 </span>--   * @\/0@..@\/9@, @\/a@..@\/z@ → @\&quot;Switch to tab N\&quot;@
+<span class="lineno">  193 </span>--   * @\/tab@      → @\&quot;Tabs: new, list, close, focus, resume, rename\&quot;@
+<span class="lineno">  194 </span>--   * @\/tabs@     → @\&quot;List all tabs\&quot;@
+<span class="lineno">  195 </span>--   * @\/start@    → @\&quot;Tabbed Chat \x2014 see \/help for tab commands\&quot;@
+<span class="lineno">  196 </span>--
+<span class="lineno">  197 </span>-- The tuples are recorded in declaration order so the test asserts a
+<span class="lineno">  198 </span>-- stable list (rather than a set) — the user-visible BotFather
+<span class="lineno">  199 </span>-- ordering is part of the contract.
+<span class="lineno">  200 </span>botFatherCommandList :: [(Text, Text)]
+<span class="lineno">  201 </span><span class="decl"><span class="istickedoff">botFatherCommandList =</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="istickedoff">[ (cmd, &quot;Switch to tab N&quot;)</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">| n &lt;- [0 .. 9 :: Int]</span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="istickedoff">, let cmd = T.pack ('/' : show n)</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  206 </span><span class="spaces">  </span><span class="istickedoff">++</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">[ (T.pack ['/', c], &quot;Switch to tab N&quot;)</span>
+<span class="lineno">  208 </span><span class="spaces">  </span><span class="istickedoff">| c &lt;- ['a' .. 'z']</span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="istickedoff">]</span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="istickedoff">++</span>
+<span class="lineno">  211 </span><span class="spaces">  </span><span class="istickedoff">[ (&quot;/tab&quot;,   &quot;Tabs: new, list, close, focus, resume, rename&quot;)</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;/tabs&quot;,  &quot;List all tabs&quot;)</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">, (&quot;/start&quot;, &quot;Tabbed Chat \x2014 see /help for tab commands&quot;)</span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+
+</pre>
+</body>
+</html>

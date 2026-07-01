@@ -1,0 +1,73 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | Leaf module for 'HarnessId' — a UUID-backed harness identity.
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- This module exists purely to break the import cycle between
+<span class="lineno">    4 </span>-- 'PureClaw.Harness.Registry' (which defines 'HarnessEntry' and may import
+<span class="lineno">    5 </span>-- 'PureClaw.Session.Kind') and 'PureClaw.Session.Kind' (which embeds
+<span class="lineno">    6 </span>-- 'HarnessId' in 'HarnessSpec'). By isolating 'HarnessId' here, both modules
+<span class="lineno">    7 </span>-- can import this leaf without creating a cycle.
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- Depends ONLY on @uuid@, @text@, @aeson@, and @base@. Never imports any
+<span class="lineno">   10 </span>-- project module.
+<span class="lineno">   11 </span>module PureClaw.Harness.Id
+<span class="lineno">   12 </span>  ( -- * Identity
+<span class="lineno">   13 </span>    HarnessId (..)
+<span class="lineno">   14 </span>  , parseHarnessId
+<span class="lineno">   15 </span>  , harnessIdToText
+<span class="lineno">   16 </span>  ) where
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import Data.Aeson (FromJSON (..), ToJSON (..))
+<span class="lineno">   19 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   20 </span>import Data.Text (Text)
+<span class="lineno">   21 </span>import Data.UUID (UUID)
+<span class="lineno">   22 </span>import Data.UUID qualified as UUID
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>-- | A PureClaw-assigned, UUID-backed harness identity. This is the canonical
+<span class="lineno">   25 </span>-- key for the registry and the durable anchor that survives tmux window
+<span class="lineno">   26 </span>-- rename\/move and PureClaw restart (persisted in @session.json@).
+<span class="lineno">   27 </span>newtype HarnessId = HarnessId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unHarnessId</span></span></span> :: UUID }
+<span class="lineno">   28 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>-- | Parse a 'HarnessId' from its canonical UUID text representation.
+<span class="lineno">   31 </span>-- Returns 'Nothing' for any non-UUID input.
+<span class="lineno">   32 </span>parseHarnessId :: Text -&gt; Maybe HarnessId
+<span class="lineno">   33 </span><span class="decl"><span class="istickedoff">parseHarnessId = fmap HarnessId . UUID.fromText</span></span>
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>-- | Render a 'HarnessId' as its canonical UUID text representation.
+<span class="lineno">   36 </span>harnessIdToText :: HarnessId -&gt; Text
+<span class="lineno">   37 </span><span class="decl"><span class="istickedoff">harnessIdToText = UUID.toText . unHarnessId</span></span>
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | Round-trippable JSON: a 'HarnessId' is encoded as the canonical UUID
+<span class="lineno">   40 </span>-- string (D2.4). We hand-write the codec rather than @deriving newtype@ so the
+<span class="lineno">   41 </span>-- on-the-wire shape (a plain string) is explicit and decode rejects malformed
+<span class="lineno">   42 </span>-- UUIDs with a clear error.
+<span class="lineno">   43 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON HarnessId</span></span></span></span></span></span></span></span> where
+<span class="lineno">   44 </span>  <span class="decl"><span class="istickedoff">toJSON = Aeson.String . harnessIdToText</span></span>
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON HarnessId</span></span></span></span> where
+<span class="lineno">   47 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText &quot;HarnessId&quot; $ \t -&gt;</span>
+<span class="lineno">   48 </span><span class="spaces">    </span><span class="istickedoff">case parseHarnessId t of</span>
+<span class="lineno">   49 </span><span class="spaces">      </span><span class="istickedoff">Just hid -&gt; pure hid</span>
+<span class="lineno">   50 </span><span class="spaces">      </span><span class="istickedoff">Nothing  -&gt; fail (&quot;invalid HarnessId (not a UUID): &quot; &lt;&gt; show t)</span></span>
+
+</pre>
+</body>
+</html>

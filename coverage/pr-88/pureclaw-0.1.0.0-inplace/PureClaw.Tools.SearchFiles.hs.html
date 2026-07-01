@@ -1,0 +1,171 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.SearchFiles
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    searchFilesTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Control.Exception (IOException, try)
+<span class="lineno">    7 </span>import Data.Aeson
+<span class="lineno">    8 </span>import Data.Aeson.Types
+<span class="lineno">    9 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   10 </span>import Data.Text (Text)
+<span class="lineno">   11 </span>import Data.Text qualified as T
+<span class="lineno">   12 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   13 </span>import System.Exit
+<span class="lineno">   14 </span>import System.IO.Error (isDoesNotExistError)
+<span class="lineno">   15 </span>import System.Process.Typed qualified as P
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import PureClaw.Core.Types
+<span class="lineno">   18 </span>import PureClaw.Providers.Class
+<span class="lineno">   19 </span>import PureClaw.Tools.Registry
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>-- | Create a search_files tool backed by ripgrep.
+<span class="lineno">   22 </span>-- This tool does NOT go through SecurityPolicy because it is a read-only
+<span class="lineno">   23 </span>-- internal capability — the agent cannot use it to execute arbitrary commands.
+<span class="lineno">   24 </span>searchFilesTool :: WorkspaceRoot -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   25 </span><span class="decl"><span class="istickedoff">searchFilesTool (WorkspaceRoot root) = (def, handler)</span>
+<span class="lineno">   26 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   27 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   28 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;search_files&quot;</span>
+<span class="lineno">   29 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">   30 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Search file contents or file names using ripgrep.&quot;</span></span>
+<span class="lineno">   31 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Modes:&quot;</span></span>
+<span class="lineno">   32 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;  content (default) — regex search over file contents, returns matching lines with line numbers&quot;</span></span>
+<span class="lineno">   33 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;  files_only — return only file paths matching the pattern or glob&quot;</span></span>
+<span class="lineno">   34 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;  count — return match counts per file&quot;</span></span>
+<span class="lineno">   35 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   36 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   37 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   38 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   39 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;pattern&quot; .= object</span></span>
+<span class="lineno">   40 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   41 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Regex pattern to search for (ripgrep syntax)&quot; :: Text)</span></span>
+<span class="lineno">   42 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   43 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;path&quot; .= object</span></span>
+<span class="lineno">   44 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   45 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Directory or file to search in, relative to workspace root (default: \&quot;.\&quot;)&quot; :: Text)</span></span>
+<span class="lineno">   46 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   47 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;file_glob&quot; .= object</span></span>
+<span class="lineno">   48 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   49 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Glob filter for file names, e.g. \&quot;*.hs\&quot; or \&quot;*.{ts,tsx}\&quot;&quot; :: Text)</span></span>
+<span class="lineno">   50 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   51 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;output_mode&quot; .= object</span></span>
+<span class="lineno">   52 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   53 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;enum&quot; .= ([&quot;content&quot;, &quot;files_only&quot;, &quot;count&quot;] :: [Text])</span></span>
+<span class="lineno">   54 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Output mode (default: content)&quot; :: Text)</span></span>
+<span class="lineno">   55 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   56 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;context&quot; .= object</span></span>
+<span class="lineno">   57 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;integer&quot; :: Text)</span></span>
+<span class="lineno">   58 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Number of context lines before and after each match (default: 0)&quot; :: Text)</span></span>
+<span class="lineno">   59 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   60 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;limit&quot; .= object</span></span>
+<span class="lineno">   61 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;integer&quot; :: Text)</span></span>
+<span class="lineno">   62 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Maximum number of matches to return (default: 50)&quot; :: Text)</span></span>
+<span class="lineno">   63 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   64 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;case_insensitive&quot; .= object</span></span>
+<span class="lineno">   65 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;boolean&quot; :: Text)</span></span>
+<span class="lineno">   66 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Case-insensitive search (default: false)&quot; :: Text)</span></span>
+<span class="lineno">   67 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   68 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   69 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;pattern&quot;] :: [Text])</span></span>
+<span class="lineno">   70 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   71 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   72 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseInput input of</span>
+<span class="lineno">   75 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">T.pack err</span>, True)</span>
+<span class="lineno">   76 </span><span class="spaces">        </span><span class="istickedoff">Right si -&gt; runSearch si</span>
+<span class="lineno">   77 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   78 </span><span class="spaces">    </span><span class="istickedoff">runSearch :: SearchInput -&gt; IO (Text, Bool)</span>
+<span class="lineno">   79 </span><span class="spaces">    </span><span class="istickedoff">runSearch si = do</span>
+<span class="lineno">   80 </span><span class="spaces">      </span><span class="istickedoff">let args = buildRgArgs si</span>
+<span class="lineno">   81 </span><span class="spaces">          </span><span class="istickedoff">config = P.setWorkingDir root</span>
+<span class="lineno">   82 </span><span class="spaces">                 </span><span class="istickedoff">$ P.proc &quot;rg&quot; args</span>
+<span class="lineno">   83 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- try @IOException $ P.readProcess config</span>
+<span class="lineno">   84 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">   85 </span><span class="spaces">        </span><span class="istickedoff">Left e</span>
+<span class="lineno">   86 </span><span class="spaces">          </span><span class="istickedoff">| <span class="nottickedoff">isDoesNotExistError e</span> -&gt;</span>
+<span class="lineno">   87 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure (&quot;search_files requires ripgrep (rg) but it is not installed or not on PATH&quot;, True)</span></span>
+<span class="lineno">   88 </span><span class="spaces">          </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> -&gt;</span>
+<span class="lineno">   89 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure (&quot;search_files error: &quot; &lt;&gt; T.pack (show e), True)</span></span>
+<span class="lineno">   90 </span><span class="spaces">        </span><span class="istickedoff">Right (exitCode, outLazy, errLazy) -&gt;</span>
+<span class="lineno">   91 </span><span class="spaces">          </span><span class="istickedoff">let out = TE.decodeUtf8Lenient (BL.toStrict outLazy)</span>
+<span class="lineno">   92 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">err = TE.decodeUtf8Lenient (BL.toStrict errLazy)</span></span>
+<span class="lineno">   93 </span><span class="spaces">          </span><span class="istickedoff">in case exitCode of</span>
+<span class="lineno">   94 </span><span class="spaces">            </span><span class="istickedoff">ExitSuccess   -&gt; pure (truncateOutput out, False)</span>
+<span class="lineno">   95 </span><span class="spaces">            </span><span class="istickedoff">ExitFailure 1 -&gt; pure (&quot;No matches found&quot;, False)  -- rg returns 1 for no matches</span>
+<span class="lineno">   96 </span><span class="spaces">            </span><span class="istickedoff">ExitFailure _ -&gt; <span class="nottickedoff">pure (&quot;search_files error: &quot; &lt;&gt; err, True)</span></span>
+<span class="lineno">   97 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   98 </span><span class="spaces">    </span><span class="istickedoff">truncateOutput :: Text -&gt; Text</span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">truncateOutput t</span>
+<span class="lineno">  100 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlyfalse">T.length t &gt; 100000</span> =</span>
+<span class="lineno">  101 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">T.take 100000 t &lt;&gt; &quot;\n[...output truncated at 100000 chars]&quot;</span></span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = t</span>
+<span class="lineno">  103 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  104 </span><span class="spaces">    </span><span class="istickedoff">buildRgArgs :: SearchInput -&gt; [String]</span>
+<span class="lineno">  105 </span><span class="spaces">    </span><span class="istickedoff">buildRgArgs si =</span>
+<span class="lineno">  106 </span><span class="spaces">      </span><span class="istickedoff">let modeArgs = case _si_outputMode si of</span>
+<span class="lineno">  107 </span><span class="spaces">            </span><span class="istickedoff">&quot;files_only&quot; -&gt; [&quot;--files-with-matches&quot;]</span>
+<span class="lineno">  108 </span><span class="spaces">            </span><span class="istickedoff">&quot;count&quot;      -&gt; [&quot;--count&quot;]</span>
+<span class="lineno">  109 </span><span class="spaces">            </span><span class="istickedoff">_            -&gt; [&quot;--line-number&quot;]  -- content mode (default)</span>
+<span class="lineno">  110 </span><span class="spaces">          </span><span class="istickedoff">globArgs = case _si_fileGlob si of</span>
+<span class="lineno">  111 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  112 </span><span class="spaces">            </span><span class="istickedoff">Just g  -&gt; [&quot;--glob&quot;, T.unpack g]</span>
+<span class="lineno">  113 </span><span class="spaces">          </span><span class="istickedoff">ctxArgs = case _si_context si of</span>
+<span class="lineno">  114 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  115 </span><span class="spaces">            </span><span class="istickedoff">Just n  -&gt; [&quot;--context&quot;, show n]</span>
+<span class="lineno">  116 </span><span class="spaces">          </span><span class="istickedoff">limitArgs = [&quot;--max-count&quot;, show (_si_limit si)]</span>
+<span class="lineno">  117 </span><span class="spaces">          </span><span class="istickedoff">caseArgs = [&quot;--ignore-case&quot; | _si_caseInsensitive si]</span>
+<span class="lineno">  118 </span><span class="spaces">          </span><span class="istickedoff">searchPath = T.unpack (_si_path si)</span>
+<span class="lineno">  119 </span><span class="spaces">      </span><span class="istickedoff">in concat</span>
+<span class="lineno">  120 </span><span class="spaces">          </span><span class="istickedoff">[ [&quot;--no-heading&quot;, &quot;--color&quot;, &quot;never&quot;]</span>
+<span class="lineno">  121 </span><span class="spaces">          </span><span class="istickedoff">, modeArgs</span>
+<span class="lineno">  122 </span><span class="spaces">          </span><span class="istickedoff">, globArgs</span>
+<span class="lineno">  123 </span><span class="spaces">          </span><span class="istickedoff">, ctxArgs</span>
+<span class="lineno">  124 </span><span class="spaces">          </span><span class="istickedoff">, limitArgs</span>
+<span class="lineno">  125 </span><span class="spaces">          </span><span class="istickedoff">, caseArgs</span>
+<span class="lineno">  126 </span><span class="spaces">          </span><span class="istickedoff">, [&quot;--&quot;, T.unpack (_si_pattern si), searchPath]</span>
+<span class="lineno">  127 </span><span class="spaces">          </span><span class="istickedoff">]</span></span>
+<span class="lineno">  128 </span>
+<span class="lineno">  129 </span>data SearchInput = SearchInput
+<span class="lineno">  130 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_pattern</span></span></span>         :: Text
+<span class="lineno">  131 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_path</span></span></span>            :: Text
+<span class="lineno">  132 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_fileGlob</span></span></span>        :: Maybe Text
+<span class="lineno">  133 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_outputMode</span></span></span>      :: Text
+<span class="lineno">  134 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_context</span></span></span>         :: Maybe Int
+<span class="lineno">  135 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_limit</span></span></span>           :: Int
+<span class="lineno">  136 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_caseInsensitive</span></span></span> :: Bool
+<span class="lineno">  137 </span>  }
+<span class="lineno">  138 </span>
+<span class="lineno">  139 </span>parseInput :: Value -&gt; Parser SearchInput
+<span class="lineno">  140 </span><span class="decl"><span class="istickedoff">parseInput = withObject <span class="nottickedoff">&quot;SearchFilesInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="istickedoff">SearchInput</span>
+<span class="lineno">  142 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; o .:  &quot;pattern&quot;</span>
+<span class="lineno">  143 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;path&quot;             .!= &quot;.&quot;</span>
+<span class="lineno">  144 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;file_glob&quot;</span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;output_mode&quot;      .!= &quot;content&quot;</span>
+<span class="lineno">  146 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;context&quot;</span>
+<span class="lineno">  147 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;limit&quot;            .!= 50</span>
+<span class="lineno">  148 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;case_insensitive&quot; .!= False</span></span>
+
+</pre>
+</body>
+</html>

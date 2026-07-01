@@ -1,0 +1,60 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | Activity probe loop — now a thin shim over the registry-based reconcile
+<span class="lineno">    2 </span>-- loop (&quot;PureClaw.Harness.Reconcile&quot;, WU5 of the Harness Registry feature).
+<span class="lineno">    3 </span>--
+<span class="lineno">    4 </span>-- /History./ This module originally walked the process-wide
+<span class="lineno">    5 </span>-- @IORef (Map Text HarnessHandle)@ every two seconds and published one
+<span class="lineno">    6 </span>-- 'PureClaw.Frontend.StreamBroker.ActivityChanged' per state transition. That
+<span class="lineno">    7 </span>-- legacy probe had a structural gap: it used a one-way map diff, so a harness
+<span class="lineno">    8 </span>-- that /disappeared/ between ticks emitted no event (the bug at the old
+<span class="lineno">    9 </span>-- @ActivityProbe.hs:117@).
+<span class="lineno">   10 </span>--
+<span class="lineno">   11 </span>-- /Now./ The 'PureClaw.Harness.Registry' is the source of truth for harness
+<span class="lineno">   12 </span>-- identity + health, and 'PureClaw.Harness.Reconcile' owns the loop: it sweeps
+<span class="lineno">   13 </span>-- tmux, corroborates ownership by PID (§8 C4), classifies liveness, and emits a
+<span class="lineno">   14 </span>-- /symmetric/-diff stream of 'ActivityChanged' events that INCLUDES
+<span class="lineno">   15 </span>-- disappearances. This module re-exports that loop under the historical name so
+<span class="lineno">   16 </span>-- the CLI wiring in &quot;PureClaw.CLI.Commands&quot; reads unchanged at the call site.
+<span class="lineno">   17 </span>--
+<span class="lineno">   18 </span>-- The loop's behavioural contract (first-tick baseline, cancellation re-raise,
+<span class="lineno">   19 </span>-- transient-failure resilience) and its deterministic test seam now live in
+<span class="lineno">   20 </span>-- &quot;PureClaw.Harness.Reconcile&quot; ('Reconcile.runReconcileLoopWith') and are
+<span class="lineno">   21 </span>-- covered by @test\/Harness\/ReconcileSpec.hs@.
+<span class="lineno">   22 </span>module PureClaw.Frontend.ActivityProbe
+<span class="lineno">   23 </span>  ( runActivityProbeLoop
+<span class="lineno">   24 </span>  ) where
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>import PureClaw.Frontend.StreamBroker (StreamBroker)
+<span class="lineno">   27 </span>import PureClaw.Handles.Log (LogHandle)
+<span class="lineno">   28 </span>import PureClaw.Harness.Reconcile (runReconcileLoop)
+<span class="lineno">   29 </span>import PureClaw.Harness.Registry (HarnessRegistry)
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>-- | Run the activity probe loop. Delegates to the registry-based reconcile loop
+<span class="lineno">   32 </span>-- ('runReconcileLoop'): a 2-second cadence over the durable 'HarnessRegistry',
+<span class="lineno">   33 </span>-- publishing 'ActivityChanged' events (transitions + disappearances) to the
+<span class="lineno">   34 </span>-- 'StreamBroker'. The registry — not the legacy harness map — is the source of
+<span class="lineno">   35 </span>-- truth, so a harness that vanishes out-of-band now emits an event.
+<span class="lineno">   36 </span>runActivityProbeLoop :: StreamBroker -&gt; HarnessRegistry -&gt; LogHandle -&gt; IO ()
+<span class="lineno">   37 </span><span class="decl"><span class="istickedoff">runActivityProbeLoop = runReconcileLoop</span></span>
+
+</pre>
+</body>
+</html>

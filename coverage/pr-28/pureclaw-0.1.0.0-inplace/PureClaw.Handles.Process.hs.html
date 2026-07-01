@@ -1,0 +1,231 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Handles.Process
+<span class="lineno">    2 </span>  ( -- * Types
+<span class="lineno">    3 </span>    ProcessId (..)
+<span class="lineno">    4 </span>  , ProcessInfo (..)
+<span class="lineno">    5 </span>  , ProcessStatus (..)
+<span class="lineno">    6 </span>    -- * Handle type
+<span class="lineno">    7 </span>  , ProcessHandle (..)
+<span class="lineno">    8 </span>    -- * Implementations
+<span class="lineno">    9 </span>  , mkProcessHandle
+<span class="lineno">   10 </span>  , mkNoOpProcessHandle
+<span class="lineno">   11 </span>  ) where
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   14 </span>import Control.Exception
+<span class="lineno">   15 </span>import Data.ByteString (ByteString)
+<span class="lineno">   16 </span>import Data.ByteString qualified as BS
+<span class="lineno">   17 </span>import Data.IORef
+<span class="lineno">   18 </span>import Data.Map.Strict (Map)
+<span class="lineno">   19 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   20 </span>import Data.Text (Text)
+<span class="lineno">   21 </span>import Data.Text qualified as T
+<span class="lineno">   22 </span>import System.Exit
+<span class="lineno">   23 </span>import System.IO (Handle, hFlush)
+<span class="lineno">   24 </span>import System.Process.Typed qualified as P
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>import PureClaw.Handles.Log
+<span class="lineno">   27 </span>import PureClaw.Security.Command
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Identifier for a background process.
+<span class="lineno">   30 </span>newtype ProcessId = ProcessId { <span class="istickedoff"><span class="decl"><span class="istickedoff">unProcessId</span></span></span> :: Int }
+<span class="lineno">   31 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Lightweight process info for listing.
+<span class="lineno">   34 </span>data ProcessInfo = ProcessInfo
+<span class="lineno">   35 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pi_id</span></span></span>       :: ProcessId
+<span class="lineno">   36 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pi_command</span></span></span>  :: Text
+<span class="lineno">   37 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pi_running</span></span></span>  :: Bool
+<span class="lineno">   38 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pi_exitCode</span></span></span> :: Maybe ExitCode
+<span class="lineno">   39 </span>  }
+<span class="lineno">   40 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>-- | Full process status with output, returned by poll.
+<span class="lineno">   43 </span>data ProcessStatus
+<span class="lineno">   44 </span>  = ProcessRunning ByteString ByteString        -- ^ partial stdout, stderr
+<span class="lineno">   45 </span>  | ProcessDone ExitCode ByteString ByteString   -- ^ exit code, final stdout, stderr
+<span class="lineno">   46 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Background process management capability.
+<span class="lineno">   49 </span>data ProcessHandle = ProcessHandle
+<span class="lineno">   50 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_spawn</span></span></span>      :: AuthorizedCommand -&gt; IO ProcessId
+<span class="lineno">   51 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_list</span></span></span>       :: IO [ProcessInfo]
+<span class="lineno">   52 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_poll</span></span></span>       :: ProcessId -&gt; IO (Maybe ProcessStatus)
+<span class="lineno">   53 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_kill</span></span></span>       :: ProcessId -&gt; IO Bool
+<span class="lineno">   54 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ph_writeStdin</span></span></span> :: ProcessId -&gt; ByteString -&gt; IO Bool
+<span class="lineno">   55 </span>  }
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>-- Internal entry tracking a background process.
+<span class="lineno">   58 </span>data ProcessEntry = ProcessEntry
+<span class="lineno">   59 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pe_command</span></span></span>   :: Text
+<span class="lineno">   60 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pe_stdinH</span></span></span>    :: Handle
+<span class="lineno">   61 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pe_stdoutRef</span></span></span> :: IORef ByteString
+<span class="lineno">   62 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pe_stderrRef</span></span></span> :: IORef ByteString
+<span class="lineno">   63 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pe_exitAsync</span></span></span> :: Async.Async ExitCode
+<span class="lineno">   64 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pe_cleanup</span></span></span>   :: IO ()
+<span class="lineno">   65 </span>  }
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>data ProcessState = ProcessState
+<span class="lineno">   68 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pst_nextId</span></span></span>    :: !Int
+<span class="lineno">   69 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pst_processes</span></span></span> :: Map Int ProcessEntry
+<span class="lineno">   70 </span>  }
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | Minimal safe environment for subprocesses.
+<span class="lineno">   73 </span>safeEnv :: [(String, String)]
+<span class="lineno">   74 </span><span class="decl"><span class="nottickedoff">safeEnv = [(&quot;PATH&quot;, &quot;/usr/bin:/bin:/usr/local/bin&quot;)]</span></span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | Real process handle using typed-process and async.
+<span class="lineno">   77 </span>mkProcessHandle :: LogHandle -&gt; IO ProcessHandle
+<span class="lineno">   78 </span><span class="decl"><span class="nottickedoff">mkProcessHandle logger = do</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="nottickedoff">stateRef &lt;- newIORef ProcessState { _pst_nextId = 1, _pst_processes = Map.empty }</span>
+<span class="lineno">   80 </span><span class="spaces">  </span><span class="nottickedoff">pure ProcessHandle</span>
+<span class="lineno">   81 </span><span class="spaces">    </span><span class="nottickedoff">{ _ph_spawn = \cmd -&gt; do</span>
+<span class="lineno">   82 </span><span class="spaces">        </span><span class="nottickedoff">let prog = getCommandProgram cmd</span>
+<span class="lineno">   83 </span><span class="spaces">            </span><span class="nottickedoff">args = map T.unpack (getCommandArgs cmd)</span>
+<span class="lineno">   84 </span><span class="spaces">            </span><span class="nottickedoff">cmdText = T.pack prog &lt;&gt; &quot; &quot; &lt;&gt; T.unwords (getCommandArgs cmd)</span>
+<span class="lineno">   85 </span><span class="spaces">            </span><span class="nottickedoff">config = P.setStdin P.createPipe</span>
+<span class="lineno">   86 </span><span class="spaces">                   </span><span class="nottickedoff">$ P.setStdout P.createPipe</span>
+<span class="lineno">   87 </span><span class="spaces">                   </span><span class="nottickedoff">$ P.setStderr P.createPipe</span>
+<span class="lineno">   88 </span><span class="spaces">                   </span><span class="nottickedoff">$ P.setEnv safeEnv</span>
+<span class="lineno">   89 </span><span class="spaces">                   </span><span class="nottickedoff">$ P.proc prog args</span>
+<span class="lineno">   90 </span><span class="spaces">        </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Spawning background: &quot; &lt;&gt; cmdText</span>
+<span class="lineno">   91 </span><span class="spaces">        </span><span class="nottickedoff">proc &lt;- P.startProcess config</span>
+<span class="lineno">   92 </span><span class="spaces">        </span><span class="nottickedoff">let stdinH  = P.getStdin proc</span>
+<span class="lineno">   93 </span><span class="spaces">            </span><span class="nottickedoff">stdoutH = P.getStdout proc</span>
+<span class="lineno">   94 </span><span class="spaces">            </span><span class="nottickedoff">stderrH = P.getStderr proc</span>
+<span class="lineno">   95 </span><span class="spaces">        </span><span class="nottickedoff">stdoutRef &lt;- newIORef BS.empty</span>
+<span class="lineno">   96 </span><span class="spaces">        </span><span class="nottickedoff">stderrRef &lt;- newIORef BS.empty</span>
+<span class="lineno">   97 </span><span class="spaces">        </span><span class="nottickedoff">outReader &lt;- Async.async $ readLoop stdoutH stdoutRef</span>
+<span class="lineno">   98 </span><span class="spaces">        </span><span class="nottickedoff">errReader &lt;- Async.async $ readLoop stderrH stderrRef</span>
+<span class="lineno">   99 </span><span class="spaces">        </span><span class="nottickedoff">exitAsync &lt;- Async.async $ P.waitExitCode proc</span>
+<span class="lineno">  100 </span><span class="spaces">        </span><span class="nottickedoff">let cleanup = do</span>
+<span class="lineno">  101 </span><span class="spaces">              </span><span class="nottickedoff">Async.cancel outReader</span>
+<span class="lineno">  102 </span><span class="spaces">              </span><span class="nottickedoff">Async.cancel errReader</span>
+<span class="lineno">  103 </span><span class="spaces">              </span><span class="nottickedoff">Async.cancel exitAsync</span>
+<span class="lineno">  104 </span><span class="spaces">              </span><span class="nottickedoff">_ &lt;- try @SomeException (P.stopProcess proc)</span>
+<span class="lineno">  105 </span><span class="spaces">              </span><span class="nottickedoff">pure ()</span>
+<span class="lineno">  106 </span><span class="spaces">        </span><span class="nottickedoff">let entry = ProcessEntry</span>
+<span class="lineno">  107 </span><span class="spaces">              </span><span class="nottickedoff">{ _pe_command   = cmdText</span>
+<span class="lineno">  108 </span><span class="spaces">              </span><span class="nottickedoff">, _pe_stdinH    = stdinH</span>
+<span class="lineno">  109 </span><span class="spaces">              </span><span class="nottickedoff">, _pe_stdoutRef = stdoutRef</span>
+<span class="lineno">  110 </span><span class="spaces">              </span><span class="nottickedoff">, _pe_stderrRef = stderrRef</span>
+<span class="lineno">  111 </span><span class="spaces">              </span><span class="nottickedoff">, _pe_exitAsync = exitAsync</span>
+<span class="lineno">  112 </span><span class="spaces">              </span><span class="nottickedoff">, _pe_cleanup   = cleanup</span>
+<span class="lineno">  113 </span><span class="spaces">              </span><span class="nottickedoff">}</span>
+<span class="lineno">  114 </span><span class="spaces">        </span><span class="nottickedoff">pid &lt;- atomicModifyIORef' stateRef $ \st -&gt;</span>
+<span class="lineno">  115 </span><span class="spaces">          </span><span class="nottickedoff">let pid = _pst_nextId st</span>
+<span class="lineno">  116 </span><span class="spaces">              </span><span class="nottickedoff">st' = st { _pst_nextId    = pid + 1</span>
+<span class="lineno">  117 </span><span class="spaces">                       </span><span class="nottickedoff">, _pst_processes = Map.insert pid entry (_pst_processes st)</span>
+<span class="lineno">  118 </span><span class="spaces">                       </span><span class="nottickedoff">}</span>
+<span class="lineno">  119 </span><span class="spaces">          </span><span class="nottickedoff">in (st', pid)</span>
+<span class="lineno">  120 </span><span class="spaces">        </span><span class="nottickedoff">pure (ProcessId pid)</span>
+<span class="lineno">  121 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  122 </span><span class="spaces">    </span><span class="nottickedoff">, _ph_list = do</span>
+<span class="lineno">  123 </span><span class="spaces">        </span><span class="nottickedoff">st &lt;- readIORef stateRef</span>
+<span class="lineno">  124 </span><span class="spaces">        </span><span class="nottickedoff">mapM toProcessInfo (Map.toList (_pst_processes st))</span>
+<span class="lineno">  125 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  126 </span><span class="spaces">    </span><span class="nottickedoff">, _ph_poll = \(ProcessId pid) -&gt; do</span>
+<span class="lineno">  127 </span><span class="spaces">        </span><span class="nottickedoff">st &lt;- readIORef stateRef</span>
+<span class="lineno">  128 </span><span class="spaces">        </span><span class="nottickedoff">case Map.lookup pid (_pst_processes st) of</span>
+<span class="lineno">  129 </span><span class="spaces">          </span><span class="nottickedoff">Nothing -&gt; pure Nothing</span>
+<span class="lineno">  130 </span><span class="spaces">          </span><span class="nottickedoff">Just entry -&gt; do</span>
+<span class="lineno">  131 </span><span class="spaces">            </span><span class="nottickedoff">status &lt;- getStatus entry</span>
+<span class="lineno">  132 </span><span class="spaces">            </span><span class="nottickedoff">pure (Just status)</span>
+<span class="lineno">  133 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  134 </span><span class="spaces">    </span><span class="nottickedoff">, _ph_kill = \(ProcessId pid) -&gt; do</span>
+<span class="lineno">  135 </span><span class="spaces">        </span><span class="nottickedoff">st &lt;- readIORef stateRef</span>
+<span class="lineno">  136 </span><span class="spaces">        </span><span class="nottickedoff">case Map.lookup pid (_pst_processes st) of</span>
+<span class="lineno">  137 </span><span class="spaces">          </span><span class="nottickedoff">Nothing -&gt; pure False</span>
+<span class="lineno">  138 </span><span class="spaces">          </span><span class="nottickedoff">Just entry -&gt; do</span>
+<span class="lineno">  139 </span><span class="spaces">            </span><span class="nottickedoff">_pe_cleanup entry</span>
+<span class="lineno">  140 </span><span class="spaces">            </span><span class="nottickedoff">atomicModifyIORef' stateRef $ \s -&gt;</span>
+<span class="lineno">  141 </span><span class="spaces">              </span><span class="nottickedoff">(s { _pst_processes = Map.delete pid (_pst_processes s) }, ())</span>
+<span class="lineno">  142 </span><span class="spaces">            </span><span class="nottickedoff">_lh_logInfo logger $ &quot;Killed process &quot; &lt;&gt; T.pack (show pid)</span>
+<span class="lineno">  143 </span><span class="spaces">            </span><span class="nottickedoff">pure True</span>
+<span class="lineno">  144 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="nottickedoff">, _ph_writeStdin = \(ProcessId pid) bytes -&gt; do</span>
+<span class="lineno">  146 </span><span class="spaces">        </span><span class="nottickedoff">st &lt;- readIORef stateRef</span>
+<span class="lineno">  147 </span><span class="spaces">        </span><span class="nottickedoff">case Map.lookup pid (_pst_processes st) of</span>
+<span class="lineno">  148 </span><span class="spaces">          </span><span class="nottickedoff">Nothing -&gt; pure False</span>
+<span class="lineno">  149 </span><span class="spaces">          </span><span class="nottickedoff">Just entry -&gt; do</span>
+<span class="lineno">  150 </span><span class="spaces">            </span><span class="nottickedoff">result &lt;- try @SomeException $ do</span>
+<span class="lineno">  151 </span><span class="spaces">              </span><span class="nottickedoff">BS.hPut (_pe_stdinH entry) bytes</span>
+<span class="lineno">  152 </span><span class="spaces">              </span><span class="nottickedoff">hFlush (_pe_stdinH entry)</span>
+<span class="lineno">  153 </span><span class="spaces">            </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  154 </span><span class="spaces">              </span><span class="nottickedoff">Left _ -&gt; pure False</span>
+<span class="lineno">  155 </span><span class="spaces">              </span><span class="nottickedoff">Right () -&gt; pure True</span>
+<span class="lineno">  156 </span><span class="spaces">    </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  157 </span>
+<span class="lineno">  158 </span>-- | Read from a handle in a loop, appending to an IORef.
+<span class="lineno">  159 </span>readLoop :: Handle -&gt; IORef ByteString -&gt; IO ()
+<span class="lineno">  160 </span><span class="decl"><span class="nottickedoff">readLoop h ref = go</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  162 </span><span class="spaces">    </span><span class="nottickedoff">go = do</span>
+<span class="lineno">  163 </span><span class="spaces">      </span><span class="nottickedoff">chunk &lt;- try @SomeException (BS.hGetSome h 4096)</span>
+<span class="lineno">  164 </span><span class="spaces">      </span><span class="nottickedoff">case chunk of</span>
+<span class="lineno">  165 </span><span class="spaces">        </span><span class="nottickedoff">Left _  -&gt; pure ()</span>
+<span class="lineno">  166 </span><span class="spaces">        </span><span class="nottickedoff">Right bs</span>
+<span class="lineno">  167 </span><span class="spaces">          </span><span class="nottickedoff">| BS.null bs -&gt; pure ()</span>
+<span class="lineno">  168 </span><span class="spaces">          </span><span class="nottickedoff">| otherwise  -&gt; do</span>
+<span class="lineno">  169 </span><span class="spaces">              </span><span class="nottickedoff">atomicModifyIORef' ref $ \old -&gt; (old &lt;&gt; bs, ())</span>
+<span class="lineno">  170 </span><span class="spaces">              </span><span class="nottickedoff">go</span></span>
+<span class="lineno">  171 </span>
+<span class="lineno">  172 </span>-- | Get current status of a process entry.
+<span class="lineno">  173 </span>getStatus :: ProcessEntry -&gt; IO ProcessStatus
+<span class="lineno">  174 </span><span class="decl"><span class="nottickedoff">getStatus entry = do</span>
+<span class="lineno">  175 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- Async.poll (_pe_exitAsync entry)</span>
+<span class="lineno">  176 </span><span class="spaces">  </span><span class="nottickedoff">stdout &lt;- readIORef (_pe_stdoutRef entry)</span>
+<span class="lineno">  177 </span><span class="spaces">  </span><span class="nottickedoff">stderr &lt;- readIORef (_pe_stderrRef entry)</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="nottickedoff">case result of</span>
+<span class="lineno">  179 </span><span class="spaces">    </span><span class="nottickedoff">Nothing              -&gt; pure (ProcessRunning stdout stderr)</span>
+<span class="lineno">  180 </span><span class="spaces">    </span><span class="nottickedoff">Just (Right ec)      -&gt; pure (ProcessDone ec stdout stderr)</span>
+<span class="lineno">  181 </span><span class="spaces">    </span><span class="nottickedoff">Just (Left _)        -&gt; pure (ProcessDone (ExitFailure (-1)) stdout stderr)</span></span>
+<span class="lineno">  182 </span>
+<span class="lineno">  183 </span>-- | Build a ProcessInfo from a map entry.
+<span class="lineno">  184 </span>toProcessInfo :: (Int, ProcessEntry) -&gt; IO ProcessInfo
+<span class="lineno">  185 </span><span class="decl"><span class="nottickedoff">toProcessInfo (pid, entry) = do</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="nottickedoff">result &lt;- Async.poll (_pe_exitAsync entry)</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="nottickedoff">let running = case result of</span>
+<span class="lineno">  188 </span><span class="spaces">        </span><span class="nottickedoff">Nothing -&gt; True</span>
+<span class="lineno">  189 </span><span class="spaces">        </span><span class="nottickedoff">Just _  -&gt; False</span>
+<span class="lineno">  190 </span><span class="spaces">      </span><span class="nottickedoff">exitCode = case result of</span>
+<span class="lineno">  191 </span><span class="spaces">        </span><span class="nottickedoff">Just (Right ec) -&gt; Just ec</span>
+<span class="lineno">  192 </span><span class="spaces">        </span><span class="nottickedoff">_               -&gt; Nothing</span>
+<span class="lineno">  193 </span><span class="spaces">  </span><span class="nottickedoff">pure ProcessInfo</span>
+<span class="lineno">  194 </span><span class="spaces">    </span><span class="nottickedoff">{ _pi_id       = ProcessId pid</span>
+<span class="lineno">  195 </span><span class="spaces">    </span><span class="nottickedoff">, _pi_command  = _pe_command entry</span>
+<span class="lineno">  196 </span><span class="spaces">    </span><span class="nottickedoff">, _pi_running  = running</span>
+<span class="lineno">  197 </span><span class="spaces">    </span><span class="nottickedoff">, _pi_exitCode = exitCode</span>
+<span class="lineno">  198 </span><span class="spaces">    </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  199 </span>
+<span class="lineno">  200 </span>-- | No-op process handle for testing.
+<span class="lineno">  201 </span>mkNoOpProcessHandle :: ProcessHandle
+<span class="lineno">  202 </span><span class="decl"><span class="istickedoff">mkNoOpProcessHandle = ProcessHandle</span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">{ _ph_spawn      = \_ -&gt; pure (ProcessId 1)</span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="istickedoff">, _ph_list       = pure []</span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">, _ph_poll       = \_ -&gt; pure (Just (ProcessDone ExitSuccess &quot;&quot; &quot;&quot;))</span>
+<span class="lineno">  206 </span><span class="spaces">  </span><span class="istickedoff">, _ph_kill       = \_ -&gt; pure True</span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">, _ph_writeStdin = \_ _ -&gt; pure True</span>
+<span class="lineno">  208 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

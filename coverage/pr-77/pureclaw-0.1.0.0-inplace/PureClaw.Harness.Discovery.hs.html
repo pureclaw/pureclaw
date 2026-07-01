@@ -1,0 +1,131 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | On-demand discovery of adoptable (PureClaw-UNMARKED) tmux windows.
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- Discovery is the read-only, user-invoked precursor to adoption (Phase 3,
+<span class="lineno">    4 </span>-- design @docs\/harness-registry.md@ §6, §8 B2\/C1). It answers &quot;which external
+<span class="lineno">    5 </span>-- windows COULD I adopt?&quot; and nothing more:
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>--   * __Lists ALL sessions.__ The adoption allow-list was deliberately dropped
+<span class="lineno">    8 </span>--     (the user picking a session in the foreground New-Tab form IS the
+<span class="lineno">    9 </span>--     consent — enforced at adopt time by 'PureClaw.Security.Adoption'). So a
+<span class="lineno">   10 </span>--     scan enumerates every tmux session and surfaces every UNMARKED, live
+<span class="lineno">   11 </span>--     window regardless of session name. Consent gates adoption, not discovery.
+<span class="lineno">   12 </span>--   * __Metadata-only (§8 C1), by construction.__ A scan returns a transient
+<span class="lineno">   13 </span>--     list of 'DiscoverableWindow' values. A 'DiscoverableWindow' carries NO
+<span class="lineno">   14 </span>--     handle and NO capture capability, so a discovered candidate is
+<span class="lineno">   15 </span>--     structurally incapable of having its pane captured. The scan function
+<span class="lineno">   16 </span>--     itself is only given a @readMarkers@-shaped seam (window metadata) and a
+<span class="lineno">   17 </span>--     @listSessions@-shaped seam — it has no way to call @capture-pane@.
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>-- Discovered candidates are NOT registry entries: they are never inserted into
+<span class="lineno">   20 </span>-- the 'PureClaw.Harness.Registry' and are never managed until an explicit,
+<span class="lineno">   21 </span>-- consent-gated adoption (WU4) promotes one to an @OriginAdopted@ entry.
+<span class="lineno">   22 </span>module PureClaw.Harness.Discovery
+<span class="lineno">   23 </span>  ( -- * Transient discovery result (no handle, no capture)
+<span class="lineno">   24 </span>    DiscoverableWindow (..)
+<span class="lineno">   25 </span>    -- * Bounded, metadata-only scan
+<span class="lineno">   26 </span>  , scanDiscoverable
+<span class="lineno">   27 </span>  , scanDiscoverableIO
+<span class="lineno">   28 </span>  ) where
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import Data.Aeson (ToJSON (..), object, (.=))
+<span class="lineno">   31 </span>import Data.Text (Text)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>import PureClaw.Harness.Tmux (TmuxWindowRow (..), listTmuxSessions, readMarkers)
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>-- | A single adoptable candidate window surfaced by a discovery scan.
+<span class="lineno">   36 </span>--
+<span class="lineno">   37 </span>-- This is a TRANSIENT, metadata-only value — deliberately NOT a
+<span class="lineno">   38 </span>-- 'PureClaw.Harness.Registry.HarnessEntry'. It carries no 'HarnessHandle' and
+<span class="lineno">   39 </span>-- no capture field, so a discovered candidate cannot be captured or managed
+<span class="lineno">   40 </span>-- (§8 C1 by construction). It is the projection of a tmux window's identifying
+<span class="lineno">   41 </span>-- metadata that the adopt UI needs to present a candidate to the user.
+<span class="lineno">   42 </span>data DiscoverableWindow = DiscoverableWindow
+<span class="lineno">   43 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_dw_session</span></span></span>     :: !Text          -- ^ owning tmux session name
+<span class="lineno">   44 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dw_windowName</span></span></span>  :: !Text          -- ^ @#{window_name}@ (display only)
+<span class="lineno">   45 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dw_windowIndex</span></span></span> :: !Int           -- ^ @#{window_index}@ within the session
+<span class="lineno">   46 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_dw_panePid</span></span></span>     :: !(Maybe Int)   -- ^ @#{pane_pid}@ (shell PID), if known
+<span class="lineno">   47 </span>  }
+<span class="lineno">   48 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>-- | JSON shape consumed by the discovery endpoint / frontend. Snake-cased
+<span class="lineno">   51 </span>-- keys: @session@, @window_name@, @window_index@, @pane_pid@.
+<span class="lineno">   52 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">ToJSON DiscoverableWindow</span></span></span></span></span></span></span></span> where
+<span class="lineno">   53 </span>  <span class="decl"><span class="istickedoff">toJSON dw = object</span>
+<span class="lineno">   54 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;session&quot;      .= _dw_session dw</span>
+<span class="lineno">   55 </span><span class="spaces">    </span><span class="istickedoff">, &quot;window_name&quot;  .= _dw_windowName dw</span>
+<span class="lineno">   56 </span><span class="spaces">    </span><span class="istickedoff">, &quot;window_index&quot; .= _dw_windowIndex dw</span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">, &quot;pane_pid&quot;     .= _dw_panePid dw</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Scan for adoptable windows across ALL sessions, METADATA-ONLY.
+<span class="lineno">   61 </span>--
+<span class="lineno">   62 </span>-- Seamed for testability and for the §8 C1 structural guarantee — the function
+<span class="lineno">   63 </span>-- is given only:
+<span class="lineno">   64 </span>--
+<span class="lineno">   65 </span>--   * a @readMarkers@-shaped seam returning per-window metadata rows, and
+<span class="lineno">   66 </span>--   * a @listSessions@-shaped seam returning the server's session names.
+<span class="lineno">   67 </span>--
+<span class="lineno">   68 </span>-- It has NO capture-pane seam, so it is structurally incapable of capturing a
+<span class="lineno">   69 </span>-- pane. Logic:
+<span class="lineno">   70 </span>--
+<span class="lineno">   71 </span>--   1. list all sessions (the allow-list was dropped — consent gates adoption,
+<span class="lineno">   72 </span>--      not discovery);
+<span class="lineno">   73 </span>--   2. for each session, read its window metadata rows;
+<span class="lineno">   74 </span>--   3. keep rows that are UNMARKED (@_twr_pclId == &quot;&quot;@ — not already ours) AND
+<span class="lineno">   75 </span>--      not @pane_dead@;
+<span class="lineno">   76 </span>--   4. project each surviving row into a 'DiscoverableWindow'.
+<span class="lineno">   77 </span>--
+<span class="lineno">   78 </span>-- Pure-ish: all IO is in the injected seams, so the filtering logic is fully
+<span class="lineno">   79 </span>-- unit-testable.
+<span class="lineno">   80 </span>scanDiscoverable
+<span class="lineno">   81 </span>  :: (Text -&gt; IO [TmuxWindowRow])      -- ^ @readMarkers@-shaped seam
+<span class="lineno">   82 </span>  -&gt; IO [Text]                         -- ^ @listTmuxSessions@-shaped seam
+<span class="lineno">   83 </span>  -&gt; IO [DiscoverableWindow]
+<span class="lineno">   84 </span><span class="decl"><span class="istickedoff">scanDiscoverable readMarkersSeam listSessionsSeam = do</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">sessions &lt;- listSessionsSeam</span>
+<span class="lineno">   86 </span><span class="spaces">  </span><span class="istickedoff">concat &lt;$&gt; mapM scanSession sessions</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   88 </span><span class="spaces">    </span><span class="istickedoff">scanSession :: Text -&gt; IO [DiscoverableWindow]</span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="istickedoff">scanSession session = do</span>
+<span class="lineno">   90 </span><span class="spaces">      </span><span class="istickedoff">rows &lt;- readMarkersSeam session</span>
+<span class="lineno">   91 </span><span class="spaces">      </span><span class="istickedoff">pure [ toDiscoverable session row | row &lt;- rows, isAdoptable row ]</span>
+<span class="lineno">   92 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   93 </span><span class="spaces">    </span><span class="istickedoff">isAdoptable :: TmuxWindowRow -&gt; Bool</span>
+<span class="lineno">   94 </span><span class="spaces">    </span><span class="istickedoff">isAdoptable row = _twr_pclId row == &quot;&quot; &amp;&amp; not (_twr_paneDead row)</span>
+<span class="lineno">   95 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   96 </span><span class="spaces">    </span><span class="istickedoff">toDiscoverable :: Text -&gt; TmuxWindowRow -&gt; DiscoverableWindow</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">toDiscoverable session row = DiscoverableWindow</span>
+<span class="lineno">   98 </span><span class="spaces">      </span><span class="istickedoff">{ _dw_session     = session</span>
+<span class="lineno">   99 </span><span class="spaces">      </span><span class="istickedoff">, _dw_windowName  = _twr_windowName row</span>
+<span class="lineno">  100 </span><span class="spaces">      </span><span class="istickedoff">, _dw_windowIndex = _twr_windowIndex row</span>
+<span class="lineno">  101 </span><span class="spaces">      </span><span class="istickedoff">, _dw_panePid     = _twr_panePid row</span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">}</span></span>
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>-- | Production wrapper: scan the real tmux server (ALL sessions) using the real
+<span class="lineno">  105 </span>-- metadata-only tmux seams. Wires 'readMarkers' and 'listTmuxSessions' into
+<span class="lineno">  106 </span>-- 'scanDiscoverable'. Like 'scanDiscoverable', it never captures a pane.
+<span class="lineno">  107 </span>scanDiscoverableIO :: IO [DiscoverableWindow]
+<span class="lineno">  108 </span><span class="decl"><span class="istickedoff">scanDiscoverableIO = scanDiscoverable <span class="nottickedoff">readMarkers</span> listTmuxSessions</span></span>
+
+</pre>
+</body>
+</html>

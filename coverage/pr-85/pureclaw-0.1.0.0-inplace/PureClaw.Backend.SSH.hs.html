@@ -1,0 +1,843 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Backend.SSH
+<span class="lineno">    3 </span>-- Description : SSH backend factories with hardened defaults (WU9).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- == Overview
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- Two factories produce a real 'BackendHandle' over an @ssh@ subprocess:
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- * 'mkSshBackendHandle' — 'Pty' kind. Conversational; spawns @ssh -tt@
+<span class="lineno">   10 </span>--   inside a local PTY and delegates to
+<span class="lineno">   11 </span>--   'PureClaw.Backend.Pty.mkDrainerBackendHandle' for the drainer + STM
+<span class="lineno">   12 </span>--   idle state machine.
+<span class="lineno">   13 </span>-- * 'mkSshPipeBackendHandle' — 'Pipe' kind. One-shot; mirrors the pipe
+<span class="lineno">   14 </span>--   spawn pattern in &quot;PureClaw.Backend.Local&quot; (OS-level stderr merge,
+<span class="lineno">   15 </span>--   drain to EOF) but composes the hardened @ssh@ argv around the
+<span class="lineno">   16 </span>--   already-authorized remote 'RemoteCommand'.
+<span class="lineno">   17 </span>--
+<span class="lineno">   18 </span>-- == Hardened argv (callers cannot opt out)
+<span class="lineno">   19 </span>--
+<span class="lineno">   20 </span>-- For both factories the @ssh@ command line includes the security
+<span class="lineno">   21 </span>-- defaults enumerated in
+<span class="lineno">   22 </span>-- @docs\/terminal-backend-abstractions.md@ § &quot;SSH Security Defaults&quot;:
+<span class="lineno">   23 </span>-- @-F /dev/null@, @StrictHostKeyChecking=accept-new@, @BatchMode=yes@,
+<span class="lineno">   24 </span>-- @IdentitiesOnly=yes@, @ConnectTimeout=10@, @ServerAliveInterval=30@,
+<span class="lineno">   25 </span>-- @ServerAliveCountMax=3@, @ForwardX11=no@, @ForwardX11Trusted=no@,
+<span class="lineno">   26 </span>-- @ForwardAgent=no@, @PermitLocalCommand=no@.
+<span class="lineno">   27 </span>--
+<span class="lineno">   28 </span>-- The remote program path AND every remote argument are
+<span class="lineno">   29 </span>-- shell-quoted via 'PureClaw.Internal.ShellQuote.shellQuote' before
+<span class="lineno">   30 </span>-- being spliced into the argv — the remote login shell re-parses the
+<span class="lineno">   31 </span>-- combined string, so quoting on the local side is the only line of
+<span class="lineno">   32 </span>-- defense against argument-list injection.
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- == v1 credential model
+<span class="lineno">   35 </span>--
+<span class="lineno">   36 </span>-- v1 supports only passphrase-less @ssh@ keys; the caller is
+<span class="lineno">   37 </span>-- responsible for writing the key file at 'SafeKeyPath' (mode 0400)
+<span class="lineno">   38 </span>-- before constructing a backend. The Vault-backed credential helper
+<span class="lineno">   39 </span>-- that decrypts a key into an ephemeral 'SafeKeyPath' is out of scope
+<span class="lineno">   40 </span>-- for WU9 — this module accepts an already-validated 'SafeKeyPath'.
+<span class="lineno">   41 </span>--
+<span class="lineno">   42 </span>-- See @docs\/terminal-backend-abstractions.md@ § &quot;v1 credential model
+<span class="lineno">   43 </span>-- (passphrase-less keys)&quot;.
+<span class="lineno">   44 </span>module PureClaw.Backend.SSH
+<span class="lineno">   45 </span>  ( -- * Hosts
+<span class="lineno">   46 </span>    SshHost
+<span class="lineno">   47 </span>  , mkSshHost
+<span class="lineno">   48 </span>  , getSshHost
+<span class="lineno">   49 </span>    -- * Targets
+<span class="lineno">   50 </span>  , SshTarget (..)
+<span class="lineno">   51 </span>    -- * Control-master options
+<span class="lineno">   52 </span>  , ControlOpts (..)
+<span class="lineno">   53 </span>    -- * Construction options
+<span class="lineno">   54 </span>  , SshOpts (..)
+<span class="lineno">   55 </span>  , SshPipeOpts (..)
+<span class="lineno">   56 </span>  , defaultSshOpts
+<span class="lineno">   57 </span>  , defaultSshPipeOpts
+<span class="lineno">   58 </span>    -- * Remote command authorization
+<span class="lineno">   59 </span>  , RemoteCommand
+<span class="lineno">   60 </span>  , authorizeRemote
+<span class="lineno">   61 </span>  , getRemoteProgram
+<span class="lineno">   62 </span>  , getRemoteArgs
+<span class="lineno">   63 </span>    -- * Factories
+<span class="lineno">   64 </span>  , mkSshBackendHandle
+<span class="lineno">   65 </span>  , mkSshPipeBackendHandle
+<span class="lineno">   66 </span>    -- * Control-master lifecycle
+<span class="lineno">   67 </span>  , closeSshMultiplex
+<span class="lineno">   68 </span>    -- * Test seam (argv construction)
+<span class="lineno">   69 </span>  , buildSshArgv
+<span class="lineno">   70 </span>  , buildSshArgvFromParts
+<span class="lineno">   71 </span>  ) where
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   74 </span>import Control.Concurrent.MVar (modifyMVar_, newMVar)
+<span class="lineno">   75 </span>import Control.Exception (SomeException, throwIO, toException, try)
+<span class="lineno">   76 </span>import Control.Exception qualified as Exception
+<span class="lineno">   77 </span>import Data.ByteString (ByteString)
+<span class="lineno">   78 </span>import Data.ByteString qualified as BS
+<span class="lineno">   79 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   80 </span>import Data.Char (isAscii, isDigit, isAlphaNum)
+<span class="lineno">   81 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+<span class="lineno">   82 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   83 </span>import Data.Text (Text)
+<span class="lineno">   84 </span>import Data.Text qualified as T
+<span class="lineno">   85 </span>import System.IO (Handle, hClose)
+<span class="lineno">   86 </span>import System.Posix.IO qualified as PosixIO
+<span class="lineno">   87 </span>import System.Process.Typed qualified as P
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>import PureClaw.Backend.Pty
+<span class="lineno">   90 </span>  ( PtyIO (..)
+<span class="lineno">   91 </span>  , PtyOpenSpec (..)
+<span class="lineno">   92 </span>  , mkDrainerBackendHandle
+<span class="lineno">   93 </span>  )
+<span class="lineno">   94 </span>import PureClaw.Core.Types (AllowList (..), CommandName (..))
+<span class="lineno">   95 </span>import PureClaw.Handles.Backend
+<span class="lineno">   96 </span>  ( BackendContext (..)
+<span class="lineno">   97 </span>  , BackendError (..)
+<span class="lineno">   98 </span>  , BackendException (..)
+<span class="lineno">   99 </span>  , BackendHandle (..)
+<span class="lineno">  100 </span>  , BackendKind (..)
+<span class="lineno">  101 </span>  , EnvMap
+<span class="lineno">  102 </span>  , EnvValue (..)
+<span class="lineno">  103 </span>  , IdleSpec
+<span class="lineno">  104 </span>  , InvalidOptionDetail (..)
+<span class="lineno">  105 </span>  , PtyOpts (..)
+<span class="lineno">  106 </span>  , RecvResult (..)
+<span class="lineno">  107 </span>  , SshConnectFailure (..)
+<span class="lineno">  108 </span>  , acquireBufferQuota
+<span class="lineno">  109 </span>  , defaultPtyOpts
+<span class="lineno">  110 </span>  , globalBackendBufferQuota
+<span class="lineno">  111 </span>  , releaseBufferQuota
+<span class="lineno">  112 </span>  , sshIdle
+<span class="lineno">  113 </span>  , withConcurrentUseGuard
+<span class="lineno">  114 </span>  )
+<span class="lineno">  115 </span>import PureClaw.Internal.ShellQuote (shellQuote)
+<span class="lineno">  116 </span>import PureClaw.Security.Command
+<span class="lineno">  117 </span>  ( AuthorizedCommand
+<span class="lineno">  118 </span>  , CommandError (..)
+<span class="lineno">  119 </span>  , getCommandProgram
+<span class="lineno">  120 </span>  )
+<span class="lineno">  121 </span>import PureClaw.Security.Path
+<span class="lineno">  122 </span>  ( SafeKeyPath
+<span class="lineno">  123 </span>  , SafeRuntimePath
+<span class="lineno">  124 </span>  , getSafeKeyPath
+<span class="lineno">  125 </span>  , getSafeRuntimePath
+<span class="lineno">  126 </span>  )
+<span class="lineno">  127 </span>import PureClaw.Security.Policy
+<span class="lineno">  128 </span>  ( SecurityPolicy
+<span class="lineno">  129 </span>  , _sp_allowedRemoteCommands
+<span class="lineno">  130 </span>  , _sp_autonomy
+<span class="lineno">  131 </span>  )
+<span class="lineno">  132 </span>import PureClaw.Core.Types qualified as Core
+<span class="lineno">  133 </span>import Data.Set qualified as Set
+<span class="lineno">  134 </span>import System.FilePath (takeFileName)
+<span class="lineno">  135 </span>
+<span class="lineno">  136 </span>--------------------------------------------------------------------------------
+<span class="lineno">  137 </span>-- SshHost
+<span class="lineno">  138 </span>--------------------------------------------------------------------------------
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | A validated ssh hostname or IP literal.
+<span class="lineno">  141 </span>--
+<span class="lineno">  142 </span>-- The constructor is intentionally NOT exported. Obtain a value only
+<span class="lineno">  143 </span>-- via 'mkSshHost', which rejects leading @-@ (defends against
+<span class="lineno">  144 </span>-- @-oProxyCommand=evil@-style argv injection), whitespace, NUL, and
+<span class="lineno">  145 </span>-- shell metacharacters.
+<span class="lineno">  146 </span>newtype SshHost = SshHost Text
+<span class="lineno">  147 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  148 </span>
+<span class="lineno">  149 </span>-- | Show is intentionally redacted: the host string is per-session
+<span class="lineno">  150 </span>-- routing data, not loggable in user-facing surfaces.
+<span class="lineno">  151 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show SshHost</span></span></span></span> where
+<span class="lineno">  152 </span>  <span class="decl"><span class="nottickedoff">show _ = &quot;SshHost &lt;redacted&gt;&quot;</span></span>
+<span class="lineno">  153 </span>
+<span class="lineno">  154 </span>-- | Project an 'SshHost' to its underlying 'Text' for use inside argv
+<span class="lineno">  155 </span>-- construction. Not intended for logging.
+<span class="lineno">  156 </span>getSshHost :: SshHost -&gt; Text
+<span class="lineno">  157 </span><span class="decl"><span class="istickedoff">getSshHost (SshHost t) = t</span></span>
+<span class="lineno">  158 </span>
+<span class="lineno">  159 </span>-- | The ONLY way to construct an 'SshHost'.
+<span class="lineno">  160 </span>--
+<span class="lineno">  161 </span>-- Accepts:
+<span class="lineno">  162 </span>--
+<span class="lineno">  163 </span>--  * RFC 1123 hostname labels: @[A-Za-z0-9]([A-Za-z0-9-]{0,62})?@,
+<span class="lineno">  164 </span>--    dot-separated, total length &lt;= 253.
+<span class="lineno">  165 </span>--  * Dotted-quad IPv4 literals: e.g. @10.0.0.1@.
+<span class="lineno">  166 </span>--  * Bracketed IPv6 literals: e.g. @[::1]@.
+<span class="lineno">  167 </span>--
+<span class="lineno">  168 </span>-- Rejects (with 'BackendInvalidOption'):
+<span class="lineno">  169 </span>--
+<span class="lineno">  170 </span>--  * Empty input.
+<span class="lineno">  171 </span>--  * Leading @-@ (defends @-oProxyCommand=evil@-style injection).
+<span class="lineno">  172 </span>--  * Whitespace, NUL, or any non-printable / non-ASCII byte.
+<span class="lineno">  173 </span>--  * Shell metacharacters: @; | &amp; $ \` \\ \&quot; \' ( ) &lt; &gt; * ? [ ] { } ! # ~@.
+<span class="lineno">  174 </span>--  * Length &gt; 253.
+<span class="lineno">  175 </span>mkSshHost :: Text -&gt; Either BackendError SshHost
+<span class="lineno">  176 </span><span class="decl"><span class="istickedoff">mkSshHost t</span>
+<span class="lineno">  177 </span><span class="spaces">  </span><span class="istickedoff">| T.null t =</span>
+<span class="lineno">  178 </span><span class="spaces">      </span><span class="istickedoff">reject &quot;empty host&quot;</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">T.length t &gt; 253</span> =</span>
+<span class="lineno">  180 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">reject &quot;host too long&quot;</span></span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="istickedoff">| T.head t == '-' =</span>
+<span class="lineno">  182 </span><span class="spaces">      </span><span class="istickedoff">reject &quot;leading dash&quot;</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">T.any (\c -&gt; not (isAscii c) || c == '\NUL') t</span> =</span>
+<span class="lineno">  184 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">reject &quot;non-ASCII or NUL&quot;</span></span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">| T.any isWhitespaceLike t =</span>
+<span class="lineno">  186 </span><span class="spaces">      </span><span class="istickedoff">reject &quot;whitespace&quot;</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">-- The bracketed IPv6 form legitimately contains '[' and ']', which</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">-- would otherwise be caught by 'isShellMeta'. Apply the IPv6 fast-</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">-- path BEFORE the generic meta-char rejection. Other shell</span>
+<span class="lineno">  190 </span><span class="spaces">  </span><span class="istickedoff">-- metacharacters inside the brackets are rejected by</span>
+<span class="lineno">  191 </span><span class="spaces">  </span><span class="istickedoff">-- 'allowedIPv6Char'.</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="istickedoff">| isBracketedIPv6 t =</span>
+<span class="lineno">  193 </span><span class="spaces">      </span><span class="istickedoff">Right <span class="nottickedoff">(SshHost t)</span></span>
+<span class="lineno">  194 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">T.any isShellMeta t</span> =</span>
+<span class="lineno">  195 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">reject &quot;shell metacharacter&quot;</span></span>
+<span class="lineno">  196 </span><span class="spaces">  </span><span class="istickedoff">| isDottedIPv4 t =</span>
+<span class="lineno">  197 </span><span class="spaces">      </span><span class="istickedoff">Right (SshHost t)</span>
+<span class="lineno">  198 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">isHostnameLabels t</span> =</span>
+<span class="lineno">  199 </span><span class="spaces">      </span><span class="istickedoff">Right (SshHost t)</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> =</span>
+<span class="lineno">  201 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">reject &quot;invalid hostname&quot;</span></span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  203 </span><span class="spaces">    </span><span class="istickedoff">reject :: Text -&gt; Either BackendError SshHost</span>
+<span class="lineno">  204 </span><span class="spaces">    </span><span class="istickedoff">reject msg = Left (BackendInvalidOption (InvalidOptionDetail (&quot;SshHost: &quot; &lt;&gt; msg)))</span>
+<span class="lineno">  205 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  206 </span><span class="spaces">    </span><span class="istickedoff">isWhitespaceLike c = c == ' ' || c == '\t' || c == '\n' || c == '\r'</span>
+<span class="lineno">  207 </span><span class="spaces">    </span><span class="istickedoff">isShellMeta c = c `elem` (&quot;;|&amp;$`\\\&quot;'()&lt;&gt;*?[]{}!#~&quot; :: String)</span>
+<span class="lineno">  208 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  209 </span><span class="spaces">    </span><span class="istickedoff">isBracketedIPv6 s =</span>
+<span class="lineno">  210 </span><span class="spaces">      </span><span class="istickedoff">T.length s &gt;= 4</span>
+<span class="lineno">  211 </span><span class="spaces">        </span><span class="istickedoff">&amp;&amp; T.head s == '['</span>
+<span class="lineno">  212 </span><span class="spaces">        </span><span class="istickedoff">&amp;&amp; T.last s == ']'</span>
+<span class="lineno">  213 </span><span class="spaces">        </span><span class="istickedoff">&amp;&amp; T.all allowedIPv6Char (T.init (T.tail s))</span>
+<span class="lineno">  214 </span><span class="spaces">    </span><span class="istickedoff">allowedIPv6Char c = isAscii c &amp;&amp; (isAlphaNum c || c == ':' || <span class="nottickedoff">c == '.'</span>)</span>
+<span class="lineno">  215 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  216 </span><span class="spaces">    </span><span class="istickedoff">isDottedIPv4 s =</span>
+<span class="lineno">  217 </span><span class="spaces">      </span><span class="istickedoff">let parts = T.splitOn &quot;.&quot; s</span>
+<span class="lineno">  218 </span><span class="spaces">      </span><span class="istickedoff">in length parts == 4 &amp;&amp; all isOctet parts</span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="istickedoff">isOctet p =</span>
+<span class="lineno">  220 </span><span class="spaces">      </span><span class="istickedoff">not (T.null p)</span>
+<span class="lineno">  221 </span><span class="spaces">        </span><span class="istickedoff">&amp;&amp; T.length p &lt;= 3</span>
+<span class="lineno">  222 </span><span class="spaces">        </span><span class="istickedoff">&amp;&amp; T.all isDigit p</span>
+<span class="lineno">  223 </span><span class="spaces">        </span><span class="istickedoff">&amp;&amp; case reads (T.unpack p) :: [(Int, String)] of</span>
+<span class="lineno">  224 </span><span class="spaces">             </span><span class="istickedoff">[(n, &quot;&quot;)] -&gt; n &gt;= 0 &amp;&amp; n &lt;= 255</span>
+<span class="lineno">  225 </span><span class="spaces">             </span><span class="istickedoff">_         -&gt; <span class="nottickedoff">False</span></span>
+<span class="lineno">  226 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff">isHostnameLabels s =</span>
+<span class="lineno">  228 </span><span class="spaces">      </span><span class="istickedoff">let labels = T.splitOn &quot;.&quot; s</span>
+<span class="lineno">  229 </span><span class="spaces">      </span><span class="istickedoff">in not (null labels)</span>
+<span class="lineno">  230 </span><span class="spaces">           </span><span class="istickedoff">&amp;&amp; all isLabel labels</span>
+<span class="lineno">  231 </span><span class="spaces">           </span><span class="istickedoff">&amp;&amp; T.length s &lt;= 253</span>
+<span class="lineno">  232 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  233 </span><span class="spaces">    </span><span class="istickedoff">isLabel l =</span>
+<span class="lineno">  234 </span><span class="spaces">      </span><span class="istickedoff">let n = T.length l</span>
+<span class="lineno">  235 </span><span class="spaces">      </span><span class="istickedoff">in n &gt;= 1</span>
+<span class="lineno">  236 </span><span class="spaces">           </span><span class="istickedoff">&amp;&amp; n &lt;= 63</span>
+<span class="lineno">  237 </span><span class="spaces">           </span><span class="istickedoff">&amp;&amp; labelHead (T.head l)</span>
+<span class="lineno">  238 </span><span class="spaces">           </span><span class="istickedoff">&amp;&amp; T.all labelChar l</span>
+<span class="lineno">  239 </span><span class="spaces">           </span><span class="istickedoff">&amp;&amp; T.last l /= '-'</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">labelHead c = isAscii c &amp;&amp; isAlphaNum c</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">labelChar c = isAscii c &amp;&amp; (isAlphaNum c || <span class="nottickedoff">c == '-'</span>)</span></span>
+<span class="lineno">  242 </span>
+<span class="lineno">  243 </span>--------------------------------------------------------------------------------
+<span class="lineno">  244 </span>-- SshTarget
+<span class="lineno">  245 </span>--------------------------------------------------------------------------------
+<span class="lineno">  246 </span>
+<span class="lineno">  247 </span>-- | The destination of an ssh connection.
+<span class="lineno">  248 </span>--
+<span class="lineno">  249 </span>-- The 'SafeKeyPath' identifies the (passphrase-less, v1) private key
+<span class="lineno">  250 </span>-- that ssh will be told to use via @-i@. The caller is responsible
+<span class="lineno">  251 </span>-- for writing the key file before constructing a backend — this
+<span class="lineno">  252 </span>-- record only carries the validated path.
+<span class="lineno">  253 </span>data SshTarget = SshTarget
+<span class="lineno">  254 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_user</span></span></span>     :: !Text         -- ^ ssh username, e.g. @root@, @deploy@.
+<span class="lineno">  255 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_host</span></span></span>     :: !SshHost
+<span class="lineno">  256 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_port</span></span></span>     :: !(Maybe Int)  -- ^ Optional port; default 22.
+<span class="lineno">  257 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_st_identity</span></span></span> :: !SafeKeyPath  -- ^ The @-i@ argument (mode 0400).
+<span class="lineno">  258 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  259 </span>
+<span class="lineno">  260 </span>--------------------------------------------------------------------------------
+<span class="lineno">  261 </span>-- ControlOpts
+<span class="lineno">  262 </span>--------------------------------------------------------------------------------
+<span class="lineno">  263 </span>
+<span class="lineno">  264 </span>-- | Options for ssh ControlMaster multiplexing.
+<span class="lineno">  265 </span>--
+<span class="lineno">  266 </span>-- The control-socket path lives under a 'SafeRuntimePath' (typically
+<span class="lineno">  267 </span>-- @~\/.local\/state\/pureclaw\/run@) — never inside the workspace.
+<span class="lineno">  268 </span>data ControlOpts = ControlOpts
+<span class="lineno">  269 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_controlPath</span></span></span> :: !SafeRuntimePath
+<span class="lineno">  270 </span>    -- ^ ssh @-S@ socket path; created when the multiplex is opened.
+<span class="lineno">  271 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_co_persistSecs</span></span></span> :: !Int
+<span class="lineno">  272 </span>    -- ^ ssh @ControlPersist=N@ seconds.
+<span class="lineno">  273 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  274 </span>
+<span class="lineno">  275 </span>--------------------------------------------------------------------------------
+<span class="lineno">  276 </span>-- SshOpts / SshPipeOpts
+<span class="lineno">  277 </span>--------------------------------------------------------------------------------
+<span class="lineno">  278 </span>
+<span class="lineno">  279 </span>-- | Construction options for the Pty-kind ssh backend.
+<span class="lineno">  280 </span>--
+<span class="lineno">  281 </span>-- The hostname-pinned @UserKnownHostsFile@ flag is omitted when
+<span class="lineno">  282 </span>-- @_so_knownHostsFile = Nothing@; production callers should always set
+<span class="lineno">  283 </span>-- it (the design doc treats it as a required hardening flag). It is
+<span class="lineno">  284 </span>-- 'Maybe' here so the test argv-builder can construct a minimal
+<span class="lineno">  285 </span>-- target without a real runtime filesystem.
+<span class="lineno">  286 </span>data SshOpts = SshOpts
+<span class="lineno">  287 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_so_pty</span></span></span>            :: !PtyOpts
+<span class="lineno">  288 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_so_control</span></span></span>        :: !(Maybe ControlOpts)
+<span class="lineno">  289 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_so_knownHostsFile</span></span></span> :: !(Maybe SafeRuntimePath)
+<span class="lineno">  290 </span>  }
+<span class="lineno">  291 </span>
+<span class="lineno">  292 </span>-- | Construction options for the Pipe-kind ssh backend.
+<span class="lineno">  293 </span>--
+<span class="lineno">  294 </span>-- Mirrors the field naming of 'PureClaw.Handles.Backend.PipeOpts' but
+<span class="lineno">  295 </span>-- carries an 'IdleSpec' (the pipe spawn drains until EOF; the idle
+<span class="lineno">  296 </span>-- spec is propagated for parity with the conversational backend's
+<span class="lineno">  297 </span>-- timeout semantics — see design doc § Factories).
+<span class="lineno">  298 </span>data SshPipeOpts = SshPipeOpts
+<span class="lineno">  299 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_spo_env</span></span></span>            :: !EnvMap
+<span class="lineno">  300 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_spo_cwd</span></span></span>            :: !(Maybe FilePath)
+<span class="lineno">  301 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_spo_idle</span></span></span>           :: !IdleSpec
+<span class="lineno">  302 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_spo_recvBufferCap</span></span></span>  :: !Int
+<span class="lineno">  303 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_spo_control</span></span></span>        :: !(Maybe ControlOpts)
+<span class="lineno">  304 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_spo_knownHostsFile</span></span></span> :: !(Maybe SafeRuntimePath)
+<span class="lineno">  305 </span>  }
+<span class="lineno">  306 </span>
+<span class="lineno">  307 </span>-- | Default 'SshOpts': 'defaultPtyOpts', no ControlMaster, no
+<span class="lineno">  308 </span>-- @known_hosts@ pin.
+<span class="lineno">  309 </span>--
+<span class="lineno">  310 </span>-- @PtyOpts@ defaults are inherited (200x50 geometry, 'sshIdle' for
+<span class="lineno">  311 </span>-- the idle policy — caller may override).
+<span class="lineno">  312 </span>defaultSshOpts :: SshOpts
+<span class="lineno">  313 </span><span class="decl"><span class="istickedoff">defaultSshOpts = SshOpts</span>
+<span class="lineno">  314 </span><span class="spaces">  </span><span class="istickedoff">{ _so_pty            = defaultPtyOpts { _pto_idle = sshIdle }</span>
+<span class="lineno">  315 </span><span class="spaces">  </span><span class="istickedoff">, _so_control        = Nothing</span>
+<span class="lineno">  316 </span><span class="spaces">  </span><span class="istickedoff">, _so_knownHostsFile = Nothing</span>
+<span class="lineno">  317 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  318 </span>
+<span class="lineno">  319 </span>-- | Default 'SshPipeOpts': empty env, no cwd, the supplied 'IdleSpec',
+<span class="lineno">  320 </span>-- 4 MiB recv cap, no ControlMaster, no @known_hosts@ pin.
+<span class="lineno">  321 </span>defaultSshPipeOpts :: IdleSpec -&gt; SshPipeOpts
+<span class="lineno">  322 </span><span class="decl"><span class="nottickedoff">defaultSshPipeOpts idle = SshPipeOpts</span>
+<span class="lineno">  323 </span><span class="spaces">  </span><span class="nottickedoff">{ _spo_env            = Map.empty</span>
+<span class="lineno">  324 </span><span class="spaces">  </span><span class="nottickedoff">, _spo_cwd            = Nothing</span>
+<span class="lineno">  325 </span><span class="spaces">  </span><span class="nottickedoff">, _spo_idle           = idle</span>
+<span class="lineno">  326 </span><span class="spaces">  </span><span class="nottickedoff">, _spo_recvBufferCap  = 4 * 1024 * 1024</span>
+<span class="lineno">  327 </span><span class="spaces">  </span><span class="nottickedoff">, _spo_control        = Nothing</span>
+<span class="lineno">  328 </span><span class="spaces">  </span><span class="nottickedoff">, _spo_knownHostsFile = Nothing</span>
+<span class="lineno">  329 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  330 </span>
+<span class="lineno">  331 </span>--------------------------------------------------------------------------------
+<span class="lineno">  332 </span>-- RemoteCommand
+<span class="lineno">  333 </span>--------------------------------------------------------------------------------
+<span class="lineno">  334 </span>
+<span class="lineno">  335 </span>-- | A remote program + args that has been authorized against the
+<span class="lineno">  336 </span>-- policy's '_sp_allowedRemoteCommands' allowlist.
+<span class="lineno">  337 </span>--
+<span class="lineno">  338 </span>-- The constructor is intentionally NOT exported. The only way to
+<span class="lineno">  339 </span>-- obtain a 'RemoteCommand' is via 'authorizeRemote' — mirroring the
+<span class="lineno">  340 </span>-- non-exported-ctor pattern of 'AuthorizedCommand'.
+<span class="lineno">  341 </span>newtype RemoteCommand = RemoteCommand (FilePath, [Text])
+<span class="lineno">  342 </span>
+<span class="lineno">  343 </span>-- | Project a 'RemoteCommand' to its remote program path. Used when
+<span class="lineno">  344 </span>-- composing the @ssh user@host -- &lt;program&gt; &lt;args&gt;@ tail.
+<span class="lineno">  345 </span>getRemoteProgram :: RemoteCommand -&gt; FilePath
+<span class="lineno">  346 </span><span class="decl"><span class="istickedoff">getRemoteProgram (RemoteCommand (p, _)) = p</span></span>
+<span class="lineno">  347 </span>
+<span class="lineno">  348 </span>-- | Project a 'RemoteCommand' to its remote argument list.
+<span class="lineno">  349 </span>getRemoteArgs :: RemoteCommand -&gt; [Text]
+<span class="lineno">  350 </span><span class="decl"><span class="istickedoff">getRemoteArgs (RemoteCommand (_, as)) = as</span></span>
+<span class="lineno">  351 </span>
+<span class="lineno">  352 </span>-- | Authorize a remote command against the policy's remote allowlist.
+<span class="lineno">  353 </span>--
+<span class="lineno">  354 </span>-- Mirrors 'PureClaw.Security.Command.authorize' but consults
+<span class="lineno">  355 </span>-- '_sp_allowedRemoteCommands' instead of '_sp_allowedCommands'. The
+<span class="lineno">  356 </span>-- two allowlists are independent (design doc § Authorization);
+<span class="lineno">  357 </span>-- granting @git@ locally does not silently grant @git@ remotely.
+<span class="lineno">  358 </span>authorizeRemote
+<span class="lineno">  359 </span>  :: SecurityPolicy
+<span class="lineno">  360 </span>  -&gt; FilePath
+<span class="lineno">  361 </span>  -&gt; [Text]
+<span class="lineno">  362 </span>  -&gt; Either CommandError RemoteCommand
+<span class="lineno">  363 </span><span class="decl"><span class="istickedoff">authorizeRemote policy cmd args</span>
+<span class="lineno">  364 </span><span class="spaces">  </span><span class="istickedoff">| _sp_autonomy policy == Core.Deny =</span>
+<span class="lineno">  365 </span><span class="spaces">      </span><span class="istickedoff">Left CommandInAutonomyDeny</span>
+<span class="lineno">  366 </span><span class="spaces">  </span><span class="istickedoff">| not (isRemoteAllowed policy (CommandName base)) =</span>
+<span class="lineno">  367 </span><span class="spaces">      </span><span class="istickedoff">Left (CommandNotAllowed base)</span>
+<span class="lineno">  368 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  369 </span><span class="spaces">      </span><span class="istickedoff">Right (RemoteCommand (cmd, args))</span>
+<span class="lineno">  370 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  371 </span><span class="spaces">    </span><span class="istickedoff">base = T.pack (takeFileName cmd)</span></span>
+<span class="lineno">  372 </span>
+<span class="lineno">  373 </span>-- | Local re-implementation of @isRemoteCommandAllowed@ to avoid a
+<span class="lineno">  374 </span>-- cyclical import dance with @Security.Policy@; the field accessor is
+<span class="lineno">  375 </span>-- exported as is.
+<span class="lineno">  376 </span>isRemoteAllowed :: SecurityPolicy -&gt; CommandName -&gt; Bool
+<span class="lineno">  377 </span><span class="decl"><span class="istickedoff">isRemoteAllowed policy name = case _sp_allowedRemoteCommands policy of</span>
+<span class="lineno">  378 </span><span class="spaces">  </span><span class="istickedoff">AllowAll    -&gt; <span class="nottickedoff">True</span></span>
+<span class="lineno">  379 </span><span class="spaces">  </span><span class="istickedoff">AllowList s -&gt; Set.member name s</span></span>
+<span class="lineno">  380 </span>
+<span class="lineno">  381 </span>--------------------------------------------------------------------------------
+<span class="lineno">  382 </span>-- ssh argv construction
+<span class="lineno">  383 </span>--------------------------------------------------------------------------------
+<span class="lineno">  384 </span>
+<span class="lineno">  385 </span>-- | Build the argv list for an ssh invocation.
+<span class="lineno">  386 </span>--
+<span class="lineno">  387 </span>-- Exported as the test seam for DoD #5 (argv flag hardening): callers
+<span class="lineno">  388 </span>-- can assert that the produced list contains the required hardening
+<span class="lineno">  389 </span>-- flags without spawning a real subprocess.
+<span class="lineno">  390 </span>--
+<span class="lineno">  391 </span>-- Arguments:
+<span class="lineno">  392 </span>--
+<span class="lineno">  393 </span>--   * 'SshTarget'   — user, host, port, identity file.
+<span class="lineno">  394 </span>--   * 'RemoteCommand' — the remote program + args (post-authorization).
+<span class="lineno">  395 </span>--   * 'Maybe' 'SafeRuntimePath' — optional @UserKnownHostsFile@.
+<span class="lineno">  396 </span>--   * 'Maybe' 'ControlOpts' — optional ControlMaster settings.
+<span class="lineno">  397 </span>--   * 'Bool' — whether to request a remote PTY via @-tt@.
+<span class="lineno">  398 </span>--
+<span class="lineno">  399 </span>-- The output is ordered: hardening flags first, then identity (@-i@),
+<span class="lineno">  400 </span>-- then optional port + control-master flags, then the user@host
+<span class="lineno">  401 </span>-- separator, then @--@, then the shell-quoted remote program and
+<span class="lineno">  402 </span>-- args.
+<span class="lineno">  403 </span>buildSshArgv
+<span class="lineno">  404 </span>  :: SshTarget
+<span class="lineno">  405 </span>  -&gt; RemoteCommand
+<span class="lineno">  406 </span>  -&gt; Maybe SafeRuntimePath
+<span class="lineno">  407 </span>  -&gt; Maybe ControlOpts
+<span class="lineno">  408 </span>  -&gt; Bool
+<span class="lineno">  409 </span>  -&gt; [String]
+<span class="lineno">  410 </span><span class="decl"><span class="istickedoff">buildSshArgv tgt remote =</span>
+<span class="lineno">  411 </span><span class="spaces">  </span><span class="istickedoff">buildSshArgvFromParts tgt (getRemoteProgram remote) (getRemoteArgs remote)</span></span>
+<span class="lineno">  412 </span>
+<span class="lineno">  413 </span>-- | Lower-level variant of 'buildSshArgv' that takes the remote program
+<span class="lineno">  414 </span>-- and arg list directly, rather than packaged in a 'RemoteCommand'.
+<span class="lineno">  415 </span>--
+<span class="lineno">  416 </span>-- The 'RemoteCommand' constructor is intentionally non-exported, but
+<span class="lineno">  417 </span>-- consumers (notably 'PureClaw.Backend.Tmux') need to splice
+<span class="lineno">  418 </span>-- subcommand-specific argv into the same hardened ssh prefix — e.g.
+<span class="lineno">  419 </span>-- the same authorized remote tmux binary, but with different args for
+<span class="lineno">  420 </span>-- the pin-resolve probe vs the attach. This helper expresses exactly
+<span class="lineno">  421 </span>-- that: take an already-authorized program path and a fresh args list
+<span class="lineno">  422 </span>-- (the caller's responsibility — the auth invariant lives at
+<span class="lineno">  423 </span>-- 'authorizeRemote' time).
+<span class="lineno">  424 </span>--
+<span class="lineno">  425 </span>-- Note: the program path is shell-quoted, so a path like
+<span class="lineno">  426 </span>-- @/opt/my tools/tmux@ round-trips through the remote login shell
+<span class="lineno">  427 </span>-- intact.
+<span class="lineno">  428 </span>buildSshArgvFromParts
+<span class="lineno">  429 </span>  :: SshTarget
+<span class="lineno">  430 </span>  -&gt; FilePath               -- ^ remote program path (already authorized)
+<span class="lineno">  431 </span>  -&gt; [Text]                 -- ^ remote program args
+<span class="lineno">  432 </span>  -&gt; Maybe SafeRuntimePath  -- ^ optional @UserKnownHostsFile@
+<span class="lineno">  433 </span>  -&gt; Maybe ControlOpts      -- ^ optional ControlMaster settings
+<span class="lineno">  434 </span>  -&gt; Bool                   -- ^ request a remote PTY via @-tt@?
+<span class="lineno">  435 </span>  -&gt; [String]
+<span class="lineno">  436 </span><span class="decl"><span class="istickedoff">buildSshArgvFromParts tgt remoteProg remoteArgs mKnown mCtl wantPty =</span>
+<span class="lineno">  437 </span><span class="spaces">  </span><span class="istickedoff">hardenedFlags</span>
+<span class="lineno">  438 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; knownHostsFlag</span>
+<span class="lineno">  439 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; identityFlag</span>
+<span class="lineno">  440 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; portFlag</span>
+<span class="lineno">  441 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; controlFlags</span>
+<span class="lineno">  442 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; ptyFlag</span>
+<span class="lineno">  443 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; [ userAtHost, &quot;--&quot; ]</span>
+<span class="lineno">  444 </span><span class="spaces">    </span><span class="istickedoff">&lt;&gt; remoteQuotedTail</span>
+<span class="lineno">  445 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  446 </span><span class="spaces">    </span><span class="istickedoff">hardenedFlags :: [String]</span>
+<span class="lineno">  447 </span><span class="spaces">    </span><span class="istickedoff">hardenedFlags =</span>
+<span class="lineno">  448 </span><span class="spaces">      </span><span class="istickedoff">[ &quot;-F&quot;, &quot;/dev/null&quot;</span>
+<span class="lineno">  449 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;StrictHostKeyChecking=accept-new&quot;</span>
+<span class="lineno">  450 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;BatchMode=yes&quot;</span>
+<span class="lineno">  451 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;IdentitiesOnly=yes&quot;</span>
+<span class="lineno">  452 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;ConnectTimeout=10&quot;</span>
+<span class="lineno">  453 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;ServerAliveInterval=30&quot;</span>
+<span class="lineno">  454 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;ServerAliveCountMax=3&quot;</span>
+<span class="lineno">  455 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;ForwardX11=no&quot;</span>
+<span class="lineno">  456 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;ForwardX11Trusted=no&quot;</span>
+<span class="lineno">  457 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;ForwardAgent=no&quot;</span>
+<span class="lineno">  458 </span><span class="spaces">      </span><span class="istickedoff">, &quot;-o&quot;, &quot;PermitLocalCommand=no&quot;</span>
+<span class="lineno">  459 </span><span class="spaces">      </span><span class="istickedoff">]</span>
+<span class="lineno">  460 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  461 </span><span class="spaces">    </span><span class="istickedoff">knownHostsFlag :: [String]</span>
+<span class="lineno">  462 </span><span class="spaces">    </span><span class="istickedoff">knownHostsFlag = case mKnown of</span>
+<span class="lineno">  463 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  464 </span><span class="spaces">      </span><span class="istickedoff">Just kh -&gt; [ &quot;-o&quot;, &quot;UserKnownHostsFile=&quot; &lt;&gt; <span class="nottickedoff">getSafeRuntimePath kh</span> ]</span>
+<span class="lineno">  465 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  466 </span><span class="spaces">    </span><span class="istickedoff">identityFlag :: [String]</span>
+<span class="lineno">  467 </span><span class="spaces">    </span><span class="istickedoff">identityFlag = [ &quot;-i&quot;, getSafeKeyPath (_st_identity tgt) ]</span>
+<span class="lineno">  468 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  469 </span><span class="spaces">    </span><span class="istickedoff">portFlag :: [String]</span>
+<span class="lineno">  470 </span><span class="spaces">    </span><span class="istickedoff">portFlag = case _st_port tgt of</span>
+<span class="lineno">  471 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  472 </span><span class="spaces">      </span><span class="istickedoff">Just p  -&gt; [ &quot;-p&quot;, show p ]</span>
+<span class="lineno">  473 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  474 </span><span class="spaces">    </span><span class="istickedoff">controlFlags :: [String]</span>
+<span class="lineno">  475 </span><span class="spaces">    </span><span class="istickedoff">controlFlags = case mCtl of</span>
+<span class="lineno">  476 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; []</span>
+<span class="lineno">  477 </span><span class="spaces">      </span><span class="istickedoff">Just c  -&gt;</span>
+<span class="lineno">  478 </span><span class="spaces">        </span><span class="istickedoff">[ &quot;-o&quot;, &quot;ControlMaster=auto&quot;</span>
+<span class="lineno">  479 </span><span class="spaces">        </span><span class="istickedoff">, &quot;-o&quot;, &quot;ControlPath=&quot; &lt;&gt; getSafeRuntimePath (_co_controlPath c)</span>
+<span class="lineno">  480 </span><span class="spaces">        </span><span class="istickedoff">, &quot;-o&quot;, &quot;ControlPersist=&quot; &lt;&gt; show (_co_persistSecs c)</span>
+<span class="lineno">  481 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  482 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  483 </span><span class="spaces">    </span><span class="istickedoff">ptyFlag :: [String]</span>
+<span class="lineno">  484 </span><span class="spaces">    </span><span class="istickedoff">ptyFlag = [ &quot;-tt&quot; | wantPty ]</span>
+<span class="lineno">  485 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  486 </span><span class="spaces">    </span><span class="istickedoff">userAtHost :: String</span>
+<span class="lineno">  487 </span><span class="spaces">    </span><span class="istickedoff">userAtHost = T.unpack (_st_user tgt) &lt;&gt; &quot;@&quot; &lt;&gt; T.unpack (getSshHost (_st_host tgt))</span>
+<span class="lineno">  488 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  489 </span><span class="spaces">    </span><span class="istickedoff">remoteQuotedTail :: [String]</span>
+<span class="lineno">  490 </span><span class="spaces">    </span><span class="istickedoff">remoteQuotedTail =</span>
+<span class="lineno">  491 </span><span class="spaces">      </span><span class="istickedoff">let progQ = T.unpack (shellQuote (T.pack remoteProg))</span>
+<span class="lineno">  492 </span><span class="spaces">          </span><span class="istickedoff">argsQ = map (T.unpack . shellQuote) remoteArgs</span>
+<span class="lineno">  493 </span><span class="spaces">      </span><span class="istickedoff">in progQ : argsQ</span></span>
+<span class="lineno">  494 </span>
+<span class="lineno">  495 </span>--------------------------------------------------------------------------------
+<span class="lineno">  496 </span>-- Pty-kind factory
+<span class="lineno">  497 </span>--------------------------------------------------------------------------------
+<span class="lineno">  498 </span>
+<span class="lineno">  499 </span>-- | Construct a 'Pty'-kind ssh backend.
+<span class="lineno">  500 </span>--
+<span class="lineno">  501 </span>-- Builds the hardened ssh argv from the supplied 'SshTarget' and
+<span class="lineno">  502 </span>-- already-authorized 'RemoteCommand', then delegates to
+<span class="lineno">  503 </span>-- 'mkDrainerBackendHandle' for the drainer + STM idle state machine.
+<span class="lineno">  504 </span>--
+<span class="lineno">  505 </span>-- The local 'AuthorizedCommand' supplies the @ssh@ program path
+<span class="lineno">  506 </span>-- (typically @\/usr\/bin\/ssh@). Its own args are ignored — the
+<span class="lineno">  507 </span>-- factory constructs the full argv via 'buildSshArgv'.
+<span class="lineno">  508 </span>--
+<span class="lineno">  509 </span>-- Construction errors land as @Left BackendError@:
+<span class="lineno">  510 </span>--
+<span class="lineno">  511 </span>--  * @Left BackendBufferQuotaExceeded@ from quota oversubscription;
+<span class="lineno">  512 </span>--  * @Left BackendSshConnectFailed SshConnectTimeout@ \/ similar from
+<span class="lineno">  513 </span>--    a fast-fail at spawn time (any exception during open).
+<span class="lineno">  514 </span>--
+<span class="lineno">  515 </span>-- The factory does not block waiting for the ssh handshake — the
+<span class="lineno">  516 </span>-- drainer surfaces handshake failures via @RecvEof@ on the next
+<span class="lineno">  517 </span>-- @_bh_recv@ (e.g. when ConnectTimeout fires after ~10s and ssh
+<span class="lineno">  518 </span>-- exits).
+<span class="lineno">  519 </span>mkSshBackendHandle
+<span class="lineno">  520 </span>  :: PtyIO
+<span class="lineno">  521 </span>  -&gt; AuthorizedCommand
+<span class="lineno">  522 </span>  -&gt; SshTarget
+<span class="lineno">  523 </span>  -&gt; RemoteCommand
+<span class="lineno">  524 </span>  -&gt; SshOpts
+<span class="lineno">  525 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  526 </span><span class="decl"><span class="istickedoff">mkSshBackendHandle pio sshCmd tgt remote opts = do</span>
+<span class="lineno">  527 </span><span class="spaces">  </span><span class="istickedoff">let argv = buildSshArgv</span>
+<span class="lineno">  528 </span><span class="spaces">               </span><span class="istickedoff">tgt</span>
+<span class="lineno">  529 </span><span class="spaces">               </span><span class="istickedoff">remote</span>
+<span class="lineno">  530 </span><span class="spaces">               </span><span class="istickedoff">(_so_knownHostsFile opts)</span>
+<span class="lineno">  531 </span><span class="spaces">               </span><span class="istickedoff">(_so_control opts)</span>
+<span class="lineno">  532 </span><span class="spaces">               </span><span class="istickedoff">True</span>
+<span class="lineno">  533 </span><span class="spaces">      </span><span class="istickedoff">ptyOpts = _so_pty opts</span>
+<span class="lineno">  534 </span><span class="spaces">      </span><span class="istickedoff">spec = PtyOpenSpec</span>
+<span class="lineno">  535 </span><span class="spaces">        </span><span class="istickedoff">{ _pos_program = getCommandProgram sshCmd</span>
+<span class="lineno">  536 </span><span class="spaces">        </span><span class="istickedoff">, _pos_args    = map T.pack argv</span>
+<span class="lineno">  537 </span><span class="spaces">        </span><span class="istickedoff">, _pos_env     = _pto_env ptyOpts</span>
+<span class="lineno">  538 </span><span class="spaces">        </span><span class="istickedoff">, _pos_cwd     = _pto_cwd ptyOpts</span>
+<span class="lineno">  539 </span><span class="spaces">        </span><span class="istickedoff">, _pos_cols    = _pto_cols ptyOpts</span>
+<span class="lineno">  540 </span><span class="spaces">        </span><span class="istickedoff">, _pos_rows    = _pto_rows ptyOpts</span>
+<span class="lineno">  541 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  542 </span><span class="spaces">  </span><span class="istickedoff">-- ssh failures at spawn time (binary missing, fork failure, etc.)</span>
+<span class="lineno">  543 </span><span class="spaces">  </span><span class="istickedoff">-- collapse to a single user-visible error. 'SshConnectTimeout' is</span>
+<span class="lineno">  544 </span><span class="spaces">  </span><span class="istickedoff">-- the closest fixed-vocabulary tag for an early-exit ssh — the</span>
+<span class="lineno">  545 </span><span class="spaces">  </span><span class="istickedoff">-- drainer + idle timeout cover the mid-handshake hang case via</span>
+<span class="lineno">  546 </span><span class="spaces">  </span><span class="istickedoff">-- 'RecvTimedOut'.</span>
+<span class="lineno">  547 </span><span class="spaces">  </span><span class="istickedoff">r &lt;- try @SomeException (mkDrainerBackendHandle pio ptyOpts spec Pty)</span>
+<span class="lineno">  548 </span><span class="spaces">  </span><span class="istickedoff">case r of</span>
+<span class="lineno">  549 </span><span class="spaces">    </span><span class="istickedoff">Right (Left e)   -&gt; <span class="nottickedoff">pure (Left e)</span></span>
+<span class="lineno">  550 </span><span class="spaces">    </span><span class="istickedoff">Right (Right bh) -&gt; Right &lt;$&gt; wrapSshHandle bh</span>
+<span class="lineno">  551 </span><span class="spaces">    </span><span class="istickedoff">Left  _          -&gt; <span class="nottickedoff">pure (Left (BackendSshConnectFailed SshConnectTimeout))</span></span></span>
+<span class="lineno">  552 </span>
+<span class="lineno">  553 </span>-- | Wrap a freshly-constructed Pty-kind ssh 'BackendHandle' so it
+<span class="lineno">  554 </span>-- enforces two ssh-specific invariants:
+<span class="lineno">  555 </span>--
+<span class="lineno">  556 </span>-- 1. Once a recv has observed @RecvEof@ (the ssh transport has
+<span class="lineno">  557 </span>--    closed), a subsequent '_bh_send' throws 'BackendException' with
+<span class="lineno">  558 </span>--    @_be_context = 'BcSshWrite'@ rather than silently succeeding
+<span class="lineno">  559 </span>--    against a dead transport. Any @IO@ exception escaping the inner
+<span class="lineno">  560 </span>--    '_bh_send' is also wrapped under 'BcSshWrite'.
+<span class="lineno">  561 </span>-- 2. Concurrent entry into '_bh_send' \/ '_bh_recv' from multiple
+<span class="lineno">  562 </span>--    threads is rejected with 'BcConcurrentUse' (via
+<span class="lineno">  563 </span>--    'withConcurrentUseGuard').
+<span class="lineno">  564 </span>--
+<span class="lineno">  565 </span>-- Wrappers compose: the recv-EOF tracker wraps the underlying handle
+<span class="lineno">  566 </span>-- first; the resulting handle is then passed through
+<span class="lineno">  567 </span>-- 'withConcurrentUseGuard'. The end-user-visible '_bh_send' \/
+<span class="lineno">  568 </span>-- '_bh_recv' therefore goes through both gates.
+<span class="lineno">  569 </span>wrapSshHandle :: BackendHandle -&gt; IO BackendHandle
+<span class="lineno">  570 </span><span class="decl"><span class="istickedoff">wrapSshHandle bh = do</span>
+<span class="lineno">  571 </span><span class="spaces">  </span><span class="istickedoff">eofRef &lt;- newIORef <span class="nottickedoff">False</span></span>
+<span class="lineno">  572 </span><span class="spaces">  </span><span class="istickedoff">let trackedRecv mIdle = do</span>
+<span class="lineno">  573 </span><span class="spaces">        </span><span class="istickedoff">res &lt;- _bh_recv bh mIdle</span>
+<span class="lineno">  574 </span><span class="spaces">        </span><span class="istickedoff">case res of</span>
+<span class="lineno">  575 </span><span class="spaces">          </span><span class="istickedoff">RecvEof _ -&gt; writeIORef eofRef True</span>
+<span class="lineno">  576 </span><span class="spaces">          </span><span class="istickedoff">_         -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  577 </span><span class="spaces">        </span><span class="istickedoff">pure res</span>
+<span class="lineno">  578 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  579 </span><span class="spaces">      </span><span class="istickedoff">sshSend bs = do</span>
+<span class="lineno">  580 </span><span class="spaces">        </span><span class="istickedoff">wasEof &lt;- readIORef eofRef</span>
+<span class="lineno">  581 </span><span class="spaces">        </span><span class="istickedoff">if <span class="tickonlytrue">wasEof</span></span>
+<span class="lineno">  582 </span><span class="spaces">          </span><span class="istickedoff">then throwIO $ BackendException BcSshWrite</span>
+<span class="lineno">  583 </span><span class="spaces">                 </span><span class="istickedoff">(toException <span class="nottickedoff">(userError &quot;ssh transport closed&quot;)</span>)</span>
+<span class="lineno">  584 </span><span class="spaces">          </span><span class="istickedoff">else <span class="nottickedoff">do</span></span>
+<span class="lineno">  585 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">r &lt;- try @SomeException (_bh_send bh bs)</span></span>
+<span class="lineno">  586 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">case r of</span></span>
+<span class="lineno">  587 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">Right ()                                  -&gt; pure ()</span></span>
+<span class="lineno">  588 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">Left e | Just be &lt;- castBackendException e -&gt; throwIO be</span></span>
+<span class="lineno">  589 </span><span class="spaces">                     </span><span class="istickedoff"><span class="nottickedoff">| otherwise                         -&gt; throwIO $</span></span>
+<span class="lineno">  590 </span><span class="spaces">                         </span><span class="istickedoff"><span class="nottickedoff">BackendException BcSshWrite e</span></span>
+<span class="lineno">  591 </span><span class="spaces">  </span><span class="istickedoff">withConcurrentUseGuard bh</span>
+<span class="lineno">  592 </span><span class="spaces">    </span><span class="istickedoff">{ _bh_send = sshSend</span>
+<span class="lineno">  593 </span><span class="spaces">    </span><span class="istickedoff">, _bh_recv = trackedRecv</span>
+<span class="lineno">  594 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  595 </span>
+<span class="lineno">  596 </span>-- | If the supplied 'SomeException' already is a 'BackendException',
+<span class="lineno">  597 </span>-- return it; otherwise 'Nothing'. Used by 'wrapSshHandle' to avoid
+<span class="lineno">  598 </span>-- double-wrapping when an inner layer already threw a structured
+<span class="lineno">  599 </span>-- 'BackendException'.
+<span class="lineno">  600 </span>castBackendException :: SomeException -&gt; Maybe BackendException
+<span class="lineno">  601 </span><span class="decl"><span class="nottickedoff">castBackendException = Exception.fromException</span></span>
+<span class="lineno">  602 </span>
+<span class="lineno">  603 </span>--------------------------------------------------------------------------------
+<span class="lineno">  604 </span>-- Pipe-kind factory
+<span class="lineno">  605 </span>--------------------------------------------------------------------------------
+<span class="lineno">  606 </span>
+<span class="lineno">  607 </span>-- | Construct a 'Pipe'-kind ssh backend.
+<span class="lineno">  608 </span>--
+<span class="lineno">  609 </span>-- One-shot: stdin is empty (the caller cannot stream input to a
+<span class="lineno">  610 </span>-- one-shot ssh — use 'mkSshBackendHandle' if you need interactivity);
+<span class="lineno">  611 </span>-- stdout and stderr are merged at the OS level (the OS-level @2&gt;&amp;1@
+<span class="lineno">  612 </span>-- pattern, same as 'PureClaw.Backend.Local.mkLocalBackendHandle'); the
+<span class="lineno">  613 </span>-- accumulator is read until EOF or @_spo_recvBufferCap@.
+<span class="lineno">  614 </span>--
+<span class="lineno">  615 </span>-- Mirrors 'PureClaw.Backend.Local.mkLocalBackendHandle' for the pipe
+<span class="lineno">  616 </span>-- spawn machinery, but composes the hardened ssh argv around the
+<span class="lineno">  617 </span>-- already-authorized remote 'RemoteCommand'.
+<span class="lineno">  618 </span>mkSshPipeBackendHandle
+<span class="lineno">  619 </span>  :: AuthorizedCommand
+<span class="lineno">  620 </span>  -&gt; SshTarget
+<span class="lineno">  621 </span>  -&gt; RemoteCommand
+<span class="lineno">  622 </span>  -&gt; SshPipeOpts
+<span class="lineno">  623 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  624 </span><span class="decl"><span class="nottickedoff">mkSshPipeBackendHandle sshCmd tgt remote opts = do</span>
+<span class="lineno">  625 </span><span class="spaces">  </span><span class="nottickedoff">let argv = buildSshArgv</span>
+<span class="lineno">  626 </span><span class="spaces">               </span><span class="nottickedoff">tgt</span>
+<span class="lineno">  627 </span><span class="spaces">               </span><span class="nottickedoff">remote</span>
+<span class="lineno">  628 </span><span class="spaces">               </span><span class="nottickedoff">(_spo_knownHostsFile opts)</span>
+<span class="lineno">  629 </span><span class="spaces">               </span><span class="nottickedoff">(_spo_control opts)</span>
+<span class="lineno">  630 </span><span class="spaces">               </span><span class="nottickedoff">False</span>
+<span class="lineno">  631 </span><span class="spaces">  </span><span class="nottickedoff">spawnSshArgv sshCmd argv opts</span></span>
+<span class="lineno">  632 </span>
+<span class="lineno">  633 </span>-- | Internal helper: spawn ssh as a pipe-only subprocess.
+<span class="lineno">  634 </span>--
+<span class="lineno">  635 </span>-- Acquires the per-backend recv buffer quota, opens a single shared
+<span class="lineno">  636 </span>-- pipe (write-end dup'd to both child stdout and stderr), spawns ssh
+<span class="lineno">  637 </span>-- via @typed-process@, then drains to EOF (or the cap) into an
+<span class="lineno">  638 </span>-- 'IORef' accumulator.
+<span class="lineno">  639 </span>--
+<span class="lineno">  640 </span>-- This mirrors the pipe spawn pattern in
+<span class="lineno">  641 </span>-- &quot;PureClaw.Backend.Local&quot;; the only divergence is the constructed
+<span class="lineno">  642 </span>-- argv (the hardened ssh prefix already lives in 'buildSshArgv').
+<span class="lineno">  643 </span>spawnSshArgv
+<span class="lineno">  644 </span>  :: AuthorizedCommand
+<span class="lineno">  645 </span>  -&gt; [String]
+<span class="lineno">  646 </span>  -&gt; SshPipeOpts
+<span class="lineno">  647 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  648 </span><span class="decl"><span class="nottickedoff">spawnSshArgv sshCmd argv opts = do</span>
+<span class="lineno">  649 </span><span class="spaces">  </span><span class="nottickedoff">let capBytes = _spo_recvBufferCap opts</span>
+<span class="lineno">  650 </span><span class="spaces">      </span><span class="nottickedoff">capMiB   = bytesToMiBCeil capBytes</span>
+<span class="lineno">  651 </span><span class="spaces">  </span><span class="nottickedoff">quotaPtr &lt;- readIORef globalBackendBufferQuota</span>
+<span class="lineno">  652 </span><span class="spaces">  </span><span class="nottickedoff">acq &lt;- acquireBufferQuota quotaPtr capMiB</span>
+<span class="lineno">  653 </span><span class="spaces">  </span><span class="nottickedoff">case acq of</span>
+<span class="lineno">  654 </span><span class="spaces">    </span><span class="nottickedoff">Left e   -&gt; pure (Left e)</span>
+<span class="lineno">  655 </span><span class="spaces">    </span><span class="nottickedoff">Right () -&gt; do</span>
+<span class="lineno">  656 </span><span class="spaces">      </span><span class="nottickedoff">releasedRef &lt;- newIORef False</span>
+<span class="lineno">  657 </span><span class="spaces">      </span><span class="nottickedoff">let releaseQuotaOnce = do</span>
+<span class="lineno">  658 </span><span class="spaces">            </span><span class="nottickedoff">already &lt;- atomicSwapTrue releasedRef</span>
+<span class="lineno">  659 </span><span class="spaces">            </span><span class="nottickedoff">if already</span>
+<span class="lineno">  660 </span><span class="spaces">              </span><span class="nottickedoff">then pure ()</span>
+<span class="lineno">  661 </span><span class="spaces">              </span><span class="nottickedoff">else releaseBufferQuota quotaPtr capMiB</span>
+<span class="lineno">  662 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  663 </span><span class="spaces">      </span><span class="nottickedoff">let prog = getCommandProgram sshCmd</span>
+<span class="lineno">  664 </span><span class="spaces">          </span><span class="nottickedoff">envList = envMapToTuples (_spo_env opts)</span>
+<span class="lineno">  665 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  666 </span><span class="spaces">      </span><span class="nottickedoff">pipeResult &lt;- try @SomeException PosixIO.createPipe</span>
+<span class="lineno">  667 </span><span class="spaces">      </span><span class="nottickedoff">case pipeResult of</span>
+<span class="lineno">  668 </span><span class="spaces">        </span><span class="nottickedoff">Left _ -&gt; do</span>
+<span class="lineno">  669 </span><span class="spaces">          </span><span class="nottickedoff">releaseQuotaOnce</span>
+<span class="lineno">  670 </span><span class="spaces">          </span><span class="nottickedoff">pure (Left (BackendBinaryNotFound (CommandName (T.pack prog))))</span>
+<span class="lineno">  671 </span><span class="spaces">        </span><span class="nottickedoff">Right (readFd, writeFd) -&gt; do</span>
+<span class="lineno">  672 </span><span class="spaces">          </span><span class="nottickedoff">readH  &lt;- PosixIO.fdToHandle readFd</span>
+<span class="lineno">  673 </span><span class="spaces">          </span><span class="nottickedoff">writeH &lt;- PosixIO.fdToHandle writeFd</span>
+<span class="lineno">  674 </span><span class="spaces">          </span><span class="nottickedoff">let baseConfig =</span>
+<span class="lineno">  675 </span><span class="spaces">                  </span><span class="nottickedoff">P.setStdin (P.byteStringInput BL.empty)</span>
+<span class="lineno">  676 </span><span class="spaces">                </span><span class="nottickedoff">$ P.setStdout (P.useHandleOpen writeH)</span>
+<span class="lineno">  677 </span><span class="spaces">                </span><span class="nottickedoff">$ P.setStderr (P.useHandleOpen writeH)</span>
+<span class="lineno">  678 </span><span class="spaces">                </span><span class="nottickedoff">$ P.setEnv envList</span>
+<span class="lineno">  679 </span><span class="spaces">                </span><span class="nottickedoff">$ P.proc prog argv</span>
+<span class="lineno">  680 </span><span class="spaces">              </span><span class="nottickedoff">withCwd = maybe id P.setWorkingDir (_spo_cwd opts)</span>
+<span class="lineno">  681 </span><span class="spaces">              </span><span class="nottickedoff">config = withCwd baseConfig</span>
+<span class="lineno">  682 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  683 </span><span class="spaces">          </span><span class="nottickedoff">spawnResult &lt;- try @SomeException (P.startProcess config)</span>
+<span class="lineno">  684 </span><span class="spaces">          </span><span class="nottickedoff">case spawnResult of</span>
+<span class="lineno">  685 </span><span class="spaces">            </span><span class="nottickedoff">Left _ -&gt; do</span>
+<span class="lineno">  686 </span><span class="spaces">              </span><span class="nottickedoff">_ &lt;- try @SomeException (hClose writeH)</span>
+<span class="lineno">  687 </span><span class="spaces">              </span><span class="nottickedoff">_ &lt;- try @SomeException (hClose readH)</span>
+<span class="lineno">  688 </span><span class="spaces">              </span><span class="nottickedoff">releaseQuotaOnce</span>
+<span class="lineno">  689 </span><span class="spaces">              </span><span class="nottickedoff">pure (Left (BackendSshConnectFailed SshOtherFailure))</span>
+<span class="lineno">  690 </span><span class="spaces">            </span><span class="nottickedoff">Right proc -&gt; do</span>
+<span class="lineno">  691 </span><span class="spaces">              </span><span class="nottickedoff">_ &lt;- try @SomeException (hClose writeH)</span>
+<span class="lineno">  692 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  693 </span><span class="spaces">              </span><span class="nottickedoff">accRef      &lt;- newIORef BS.empty</span>
+<span class="lineno">  694 </span><span class="spaces">              </span><span class="nottickedoff">truncRef    &lt;- newIORef False</span>
+<span class="lineno">  695 </span><span class="spaces">              </span><span class="nottickedoff">reader      &lt;- Async.async (drainHandleInto capBytes accRef truncRef readH)</span>
+<span class="lineno">  696 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  697 </span><span class="spaces">              </span><span class="nottickedoff">closeLock   &lt;- newMVar ()</span>
+<span class="lineno">  698 </span><span class="spaces">              </span><span class="nottickedoff">closedRef   &lt;- newIORef False</span>
+<span class="lineno">  699 </span><span class="spaces">              </span><span class="nottickedoff">recvDoneRef &lt;- newIORef False</span>
+<span class="lineno">  700 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  701 </span><span class="spaces">              </span><span class="nottickedoff">let doSend _ = pure ()</span>
+<span class="lineno">  702 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  703 </span><span class="spaces">                  </span><span class="nottickedoff">doRecv _mIdle = do</span>
+<span class="lineno">  704 </span><span class="spaces">                    </span><span class="nottickedoff">already &lt;- readIORef recvDoneRef</span>
+<span class="lineno">  705 </span><span class="spaces">                    </span><span class="nottickedoff">if already</span>
+<span class="lineno">  706 </span><span class="spaces">                      </span><span class="nottickedoff">then resultFromAcc accRef truncRef</span>
+<span class="lineno">  707 </span><span class="spaces">                      </span><span class="nottickedoff">else do</span>
+<span class="lineno">  708 </span><span class="spaces">                        </span><span class="nottickedoff">_ &lt;- Async.waitCatch reader</span>
+<span class="lineno">  709 </span><span class="spaces">                        </span><span class="nottickedoff">writeIORef recvDoneRef True</span>
+<span class="lineno">  710 </span><span class="spaces">                        </span><span class="nottickedoff">resultFromAcc accRef truncRef</span>
+<span class="lineno">  711 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  712 </span><span class="spaces">                  </span><span class="nottickedoff">doResize _ _ = pure ()</span>
+<span class="lineno">  713 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  714 </span><span class="spaces">                  </span><span class="nottickedoff">doClose = modifyMVar_ closeLock $ \() -&gt; do</span>
+<span class="lineno">  715 </span><span class="spaces">                    </span><span class="nottickedoff">wasClosed &lt;- readIORef closedRef</span>
+<span class="lineno">  716 </span><span class="spaces">                    </span><span class="nottickedoff">if wasClosed</span>
+<span class="lineno">  717 </span><span class="spaces">                      </span><span class="nottickedoff">then pure ()</span>
+<span class="lineno">  718 </span><span class="spaces">                      </span><span class="nottickedoff">else do</span>
+<span class="lineno">  719 </span><span class="spaces">                        </span><span class="nottickedoff">writeIORef closedRef True</span>
+<span class="lineno">  720 </span><span class="spaces">                        </span><span class="nottickedoff">Async.cancel reader</span>
+<span class="lineno">  721 </span><span class="spaces">                        </span><span class="nottickedoff">_ &lt;- try @SomeException (P.stopProcess proc)</span>
+<span class="lineno">  722 </span><span class="spaces">                        </span><span class="nottickedoff">_ &lt;- try @SomeException (hClose readH)</span>
+<span class="lineno">  723 </span><span class="spaces">                        </span><span class="nottickedoff">releaseQuotaOnce</span>
+<span class="lineno">  724 </span><span class="spaces">                        </span><span class="nottickedoff">pure ()</span>
+<span class="lineno">  725 </span><span class="spaces"></span><span class="nottickedoff"></span>
+<span class="lineno">  726 </span><span class="spaces">              </span><span class="nottickedoff">guarded &lt;- withConcurrentUseGuard BackendHandle</span>
+<span class="lineno">  727 </span><span class="spaces">                </span><span class="nottickedoff">{ _bh_name        = &quot;ssh-pipe&quot;</span>
+<span class="lineno">  728 </span><span class="spaces">                </span><span class="nottickedoff">, _bh_kind        = Pipe</span>
+<span class="lineno">  729 </span><span class="spaces">                </span><span class="nottickedoff">, _bh_defaultIdle = _spo_idle opts</span>
+<span class="lineno">  730 </span><span class="spaces">                </span><span class="nottickedoff">, _bh_send        = doSend</span>
+<span class="lineno">  731 </span><span class="spaces">                </span><span class="nottickedoff">, _bh_recv        = doRecv</span>
+<span class="lineno">  732 </span><span class="spaces">                </span><span class="nottickedoff">, _bh_resize      = doResize</span>
+<span class="lineno">  733 </span><span class="spaces">                </span><span class="nottickedoff">, _bh_close       = doClose</span>
+<span class="lineno">  734 </span><span class="spaces">                </span><span class="nottickedoff">}</span>
+<span class="lineno">  735 </span><span class="spaces">              </span><span class="nottickedoff">pure (Right guarded)</span>
+<span class="lineno">  736 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  737 </span><span class="spaces">    </span><span class="nottickedoff">resultFromAcc accRef truncRef = do</span>
+<span class="lineno">  738 </span><span class="spaces">      </span><span class="nottickedoff">bs  &lt;- readIORef accRef</span>
+<span class="lineno">  739 </span><span class="spaces">      </span><span class="nottickedoff">isT &lt;- readIORef truncRef</span>
+<span class="lineno">  740 </span><span class="spaces">      </span><span class="nottickedoff">pure (if isT then RecvTruncated bs else RecvSettled bs)</span></span>
+<span class="lineno">  741 </span>
+<span class="lineno">  742 </span>-- | Drain a 'Handle' into the accumulator, latching the truncate flag
+<span class="lineno">  743 </span>-- if the per-backend cap is exceeded. Best-effort: read exceptions
+<span class="lineno">  744 </span>-- are treated as EOF.
+<span class="lineno">  745 </span>drainHandleInto :: Int -&gt; IORef ByteString -&gt; IORef Bool -&gt; Handle -&gt; IO ()
+<span class="lineno">  746 </span><span class="decl"><span class="nottickedoff">drainHandleInto cap accRef truncRef h = go</span>
+<span class="lineno">  747 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  748 </span><span class="spaces">    </span><span class="nottickedoff">go = do</span>
+<span class="lineno">  749 </span><span class="spaces">      </span><span class="nottickedoff">r &lt;- try @SomeException (BS.hGetSome h 4096)</span>
+<span class="lineno">  750 </span><span class="spaces">      </span><span class="nottickedoff">case r of</span>
+<span class="lineno">  751 </span><span class="spaces">        </span><span class="nottickedoff">Left _    -&gt; pure ()</span>
+<span class="lineno">  752 </span><span class="spaces">        </span><span class="nottickedoff">Right bs</span>
+<span class="lineno">  753 </span><span class="spaces">          </span><span class="nottickedoff">| BS.null bs -&gt; pure ()</span>
+<span class="lineno">  754 </span><span class="spaces">          </span><span class="nottickedoff">| otherwise -&gt; do</span>
+<span class="lineno">  755 </span><span class="spaces">              </span><span class="nottickedoff">acc &lt;- readIORef accRef</span>
+<span class="lineno">  756 </span><span class="spaces">              </span><span class="nottickedoff">let newSize = BS.length acc + BS.length bs</span>
+<span class="lineno">  757 </span><span class="spaces">              </span><span class="nottickedoff">if newSize &gt; cap</span>
+<span class="lineno">  758 </span><span class="spaces">                </span><span class="nottickedoff">then writeIORef truncRef True</span>
+<span class="lineno">  759 </span><span class="spaces">                </span><span class="nottickedoff">else do</span>
+<span class="lineno">  760 </span><span class="spaces">                  </span><span class="nottickedoff">atomicModifyIORef' accRef $ \old -&gt; (old &lt;&gt; bs, ())</span>
+<span class="lineno">  761 </span><span class="spaces">                  </span><span class="nottickedoff">go</span></span>
+<span class="lineno">  762 </span>
+<span class="lineno">  763 </span>--------------------------------------------------------------------------------
+<span class="lineno">  764 </span>-- ControlMaster lifecycle
+<span class="lineno">  765 </span>--------------------------------------------------------------------------------
+<span class="lineno">  766 </span>
+<span class="lineno">  767 </span>-- | Tear down an existing ControlMaster multiplex.
+<span class="lineno">  768 </span>--
+<span class="lineno">  769 </span>-- Runs @ssh -S &lt;controlPath&gt; -O exit dummy@dummy@. The user@host is
+<span class="lineno">  770 </span>-- unused by @-O exit@ — only the socket matters — but ssh still
+<span class="lineno">  771 </span>-- requires the positional argument, so we pass a placeholder. The
+<span class="lineno">  772 </span>-- 'AuthorizedCommand' supplies the @ssh@ program path; the caller
+<span class="lineno">  773 </span>-- should reuse the same 'AuthorizedCommand' they used to open the
+<span class="lineno">  774 </span>-- multiplex (preserves the §5.1 authorize-before-execute invariant).
+<span class="lineno">  775 </span>--
+<span class="lineno">  776 </span>-- Best-effort and idempotent: any spawn or wait failure is swallowed.
+<span class="lineno">  777 </span>-- If the socket file does not exist (already closed, never opened),
+<span class="lineno">  778 </span>-- ssh exits with a non-zero status which this function silently
+<span class="lineno">  779 </span>-- ignores.
+<span class="lineno">  780 </span>closeSshMultiplex :: AuthorizedCommand -&gt; ControlOpts -&gt; IO ()
+<span class="lineno">  781 </span><span class="decl"><span class="nottickedoff">closeSshMultiplex sshCmd opts = do</span>
+<span class="lineno">  782 </span><span class="spaces">  </span><span class="nottickedoff">let prog = getCommandProgram sshCmd</span>
+<span class="lineno">  783 </span><span class="spaces">      </span><span class="nottickedoff">argv =</span>
+<span class="lineno">  784 </span><span class="spaces">        </span><span class="nottickedoff">[ &quot;-S&quot;, getSafeRuntimePath (_co_controlPath opts)</span>
+<span class="lineno">  785 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;-O&quot;, &quot;exit&quot;</span>
+<span class="lineno">  786 </span><span class="spaces">        </span><span class="nottickedoff">, &quot;dummy@dummy&quot;</span>
+<span class="lineno">  787 </span><span class="spaces">        </span><span class="nottickedoff">]</span>
+<span class="lineno">  788 </span><span class="spaces">      </span><span class="nottickedoff">config = P.setStdin P.nullStream</span>
+<span class="lineno">  789 </span><span class="spaces">             </span><span class="nottickedoff">$ P.setStdout P.nullStream</span>
+<span class="lineno">  790 </span><span class="spaces">             </span><span class="nottickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  791 </span><span class="spaces">             </span><span class="nottickedoff">$ P.proc prog argv</span>
+<span class="lineno">  792 </span><span class="spaces">  </span><span class="nottickedoff">_ &lt;- try @SomeException (P.runProcess config)</span>
+<span class="lineno">  793 </span><span class="spaces">  </span><span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  794 </span>
+<span class="lineno">  795 </span>--------------------------------------------------------------------------------
+<span class="lineno">  796 </span>-- Helpers
+<span class="lineno">  797 </span>--------------------------------------------------------------------------------
+<span class="lineno">  798 </span>
+<span class="lineno">  799 </span>-- | Round a byte count up to whole MiB (1 MiB == 1_048_576 bytes).
+<span class="lineno">  800 </span>-- Zero or negative byte counts produce @0@. Mirrors the helper in
+<span class="lineno">  801 </span>-- &quot;PureClaw.Backend.Pty&quot; / &quot;PureClaw.Backend.Local&quot;; reimplemented
+<span class="lineno">  802 </span>-- locally so the export surface of those modules stays tight.
+<span class="lineno">  803 </span>bytesToMiBCeil :: Int -&gt; Int
+<span class="lineno">  804 </span><span class="decl"><span class="nottickedoff">bytesToMiBCeil n</span>
+<span class="lineno">  805 </span><span class="spaces">  </span><span class="nottickedoff">| n &lt;= 0    = 0</span>
+<span class="lineno">  806 </span><span class="spaces">  </span><span class="nottickedoff">| otherwise = (n + mib - 1) `div` mib</span>
+<span class="lineno">  807 </span><span class="spaces">  </span><span class="nottickedoff">where mib = 1024 * 1024</span></span>
+<span class="lineno">  808 </span>
+<span class="lineno">  809 </span>-- | Atomically set an 'IORef' 'Bool' to 'True', returning its previous
+<span class="lineno">  810 </span>-- value. Used to defend against double-release of the buffer quota.
+<span class="lineno">  811 </span>atomicSwapTrue :: IORef Bool -&gt; IO Bool
+<span class="lineno">  812 </span><span class="decl"><span class="nottickedoff">atomicSwapTrue ref = atomicModifyIORef' ref (True,)</span></span>
+<span class="lineno">  813 </span>
+<span class="lineno">  814 </span>-- | Render an 'EnvMap' as the @[(String, String)]@ tuple list that
+<span class="lineno">  815 </span>-- @typed-process@\'s 'P.setEnv' expects. Values decode byte-for-byte
+<span class="lineno">  816 </span>-- (Latin-1) so non-ASCII bytes round-trip 1:1 to the subprocess.
+<span class="lineno">  817 </span>envMapToTuples :: EnvMap -&gt; [(String, String)]
+<span class="lineno">  818 </span><span class="decl"><span class="nottickedoff">envMapToTuples = map render . Map.toAscList</span>
+<span class="lineno">  819 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  820 </span><span class="spaces">    </span><span class="nottickedoff">render (k, EnvValue v) = (k, map (toEnum . fromIntegral) (BS.unpack v))</span></span>
+
+</pre>
+</body>
+</html>

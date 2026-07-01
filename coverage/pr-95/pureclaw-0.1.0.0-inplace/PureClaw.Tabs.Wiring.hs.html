@@ -1,0 +1,778 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE LambdaCase #-}
+<span class="lineno">    2 </span>
+<span class="lineno">    3 </span>-- |
+<span class="lineno">    4 </span>-- Module      : PureClaw.Tabs.Wiring
+<span class="lineno">    5 </span>-- Description : Live wiring of the tab subsystem (Tabs-as-View 8c.2 flip).
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- This module is the 8c.2 /wiring flip/ (GitHub #79; execution-binding spike
+<span class="lineno">    8 </span>-- §3–§6). It binds the additive 8b\/8c.1 pieces — the per-'TabRef' runtime
+<span class="lineno">    9 </span>-- registry (&quot;PureClaw.Tabs.Exec&quot;), the real runtime constructors
+<span class="lineno">   10 </span>-- (&quot;PureClaw.Tabs.Runtimes&quot;), the output-side relay writer
+<span class="lineno">   11 </span>-- (&quot;PureClaw.Tabs.RelayWriter&quot;), and the per-conversation router
+<span class="lineno">   12 </span>-- (&quot;PureClaw.Routing.TabDispatch&quot;) — to the live 'AgentEnv', and exposes
+<span class="lineno">   13 </span>-- 'runTabbedLoop', the new production entry point.
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- 'runTabbedLoop':
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>--   1. Forks the __relay-writer thread__ draining '_env_tabOutQ' through
+<span class="lineno">   18 </span>--      'RelayWriter.processOutput'.
+<span class="lineno">   19 </span>--   2. Registers the CLI conversation's __output sink__ (its
+<span class="lineno">   20 </span>--      'ConversationKey' -&gt; '_env_channel') in '_env_sinks'.
+<span class="lineno">   21 </span>--   3. Loops reading messages from '_env_channel', extracting each message's
+<span class="lineno">   22 </span>--      'ConversationKey' from its 'MessageSource', and dispatching to
+<span class="lineno">   23 </span>--      'TabDispatch.handleInbound' built from the live 'AgentEnv'.
+<span class="lineno">   24 </span>--
+<span class="lineno">   25 </span>-- The real @_ex_startRuntime@ closure ('mkExecDeps') builds a
+<span class="lineno">   26 </span>-- 'Runtimes.mkProviderRuntime' for a @BoundSession@ (pooled 'SessionHandle',
+<span class="lineno">   27 </span>-- context seeded from the transcript, transcript-recording provider stream,
+<span class="lineno">   28 </span>-- tool exec over the env registry) and a 'Runtimes.mkHarnessRuntime' for a
+<span class="lineno">   29 </span>-- @BoundHarness@ (the 'HarnessHandle' resolved from '_env_harnessRegistry').
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- == Additive
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>-- This is the live flip but it is ADDITIVE: the legacy
+<span class="lineno">   34 </span>-- 'PureClaw.Agent.Loop.runAgentLoopWith' path and the legacy 'AgentEnv'
+<span class="lineno">   35 </span>-- fields are untouched here and deleted in 8c.3.
+<span class="lineno">   36 </span>module PureClaw.Tabs.Wiring
+<span class="lineno">   37 </span>  ( -- * Production entry point
+<span class="lineno">   38 </span>    runTabbedLoop
+<span class="lineno">   39 </span>    -- * Exec wiring (exposed for tests \/ reuse)
+<span class="lineno">   40 </span>  , mkExecDeps
+<span class="lineno">   41 </span>  , mkTabDispatchDeps
+<span class="lineno">   42 </span>  , ensureRestoredRuntimes
+<span class="lineno">   43 </span>    -- * Effective tool registry (exposed for tests \/ reuse)
+<span class="lineno">   44 </span>  , effectiveRegistry
+<span class="lineno">   45 </span>  , execOneTool
+<span class="lineno">   46 </span>    -- * Session resolution (exposed for tests \/ reuse)
+<span class="lineno">   47 </span>  , SessionStore
+<span class="lineno">   48 </span>  , resolveSession
+<span class="lineno">   49 </span>    -- * Wizard menus (exposed for tests \/ reuse)
+<span class="lineno">   50 </span>  , recentSessions
+<span class="lineno">   51 </span>  ) where
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>import Control.Concurrent.STM (atomically, readTBQueue, writeTBQueue)
+<span class="lineno">   54 </span>import Control.Exception (try)
+<span class="lineno">   55 </span>import Control.Exception qualified as E
+<span class="lineno">   56 </span>import Control.Monad (forever)
+<span class="lineno">   57 </span>import Data.Aeson (Value)
+<span class="lineno">   58 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   59 </span>import Data.IORef (IORef, atomicModifyIORef', readIORef)
+<span class="lineno">   60 </span>import Data.Map.Strict (Map)
+<span class="lineno">   61 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   62 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   63 </span>import Data.Text (Text)
+<span class="lineno">   64 </span>import Data.Text qualified as T
+<span class="lineno">   65 </span>import Data.Time (UTCTime, getCurrentTime)
+<span class="lineno">   66 </span>import System.Exit (ExitCode (..))
+<span class="lineno">   67 </span>import System.FilePath (takeDirectory)
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>import PureClaw.Agent.AgentDef qualified as AgentDef
+<span class="lineno">   70 </span>import PureClaw.Agent.Context qualified as Ctx
+<span class="lineno">   71 </span>import PureClaw.Agent.Env
+<span class="lineno">   72 </span>import PureClaw.Agent.Loop qualified as Loop
+<span class="lineno">   73 </span>import PureClaw.Agent.SlashCommands qualified as Slash
+<span class="lineno">   74 </span>import PureClaw.Core.Types (ModelId (..), ToolCallId)
+<span class="lineno">   75 </span>import PureClaw.Core.Types qualified as Core
+<span class="lineno">   76 </span>import PureClaw.Handles.Channel
+<span class="lineno">   77 </span>import PureClaw.Handles.Harness
+<span class="lineno">   78 </span>  ( HarnessHandle (..)
+<span class="lineno">   79 </span>  , HarnessStatus (..)
+<span class="lineno">   80 </span>  , mkNoOpHarnessHandle
+<span class="lineno">   81 </span>  )
+<span class="lineno">   82 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   83 </span>import PureClaw.Handles.Transcript (TranscriptHandle (..))
+<span class="lineno">   84 </span>import PureClaw.Harness.Registry qualified as Registry
+<span class="lineno">   85 </span>import PureClaw.Providers.Class qualified as P
+<span class="lineno">   86 </span>import PureClaw.Routing.TabDispatch (TabDispatchDeps (..))
+<span class="lineno">   87 </span>import PureClaw.Routing.TabDispatch qualified as Dispatch
+<span class="lineno">   88 </span>import PureClaw.Routing.Types qualified as RT
+<span class="lineno">   89 </span>import PureClaw.Session.Handle qualified as Session
+<span class="lineno">   90 </span>import PureClaw.Session.Title qualified as Title
+<span class="lineno">   91 </span>import PureClaw.Session.Types qualified as SessionTypes
+<span class="lineno">   92 </span>import PureClaw.Tabs qualified as Tabs
+<span class="lineno">   93 </span>import PureClaw.Tabs.Exec (Exec, ExecDeps (..), Runtime, ensure, release, sendTo)
+<span class="lineno">   94 </span>import PureClaw.Tabs.RelayWriter
+<span class="lineno">   95 </span>  ( RelayWriterDeps (..)
+<span class="lineno">   96 </span>  , lookupSink
+<span class="lineno">   97 </span>  , processOutput
+<span class="lineno">   98 </span>  , registerSink
+<span class="lineno">   99 </span>  )
+<span class="lineno">  100 </span>import PureClaw.Tabs.Runtimes
+<span class="lineno">  101 </span>  ( HarnessRuntimeDeps (..)
+<span class="lineno">  102 </span>  , ProviderRuntimeDeps (..)
+<span class="lineno">  103 </span>  , mkHarnessRuntime
+<span class="lineno">  104 </span>  , mkProviderRuntime
+<span class="lineno">  105 </span>  )
+<span class="lineno">  106 </span>import PureClaw.Tabs.Types
+<span class="lineno">  107 </span>  ( ConversationKey
+<span class="lineno">  108 </span>  , RelayMode (..)
+<span class="lineno">  109 </span>  , Tab (..)
+<span class="lineno">  110 </span>  , TabList
+<span class="lineno">  111 </span>  , TabRef (..)
+<span class="lineno">  112 </span>  , TabStatus (..)
+<span class="lineno">  113 </span>  , resolveCursorSlot
+<span class="lineno">  114 </span>  , toList
+<span class="lineno">  115 </span>  )
+<span class="lineno">  116 </span>import PureClaw.MCP (mcpRegistry)
+<span class="lineno">  117 </span>import PureClaw.Tools.Registry
+<span class="lineno">  118 </span>  ( ToolRegistry
+<span class="lineno">  119 </span>  , executeTool
+<span class="lineno">  120 </span>  , mergeRegistries
+<span class="lineno">  121 </span>  , registryDefinitions
+<span class="lineno">  122 </span>  )
+<span class="lineno">  123 </span>import PureClaw.Transcript.Provider (mkTranscriptProvider)
+<span class="lineno">  124 </span>import PureClaw.Transcript.Types qualified as TT
+<span class="lineno">  125 </span>
+<span class="lineno">  126 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  127 </span>-- Session-handle pool (8c.2-local)
+<span class="lineno">  128 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  129 </span>
+<span class="lineno">  130 </span>-- | A tiny @'Core.SessionId' -&gt; 'Session.SessionHandle'@ pool, owned by one
+<span class="lineno">  131 </span>-- 'runTabbedLoop' invocation. The default-session minter ('mkNewDefaultSession')
+<span class="lineno">  132 </span>-- inserts a freshly-opened handle keyed by its id; the provider runtime
+<span class="lineno">  133 </span>-- constructor ('mkExecDeps') reads it back to seed + record against the same
+<span class="lineno">  134 </span>-- on-disk session. This is the 8c.2 stand-in for the full
+<span class="lineno">  135 </span>-- &quot;PureClaw.Tabs.SessionPool&quot; wiring (which lands with detach\/refcount work);
+<span class="lineno">  136 </span>-- here it is a write-on-create, read-on-bind map — adequate for the CLI flip,
+<span class="lineno">  137 </span>-- where every bound session was minted by '_td_newDefaultSession'.
+<span class="lineno">  138 </span>type SessionStore = IORef (Map Core.SessionId Session.SessionHandle)
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  141 </span>-- Production entry point
+<span class="lineno">  142 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  143 </span>
+<span class="lineno">  144 </span>-- | The Tabs-as-View production loop (replaces 'runAgentLoopWith' at the 8c.2
+<span class="lineno">  145 </span>-- flip). Forks the relay-writer thread, registers the CLI sink, then reads the
+<span class="lineno">  146 </span>-- channel and dispatches each inbound message per conversation.
+<span class="lineno">  147 </span>runTabbedLoop
+<span class="lineno">  148 </span>  :: AgentEnv
+<span class="lineno">  149 </span>  -&gt; SessionStore
+<span class="lineno">  150 </span>  -&gt; (Core.SessionId -&gt; Maybe Text -&gt; IO (Either Text ()))
+<span class="lineno">  151 </span>     -- ^ The session-description seam (built per 'ServerMode' in
+<span class="lineno">  152 </span>     -- &quot;PureClaw.CLI.Commands&quot;); threaded into the dispatcher deps so @\/rename@
+<span class="lineno">  153 </span>     -- on a session tab sets the session's canonical, cross-process name.
+<span class="lineno">  154 </span>  -&gt; IO ()
+<span class="lineno">  155 </span><span class="decl"><span class="istickedoff">runTabbedLoop env store setSessionDescription = do</span>
+<span class="lineno">  156 </span><span class="spaces">  </span><span class="istickedoff">_lh_logInfo logger <span class="nottickedoff">&quot;Tabbed agent loop started&quot;</span></span>
+<span class="lineno">  157 </span><span class="spaces">  </span><span class="istickedoff">let execDeps   = mkExecDeps env store</span>
+<span class="lineno">  158 </span><span class="spaces">      </span><span class="istickedoff">relayDeps  = RelayWriterDeps</span>
+<span class="lineno">  159 </span><span class="spaces">        </span><span class="istickedoff">{ _rw_sinks   = _env_sinks env</span>
+<span class="lineno">  160 </span><span class="spaces">        </span><span class="istickedoff">, _rw_cursors = readIORef (_env_cursors env)</span>
+<span class="lineno">  161 </span><span class="spaces">        </span><span class="istickedoff">, _rw_tabs    = Tabs.readTabs (_env_tabRegistry env)</span>
+<span class="lineno">  162 </span><span class="spaces">        </span><span class="istickedoff">, _rw_default = defaultRelayMode</span>
+<span class="lineno">  163 </span><span class="spaces">        </span><span class="istickedoff">, _rw_modelOf = modelOf store</span>
+<span class="lineno">  164 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  165 </span><span class="spaces">  </span><span class="istickedoff">-- (a) Fork the relay-writer thread draining the ref-tagged tab-output queue.</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">_ &lt;- _env_fork env $ forever $ do</span>
+<span class="lineno">  167 </span><span class="spaces">    </span><span class="istickedoff">(ref, ev) &lt;- atomically (readTBQueue (_env_tabOutQ env))</span>
+<span class="lineno">  168 </span><span class="spaces">    </span><span class="istickedoff">processOutput relayDeps (_env_relayWriter env) ref ev</span>
+<span class="lineno">  169 </span><span class="spaces">  </span><span class="istickedoff">-- The dispatcher deps are built once; they close over the live env + store.</span>
+<span class="lineno">  170 </span><span class="spaces">  </span><span class="istickedoff">let dispatchDeps = mkTabDispatchDeps env execDeps store setSessionDescription</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">-- Read the first inbound message to learn the CLI conversation key, register</span>
+<span class="lineno">  172 </span><span class="spaces">  </span><span class="istickedoff">-- its sink, then loop. (b) + (c).</span>
+<span class="lineno">  173 </span><span class="spaces">  </span><span class="istickedoff">loop dispatchDeps</span>
+<span class="lineno">  174 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  175 </span><span class="spaces">    </span><span class="istickedoff">channel = _env_channel env</span>
+<span class="lineno">  176 </span><span class="spaces">    </span><span class="istickedoff">logger  = _env_logger env</span>
+<span class="lineno">  177 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  178 </span><span class="spaces">    </span><span class="istickedoff">loop dispatchDeps = do</span>
+<span class="lineno">  179 </span><span class="spaces">      </span><span class="istickedoff">receiveResult &lt;- try @E.IOException (_ch_receive channel)</span>
+<span class="lineno">  180 </span><span class="spaces">      </span><span class="istickedoff">case receiveResult of</span>
+<span class="lineno">  181 </span><span class="spaces">        </span><span class="istickedoff">Left _    -&gt; _lh_logInfo logger <span class="nottickedoff">&quot;Session ended&quot;</span></span>
+<span class="lineno">  182 </span><span class="spaces">        </span><span class="istickedoff">Right msg -&gt; do</span>
+<span class="lineno">  183 </span><span class="spaces">          </span><span class="istickedoff">let src     = _im_source msg</span>
+<span class="lineno">  184 </span><span class="spaces">              </span><span class="istickedoff">convKey = conversationKeyOf src</span>
+<span class="lineno">  185 </span><span class="spaces">          </span><span class="istickedoff">-- (b) Register this conversation's output sink (idempotent).</span>
+<span class="lineno">  186 </span><span class="spaces">          </span><span class="istickedoff">registerSink (_env_sinks env) convKey channel</span>
+<span class="lineno">  187 </span><span class="spaces">          </span><span class="istickedoff">-- Capture the session origin (set-once) on the FOREGROUND session,</span>
+<span class="lineno">  188 </span><span class="spaces">          </span><span class="istickedoff">-- mirroring the legacy loop (the no-active-tab case relies on this —</span>
+<span class="lineno">  189 </span><span class="spaces">          </span><span class="istickedoff">-- Tabs.WiringSpec).</span>
+<span class="lineno">  190 </span><span class="spaces">          </span><span class="istickedoff">fgSh &lt;- readIORef (_env_session env)</span>
+<span class="lineno">  191 </span><span class="spaces">          </span><span class="istickedoff">Session.setSourceIfAbsent fgSh src</span>
+<span class="lineno">  192 </span><span class="spaces">          </span><span class="istickedoff">-- Also capture it (set-once) on the conversation's ACTIVE BOUND</span>
+<span class="lineno">  193 </span><span class="spaces">          </span><span class="istickedoff">-- session, so provenance lands on the session the turn actually runs</span>
+<span class="lineno">  194 </span><span class="spaces">          </span><span class="istickedoff">-- in (pureclaw-opr; #79). No active tab / non-session ref → no-op.</span>
+<span class="lineno">  195 </span><span class="spaces">          </span><span class="istickedoff">captureBoundSource env store convKey src</span>
+<span class="lineno">  196 </span><span class="spaces">          </span><span class="istickedoff">-- (c) Dispatch per conversation — skip empty/whitespace input silently,</span>
+<span class="lineno">  197 </span><span class="spaces">          </span><span class="istickedoff">-- mirroring legacy dispatchMsg's T.null(T.strip) guard (pureclaw-z9h).</span>
+<span class="lineno">  198 </span><span class="spaces">          </span><span class="istickedoff">-- Source capture above is preserved even for empty content.</span>
+<span class="lineno">  199 </span><span class="spaces">          </span><span class="istickedoff">if T.null (T.strip (_im_content msg))</span>
+<span class="lineno">  200 </span><span class="spaces">            </span><span class="istickedoff">then loop dispatchDeps</span>
+<span class="lineno">  201 </span><span class="spaces">            </span><span class="istickedoff">else do</span>
+<span class="lineno">  202 </span><span class="spaces">              </span><span class="istickedoff">Dispatch.handleInbound dispatchDeps convKey (_im_content msg)</span>
+<span class="lineno">  203 </span><span class="spaces">              </span><span class="istickedoff">loop dispatchDeps</span></span>
+<span class="lineno">  204 </span>
+<span class="lineno">  205 </span>-- | The 'ConversationKey' for a message source: its channel + conversation id
+<span class="lineno">  206 </span>-- (invariant I3 — the dispatcher keys cursors\/relay by this pair).
+<span class="lineno">  207 </span>conversationKeyOf :: Core.MessageSource -&gt; ConversationKey
+<span class="lineno">  208 </span><span class="decl"><span class="istickedoff">conversationKeyOf src = (Core._ms_channel src, Core._ms_conversation src)</span></span>
+<span class="lineno">  209 </span>
+<span class="lineno">  210 </span>-- | Capture the inbound message source (set-once) onto the conversation's
+<span class="lineno">  211 </span>-- ACTIVE BOUND session — the session the turn actually runs in. Resolves the
+<span class="lineno">  212 </span>-- active tab exactly as 'TabDispatch.doDefault' does (cursor -&gt; ref -&gt; tab) and,
+<span class="lineno">  213 </span>-- when the ref is a @BoundSession@, resolves its 'Session.SessionHandle' from
+<span class="lineno">  214 </span>-- the loop's @store@ and applies 'Session.setSourceIfAbsent'. No active tab (no
+<span class="lineno">  215 </span>-- cursor / dangling cursor) or a non-session ref (@BoundHarness@) is a safe
+<span class="lineno">  216 </span>-- no-op. This restores the provenance the 8c cutover dropped (pureclaw-opr; #79)
+<span class="lineno">  217 </span>-- without disturbing the foreground @_env_session@ capture the no-tab case needs.
+<span class="lineno">  218 </span>captureBoundSource
+<span class="lineno">  219 </span>  :: AgentEnv -&gt; SessionStore -&gt; ConversationKey -&gt; Core.MessageSource -&gt; IO ()
+<span class="lineno">  220 </span><span class="decl"><span class="istickedoff">captureBoundSource env store convKey src = do</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">mSh &lt;- activeBoundSession env store convKey</span>
+<span class="lineno">  222 </span><span class="spaces">  </span><span class="istickedoff">case mSh of</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">Just sh -&gt; Session.setSourceIfAbsent sh src</span>
+<span class="lineno">  224 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  225 </span>
+<span class="lineno">  226 </span>-- | Resolve the 'Session.SessionHandle' bound to a conversation's ACTIVE tab,
+<span class="lineno">  227 </span>-- if any. Follows the same cursor -&gt; slot -&gt; tab -&gt; '_tab_ref' chain
+<span class="lineno">  228 </span>-- 'TabDispatch.doDefault' uses to pick the session a turn runs in, then — when
+<span class="lineno">  229 </span>-- the ref is a @BoundSession@ — resolves its handle from the loop's @store@. No
+<span class="lineno">  230 </span>-- active tab (no cursor / dangling cursor) or a non-session ref
+<span class="lineno">  231 </span>-- (@BoundHarness@) yields 'Nothing'. Shared by 'captureBoundSource' (provenance
+<span class="lineno">  232 </span>-- set-once) and 'fallthrough' (seeding the @\/status@ \/ @\/compact@ context
+<span class="lineno">  233 </span>-- from the live conversation's transcript — pureclaw-25k).
+<span class="lineno">  234 </span>activeBoundSession
+<span class="lineno">  235 </span>  :: AgentEnv -&gt; SessionStore -&gt; ConversationKey -&gt; IO (Maybe Session.SessionHandle)
+<span class="lineno">  236 </span><span class="decl"><span class="istickedoff">activeBoundSession env store convKey = do</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">cs &lt;- readIORef (_env_cursors env)</span>
+<span class="lineno">  238 </span><span class="spaces">  </span><span class="istickedoff">tl &lt;- Tabs.readTabs (_env_tabRegistry env)</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="istickedoff">case resolveCursorSlot convKey cs tl of</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">Nothing   -&gt; pure Nothing</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">Just slot -&gt; do</span>
+<span class="lineno">  242 </span><span class="spaces">      </span><span class="istickedoff">mTab &lt;- Tabs.registryLookupSlot (_env_tabRegistry env) slot</span>
+<span class="lineno">  243 </span><span class="spaces">      </span><span class="istickedoff">case _tab_ref &lt;$&gt; mTab of</span>
+<span class="lineno">  244 </span><span class="spaces">        </span><span class="istickedoff">Just (BoundSession sid) -&gt; Just &lt;$&gt; resolveSession <span class="nottickedoff">env</span> store sid</span>
+<span class="lineno">  245 </span><span class="spaces">        </span><span class="istickedoff">_                       -&gt; <span class="nottickedoff">pure Nothing</span></span></span>
+<span class="lineno">  246 </span>
+<span class="lineno">  247 </span>-- | The global default 'RelayMode' for conversations with no override.
+<span class="lineno">  248 </span>-- 'FocusedOnly' matches the design default (only the focused tab is relayed).
+<span class="lineno">  249 </span>defaultRelayMode :: RelayMode
+<span class="lineno">  250 </span><span class="decl"><span class="istickedoff">defaultRelayMode = FocusedOnly</span></span>
+<span class="lineno">  251 </span>
+<span class="lineno">  252 </span>-- | Resolve a tab's model name for the relay's focused speaker prefix
+<span class="lineno">  253 </span>-- (@\/N \&lt;model\&gt;: @). A @BoundSession@ resolves its pooled 'Session.SessionHandle'
+<span class="lineno">  254 </span>-- from @store@ (the running tab's session is always cached there) and reads its
+<span class="lineno">  255 </span>-- current @_sm_model@; an empty model string and a @BoundHarness@ (no model)
+<span class="lineno">  256 </span>-- both yield 'Nothing', so the prefix renders slot-only (@\/N: @). This reads
+<span class="lineno">  257 </span>-- only the in-memory store + meta 'IORef' — no disk I/O on the relay path.
+<span class="lineno">  258 </span>modelOf :: SessionStore -&gt; TabRef -&gt; IO (Maybe Text)
+<span class="lineno">  259 </span><span class="decl"><span class="istickedoff">modelOf store = \case</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">BoundSession sid -&gt; do</span>
+<span class="lineno">  261 </span><span class="spaces">    </span><span class="istickedoff">m &lt;- readIORef store</span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">case Map.lookup sid m of</span>
+<span class="lineno">  263 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  264 </span><span class="spaces">      </span><span class="istickedoff">Just sh -&gt; do</span>
+<span class="lineno">  265 </span><span class="spaces">        </span><span class="istickedoff">meta &lt;- readIORef (Session._sh_meta sh)</span>
+<span class="lineno">  266 </span><span class="spaces">        </span><span class="istickedoff">let model = SessionTypes._sm_model meta</span>
+<span class="lineno">  267 </span><span class="spaces">        </span><span class="istickedoff">pure (if <span class="tickonlyfalse">T.null model</span> then <span class="nottickedoff">Nothing</span> else Just model)</span>
+<span class="lineno">  268 </span><span class="spaces">  </span><span class="istickedoff">BoundHarness _ -&gt; <span class="nottickedoff">pure Nothing</span></span></span>
+<span class="lineno">  269 </span>
+<span class="lineno">  270 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  271 </span>-- Exec wiring — the real _ex_startRuntime closure
+<span class="lineno">  272 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  273 </span>
+<span class="lineno">  274 </span>-- | Build the production 'ExecDeps': the '_ex_startRuntime' closure that
+<span class="lineno">  275 </span>-- constructs a provider or harness runtime for a 'TabRef' against the live
+<span class="lineno">  276 </span>-- 'AgentEnv'.
+<span class="lineno">  277 </span>--
+<span class="lineno">  278 </span>--   * @BoundSession sid@ — 'mkProviderRuntime' over the session's pooled
+<span class="lineno">  279 </span>--     'SessionHandle' (resolved from @store@), seeding 'Ctx.Context' from the
+<span class="lineno">  280 </span>--     transcript via 'Session.loadRecentMessages', streaming through a
+<span class="lineno">  281 </span>--     transcript-recording provider, executing tools against the env registry,
+<span class="lineno">  282 </span>--     and emitting @('TabRef','ChannelEvent')@ onto '_env_tabOutQ'.
+<span class="lineno">  283 </span>--   * @BoundHarness hid@ — 'mkHarnessRuntime' over the 'HarnessHandle' resolved
+<span class="lineno">  284 </span>--     from '_env_harnessRegistry'.
+<span class="lineno">  285 </span>mkExecDeps :: AgentEnv -&gt; SessionStore -&gt; ExecDeps
+<span class="lineno">  286 </span><span class="decl"><span class="istickedoff">mkExecDeps env store = ExecDeps { _ex_startRuntime = startRuntime }</span>
+<span class="lineno">  287 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  288 </span><span class="spaces">    </span><span class="istickedoff">startRuntime :: TabRef -&gt; IO Runtime</span>
+<span class="lineno">  289 </span><span class="spaces">    </span><span class="istickedoff">startRuntime = \case</span>
+<span class="lineno">  290 </span><span class="spaces">      </span><span class="istickedoff">BoundSession sid -&gt; startProvider env store sid</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">BoundHarness hid -&gt; <span class="nottickedoff">startHarness env hid</span></span></span>
+<span class="lineno">  292 </span>
+<span class="lineno">  293 </span>-- | Boot-time runtime restore. 'PureClaw.Tabs.Persist.loadTabs' restores the
+<span class="lineno">  294 </span>-- persisted 'TabList' into the registry ('PureClaw.Tabs.overwriteTabs'), but a
+<span class="lineno">  295 </span>-- restored tab is only /bound/ — the bind-time 'ensure' that live creation
+<span class="lineno">  296 </span>-- performs ('PureClaw.Routing.TabDispatch.bindNewTab' \/ @routeToNew@) never ran
+<span class="lineno">  297 </span>-- for it, so its 'Exec' runtime is absent. The first message routed to such a
+<span class="lineno">  298 </span>-- tab then fails with 'PureClaw.Handles.Tab.TabNotFound' (\&quot;tab: not found\&quot;)
+<span class="lineno">  299 </span>-- instead of resuming the session — the symptom seen after a gateway restart.
+<span class="lineno">  300 </span>--
+<span class="lineno">  301 </span>-- This re-establishes the invariant by 'ensure'-ing each restored ref exactly
+<span class="lineno">  302 </span>-- once (balancing the one 'release' per @\/close@), so a 'BoundSession'
+<span class="lineno">  303 </span>-- reconnects with its transcript context reseeded ('startProvider') and a live
+<span class="lineno">  304 </span>-- 'BoundHarness' re-attaches. 'Dead' tombstones are skipped — they carry no
+<span class="lineno">  305 </span>-- runtime and drop input by design (Tabs-as-View §8); a dead harness is already
+<span class="lineno">  306 </span>-- pruned at load ('PureClaw.Tabs.Persist.reconcileTabs'), so its conversation
+<span class="lineno">  307 </span>-- falls through to a fresh default session instead.
+<span class="lineno">  308 </span>ensureRestoredRuntimes :: ExecDeps -&gt; Exec -&gt; TabList -&gt; IO ()
+<span class="lineno">  309 </span><span class="decl"><span class="istickedoff">ensureRestoredRuntimes deps ex =</span>
+<span class="lineno">  310 </span><span class="spaces">  </span><span class="istickedoff">mapM_ (ensure deps ex . _tab_ref) . filter ((/= Dead) . _tab_status) . toList</span></span>
+<span class="lineno">  311 </span>
+<span class="lineno">  312 </span>-- | Enqueue a ref-tagged output event onto the tab-output queue (the relay
+<span class="lineno">  313 </span>-- writer's source).
+<span class="lineno">  314 </span>enqueueTabOut :: AgentEnv -&gt; TabRef -&gt; RT.ChannelEvent -&gt; IO ()
+<span class="lineno">  315 </span><span class="decl"><span class="istickedoff">enqueueTabOut env ref ev =</span>
+<span class="lineno">  316 </span><span class="spaces">  </span><span class="istickedoff">atomically (writeTBQueue (_env_tabOutQ env) (ref, ev))</span></span>
+<span class="lineno">  317 </span>
+<span class="lineno">  318 </span>-- | Build + start a provider-session runtime for a 'Core.SessionId'.
+<span class="lineno">  319 </span>startProvider :: AgentEnv -&gt; SessionStore -&gt; Core.SessionId -&gt; IO Runtime
+<span class="lineno">  320 </span><span class="decl"><span class="istickedoff">startProvider env store sid = do</span>
+<span class="lineno">  321 </span><span class="spaces">  </span><span class="istickedoff">sh &lt;- resolveSession <span class="nottickedoff">env</span> store sid</span>
+<span class="lineno">  322 </span><span class="spaces">  </span><span class="istickedoff">let th = Session._sh_transcript sh</span>
+<span class="lineno">  323 </span><span class="spaces">  </span><span class="istickedoff">mProvider &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">  324 </span><span class="spaces">  </span><span class="istickedoff">mModel    &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  325 </span><span class="spaces">  </span><span class="istickedoff">let model     = fromMaybe <span class="nottickedoff">(ModelId &quot;&quot;)</span> mModel</span>
+<span class="lineno">  326 </span><span class="spaces">      </span><span class="istickedoff">modelName = unModelId model</span>
+<span class="lineno">  327 </span><span class="spaces">  </span><span class="istickedoff">-- Wrap the provider with the per-session transcript recorder (records</span>
+<span class="lineno">  328 </span><span class="spaces">  </span><span class="istickedoff">-- request/response entries to transcript.jsonl + broker), exactly as the</span>
+<span class="lineno">  329 </span><span class="spaces">  </span><span class="istickedoff">-- legacy loop did. A 'Nothing' provider yields a stream that records nothing</span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="istickedoff">-- and produces no StreamDone (the turn returns the seeded context).</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="istickedoff">--</span>
+<span class="lineno">  332 </span><span class="spaces">  </span><span class="istickedoff">-- The transcript's Request @metadata.source@ is the BOUND session's current</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">-- @_sm_source@, read per turn: 'runTabbedLoop' captures the inbound source</span>
+<span class="lineno">  334 </span><span class="spaces">  </span><span class="istickedoff">-- set-once onto this session before the worker runs, so this restores the</span>
+<span class="lineno">  335 </span><span class="spaces">  </span><span class="istickedoff">-- legacy loop's @(Just (_im_source msg))@ semantics (pureclaw-opr; #79).</span>
+<span class="lineno">  336 </span><span class="spaces">  </span><span class="istickedoff">let streamFn req cb = case mProvider of</span>
+<span class="lineno">  337 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  338 </span><span class="spaces">        </span><span class="istickedoff">Just provider -&gt; do</span>
+<span class="lineno">  339 </span><span class="spaces">          </span><span class="istickedoff">meta &lt;- readIORef (Session._sh_meta sh)</span>
+<span class="lineno">  340 </span><span class="spaces">          </span><span class="istickedoff">let provider' =</span>
+<span class="lineno">  341 </span><span class="spaces">                </span><span class="istickedoff">mkTranscriptProvider th modelName (SessionTypes._sm_source meta) provider</span>
+<span class="lineno">  342 </span><span class="spaces">          </span><span class="istickedoff">P.completeStream provider' req cb</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="istickedoff">let deps = ProviderRuntimeDeps</span>
+<span class="lineno">  344 </span><span class="spaces">        </span><span class="istickedoff">{ _prd_ref          = BoundSession sid</span>
+<span class="lineno">  345 </span><span class="spaces">        </span><span class="istickedoff">, _prd_emit         = enqueueTabOut env</span>
+<span class="lineno">  346 </span><span class="spaces">        </span><span class="istickedoff">, _prd_stream       = streamFn</span>
+<span class="lineno">  347 </span><span class="spaces">        </span><span class="istickedoff">, _prd_execTool     = execOneTool env</span>
+<span class="lineno">  348 </span><span class="spaces">        </span><span class="istickedoff">, _prd_record       = \_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  349 </span><span class="spaces">            </span><span class="istickedoff">-- Transcript append is performed by the transcript-recording</span>
+<span class="lineno">  350 </span><span class="spaces">            </span><span class="istickedoff">-- provider wrapper above (request/response entries); the</span>
+<span class="lineno">  351 </span><span class="spaces">            </span><span class="istickedoff">-- message-level append is a no-op, matching the legacy Tab.Ai path.</span>
+<span class="lineno">  352 </span><span class="spaces">        </span><span class="istickedoff">, _prd_seedCtx      = seedContextFrom env th</span>
+<span class="lineno">  353 </span><span class="spaces">        </span><span class="istickedoff">, _prd_model        = model</span>
+<span class="lineno">  354 </span><span class="spaces">        </span><span class="istickedoff">, _prd_systemPrompt = _env_systemPrompt env</span>
+<span class="lineno">  355 </span><span class="spaces">        </span><span class="istickedoff">, _prd_tools        = registryDefinitions &lt;$&gt; effectiveRegistry env</span>
+<span class="lineno">  356 </span><span class="spaces">        </span><span class="istickedoff">, _prd_maxTokens    = Just 4096</span>
+<span class="lineno">  357 </span><span class="spaces">          </span><span class="istickedoff">-- Restore the legacy @Loop.handleCompletion@ one-shot: fire (and</span>
+<span class="lineno">  358 </span><span class="spaces">          </span><span class="istickedoff">-- clear) @_env_onFirstStreamDone@ on the FIRST provider StreamDone, so</span>
+<span class="lineno">  359 </span><span class="spaces">          </span><span class="istickedoff">-- @markBootstrapConsumed@ runs once and an agent's BOOTSTRAP.md is not</span>
+<span class="lineno">  360 </span><span class="spaces">          </span><span class="istickedoff">-- re-injected on every resume (pureclaw-8g4; #79). The tabbed path</span>
+<span class="lineno">  361 </span><span class="spaces">          </span><span class="istickedoff">-- never fired this before the fix.</span>
+<span class="lineno">  362 </span><span class="spaces">        </span><span class="istickedoff">, _prd_onStreamDone = fireOnce (_env_onFirstStreamDone env)</span>
+<span class="lineno">  363 </span><span class="spaces">        </span><span class="istickedoff">, _prd_fork         = _env_fork env</span>
+<span class="lineno">  364 </span><span class="spaces">        </span><span class="istickedoff">, _prd_inputBound   = RT._rc_inputQueueBound (_env_routingConfig env)</span>
+<span class="lineno">  365 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  366 </span><span class="spaces">  </span><span class="istickedoff">mkProviderRuntime deps</span></span>
+<span class="lineno">  367 </span>
+<span class="lineno">  368 </span>-- | Run a one-shot action stored in an 'IORef' at most once: atomically
+<span class="lineno">  369 </span>-- read-and-clear the 'Maybe' action, then run it if present. Mirrors the
+<span class="lineno">  370 </span>-- legacy @Loop.handleCompletion@ StreamDone handler
+<span class="lineno">  371 </span>-- (@atomicModifyIORef' ref (Nothing,); for_ mAction id@) so the armed
+<span class="lineno">  372 </span>-- @markBootstrapConsumed@ fires exactly once even though '_turn_onStreamDone'
+<span class="lineno">  373 </span>-- is invoked on every 'P.StreamDone' (pureclaw-8g4).
+<span class="lineno">  374 </span>fireOnce :: IORef (Maybe (IO ())) -&gt; IO ()
+<span class="lineno">  375 </span><span class="decl"><span class="istickedoff">fireOnce ref = do</span>
+<span class="lineno">  376 </span><span class="spaces">  </span><span class="istickedoff">mAction &lt;- atomicModifyIORef' ref (Nothing,)</span>
+<span class="lineno">  377 </span><span class="spaces">  </span><span class="istickedoff">fromMaybe (pure <span class="nottickedoff">()</span>) mAction</span></span>
+<span class="lineno">  378 </span>
+<span class="lineno">  379 </span>-- | Build + start a harness runtime for a 'Registry.HarnessId'. The
+<span class="lineno">  380 </span>-- 'HarnessHandle' is resolved from '_env_harnessRegistry'; when the entry has
+<span class="lineno">  381 </span>-- no live handle yet (boot-discovered, not attached), a no-op handle is used so
+<span class="lineno">  382 </span>-- the runtime starts cleanly and simply produces no output until reconcile
+<span class="lineno">  383 </span>-- attaches one.
+<span class="lineno">  384 </span>startHarness :: AgentEnv -&gt; Registry.HarnessId -&gt; IO Runtime
+<span class="lineno">  385 </span><span class="decl"><span class="nottickedoff">startHarness env hid = do</span>
+<span class="lineno">  386 </span><span class="spaces">  </span><span class="nottickedoff">mEntry &lt;- Registry.lookupById (_env_harnessRegistry env) hid</span>
+<span class="lineno">  387 </span><span class="spaces">  </span><span class="nottickedoff">let mHandle = mEntry &gt;&gt;= Registry._he_handle</span>
+<span class="lineno">  388 </span><span class="spaces">  </span><span class="nottickedoff">case mHandle of</span>
+<span class="lineno">  389 </span><span class="spaces">    </span><span class="nottickedoff">Just h  -&gt; startHarnessWith env hid h</span>
+<span class="lineno">  390 </span><span class="spaces">    </span><span class="nottickedoff">Nothing -&gt;</span>
+<span class="lineno">  391 </span><span class="spaces">      </span><span class="nottickedoff">-- TODO(8c.3): resolve a freshly-attached handle once detach/re-attach</span>
+<span class="lineno">  392 </span><span class="spaces">      </span><span class="nottickedoff">-- lifecycle lands; for now an unattached harness ref produces no output.</span>
+<span class="lineno">  393 </span><span class="spaces">      </span><span class="nottickedoff">startHarnessWith env hid noOutputHarness</span></span>
+<span class="lineno">  394 </span>
+<span class="lineno">  395 </span>-- | The harness-runtime build over a resolved 'HarnessHandle'.
+<span class="lineno">  396 </span>startHarnessWith :: AgentEnv -&gt; Registry.HarnessId -&gt; HarnessHandle -&gt; IO Runtime
+<span class="lineno">  397 </span><span class="decl"><span class="nottickedoff">startHarnessWith env hid h =</span>
+<span class="lineno">  398 </span><span class="spaces">  </span><span class="nottickedoff">mkHarnessRuntime HarnessRuntimeDeps</span>
+<span class="lineno">  399 </span><span class="spaces">    </span><span class="nottickedoff">{ _hrd_ref        = BoundHarness hid</span>
+<span class="lineno">  400 </span><span class="spaces">    </span><span class="nottickedoff">, _hrd_emit       = enqueueTabOut env</span>
+<span class="lineno">  401 </span><span class="spaces">    </span><span class="nottickedoff">, _hrd_handle     = h</span>
+<span class="lineno">  402 </span><span class="spaces">    </span><span class="nottickedoff">, _hrd_fork       = _env_fork env</span>
+<span class="lineno">  403 </span><span class="spaces">    </span><span class="nottickedoff">, _hrd_pollMicros = 100000  -- 100ms drainer poll, matching the legacy loop</span>
+<span class="lineno">  404 </span><span class="spaces">    </span><span class="nottickedoff">, _hrd_sendBound  = RT._rc_inputQueueBound (_env_routingConfig env)</span>
+<span class="lineno">  405 </span><span class="spaces">    </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  406 </span>
+<span class="lineno">  407 </span>-- | A 'HarnessHandle' for an unattached harness ref (boot-discovered, no live
+<span class="lineno">  408 </span>-- handle yet — TODO(8c.3)): it discards input and reports 'HarnessExited' so
+<span class="lineno">  409 </span>-- the runtime's drainer stops immediately rather than spinning on an empty
+<span class="lineno">  410 </span>-- receive. Re-attaching a real handle is 8c.3 detach/re-attach work.
+<span class="lineno">  411 </span>noOutputHarness :: HarnessHandle
+<span class="lineno">  412 </span><span class="decl"><span class="nottickedoff">noOutputHarness = mkNoOpHarnessHandle { _hh_status = pure (HarnessExited ExitSuccess) }</span></span>
+<span class="lineno">  413 </span>
+<span class="lineno">  414 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  415 </span>-- Provider-runtime helpers
+<span class="lineno">  416 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  417 </span>
+<span class="lineno">  418 </span>-- | Seed a fresh 'Ctx.Context' for a provider runtime from its session's
+<span class="lineno">  419 </span>-- transcript: reload a bounded window of recent messages
+<span class="lineno">  420 </span>-- ('Session.loadRecentMessages') and replace them into an empty context
+<span class="lineno">  421 </span>-- carrying the env system prompt (mirrors the CLI resume seam, spike §2).
+<span class="lineno">  422 </span>seedContextFrom :: AgentEnv -&gt; TranscriptHandle -&gt; IO Ctx.Context
+<span class="lineno">  423 </span><span class="decl"><span class="istickedoff">seedContextFrom env th = do</span>
+<span class="lineno">  424 </span><span class="spaces">  </span><span class="istickedoff">recent &lt;- Session.loadRecentMessages th 50 100000</span>
+<span class="lineno">  425 </span><span class="spaces">  </span><span class="istickedoff">pure (Ctx.replaceMessages recent (Ctx.emptyContext (_env_systemPrompt env)))</span></span>
+<span class="lineno">  426 </span>
+<span class="lineno">  427 </span>-- | Seed a 'Ctx.Context' for a slash command (the 'fallthrough' path) from a
+<span class="lineno">  428 </span>-- session's transcript: the recent-message window ('seedContextFrom') PLUS the
+<span class="lineno">  429 </span>-- cumulative provider token usage recovered from the transcript's Response
+<span class="lineno">  430 </span>-- entries ('transcriptUsage'). This restores both the message count \/ context
+<span class="lineno">  431 </span>-- estimate AND the @Total input\/output tokens@ that @\/status@ reports — which
+<span class="lineno">  432 </span>-- the live runtime worker accumulates in its private 'Ctx.Context' that the
+<span class="lineno">  433 </span>-- slash path could never see (pureclaw-25k).
+<span class="lineno">  434 </span>seedSlashContext :: AgentEnv -&gt; TranscriptHandle -&gt; IO Ctx.Context
+<span class="lineno">  435 </span><span class="decl"><span class="istickedoff">seedSlashContext env th = do</span>
+<span class="lineno">  436 </span><span class="spaces">  </span><span class="istickedoff">base  &lt;- seedContextFrom env th</span>
+<span class="lineno">  437 </span><span class="spaces">  </span><span class="istickedoff">usage &lt;- transcriptUsage th</span>
+<span class="lineno">  438 </span><span class="spaces">  </span><span class="istickedoff">pure (Ctx.recordUsage (Just usage) base)</span></span>
+<span class="lineno">  439 </span>
+<span class="lineno">  440 </span>-- | Sum the provider-reported token usage across every Response entry recorded
+<span class="lineno">  441 </span>-- in a session's transcript. Each Response entry carries its
+<span class="lineno">  442 </span>-- @input_tokens@ \/ @output_tokens@ in '_te_metadata' (written by
+<span class="lineno">  443 </span>-- 'PureClaw.Transcript.Provider.buildResponseMetadata'); missing or
+<span class="lineno">  444 </span>-- non-numeric values contribute zero. The result mirrors what the live worker's
+<span class="lineno">  445 </span>-- 'Ctx.recordUsage' accumulator would hold, so a seeded @\/status@ reports the
+<span class="lineno">  446 </span>-- real cumulative totals rather than zeros.
+<span class="lineno">  447 </span>transcriptUsage :: TranscriptHandle -&gt; IO P.Usage
+<span class="lineno">  448 </span><span class="decl"><span class="istickedoff">transcriptUsage th = do</span>
+<span class="lineno">  449 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- _th_query th TT.emptyFilter</span>
+<span class="lineno">  450 </span><span class="spaces">  </span><span class="istickedoff">let responses = [ e | e &lt;- entries, TT._te_direction e == TT.Response ]</span>
+<span class="lineno">  451 </span><span class="spaces">      </span><span class="istickedoff">inp = sum [ metaInt &quot;input_tokens&quot;  (TT._te_metadata e) | e &lt;- responses ]</span>
+<span class="lineno">  452 </span><span class="spaces">      </span><span class="istickedoff">out = sum [ metaInt &quot;output_tokens&quot; (TT._te_metadata e) | e &lt;- responses ]</span>
+<span class="lineno">  453 </span><span class="spaces">  </span><span class="istickedoff">pure (P.Usage inp out)</span></span>
+<span class="lineno">  454 </span>
+<span class="lineno">  455 </span>-- | Read a non-negative 'Int' from a metadata map under @key@; absent or
+<span class="lineno">  456 </span>-- non-numeric yields 0.
+<span class="lineno">  457 </span>metaInt :: Text -&gt; Map.Map Text Value -&gt; Int
+<span class="lineno">  458 </span><span class="decl"><span class="istickedoff">metaInt key m = case Map.lookup key m of</span>
+<span class="lineno">  459 </span><span class="spaces">  </span><span class="istickedoff">Just v  -&gt; case Aeson.fromJSON v of</span>
+<span class="lineno">  460 </span><span class="spaces">    </span><span class="istickedoff">Aeson.Success n -&gt; n</span>
+<span class="lineno">  461 </span><span class="spaces">    </span><span class="istickedoff">Aeson.Error _   -&gt; <span class="nottickedoff">0</span></span>
+<span class="lineno">  462 </span><span class="spaces">  </span><span class="istickedoff">Nothing -&gt; 0</span></span>
+<span class="lineno">  463 </span>
+<span class="lineno">  464 </span>-- | The effective tool registry for a per-tab runtime: the env's built-in
+<span class="lineno">  465 </span>-- registry merged with any connected MCP server tools (read per call, so tools
+<span class="lineno">  466 </span>-- connected after a tab is created are still seen). Mirrors the still-live
+<span class="lineno">  467 </span>-- @Loop.backgroundRegistry@ \/ legacy @effectiveRegistry@ (pureclaw-2u4; #79).
+<span class="lineno">  468 </span>effectiveRegistry :: AgentEnv -&gt; IO ToolRegistry
+<span class="lineno">  469 </span><span class="decl"><span class="istickedoff">effectiveRegistry env = do</span>
+<span class="lineno">  470 </span><span class="spaces">  </span><span class="istickedoff">servers &lt;- readIORef (_env_mcpServers env)</span>
+<span class="lineno">  471 </span><span class="spaces">  </span><span class="istickedoff">let base = _env_registry env</span>
+<span class="lineno">  472 </span><span class="spaces">  </span><span class="istickedoff">pure $</span>
+<span class="lineno">  473 </span><span class="spaces">    </span><span class="istickedoff">if Map.null servers</span>
+<span class="lineno">  474 </span><span class="spaces">      </span><span class="istickedoff">then base</span>
+<span class="lineno">  475 </span><span class="spaces">      </span><span class="istickedoff">else mergeRegistries base (mcpRegistry (Map.elems servers))</span></span>
+<span class="lineno">  476 </span>
+<span class="lineno">  477 </span>-- | Run ONE tool call against the effective registry, returning a tool-result
+<span class="lineno">  478 </span>-- 'P.Message'. Mirrors @Loop.executeCall@ + @toolResultMessage@ for a single
+<span class="lineno">  479 </span>-- call: an unknown tool yields a one-line error result rather than throwing.
+<span class="lineno">  480 </span>execOneTool :: AgentEnv -&gt; ToolCallId -&gt; Text -&gt; Value -&gt; IO P.Message
+<span class="lineno">  481 </span><span class="decl"><span class="istickedoff">execOneTool env callId name input = do</span>
+<span class="lineno">  482 </span><span class="spaces">  </span><span class="istickedoff">reg    &lt;- effectiveRegistry env</span>
+<span class="lineno">  483 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- executeTool reg name <span class="nottickedoff">input</span></span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="istickedoff">let (parts, isErr) = case result of</span>
+<span class="lineno">  485 </span><span class="spaces">        </span><span class="istickedoff">Nothing       -&gt; ([P.TRPText (&quot;Unknown tool: &quot; &lt;&gt; name)], <span class="nottickedoff">True</span>)</span>
+<span class="lineno">  486 </span><span class="spaces">        </span><span class="istickedoff">Just (ps, er) -&gt; (ps, er)</span>
+<span class="lineno">  487 </span><span class="spaces">  </span><span class="istickedoff">pure (P.toolResultMessage [(callId, parts, isErr)])</span></span>
+<span class="lineno">  488 </span>
+<span class="lineno">  489 </span>-- | Resolve the 'Session.SessionHandle' for a 'Core.SessionId': prefer the
+<span class="lineno">  490 </span>-- @store@ entry (minted by '_td_newDefaultSession'); fall back to the live
+<span class="lineno">  491 </span>-- '_env_session' if its id matches; otherwise open a fresh handle from disk and
+<span class="lineno">  492 </span>-- cache it. The store guarantees the common case (every bound session was
+<span class="lineno">  493 </span>-- minted by the dispatcher) never touches disk twice.
+<span class="lineno">  494 </span>resolveSession :: AgentEnv -&gt; SessionStore -&gt; Core.SessionId -&gt; IO Session.SessionHandle
+<span class="lineno">  495 </span><span class="decl"><span class="istickedoff">resolveSession env store sid = do</span>
+<span class="lineno">  496 </span><span class="spaces">  </span><span class="istickedoff">m &lt;- readIORef store</span>
+<span class="lineno">  497 </span><span class="spaces">  </span><span class="istickedoff">case Map.lookup sid m of</span>
+<span class="lineno">  498 </span><span class="spaces">    </span><span class="istickedoff">Just sh -&gt; pure sh</span>
+<span class="lineno">  499 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  500 </span><span class="spaces">      </span><span class="istickedoff">cur &lt;- readIORef (_env_session env)</span>
+<span class="lineno">  501 </span><span class="spaces">      </span><span class="istickedoff">curMeta &lt;- readIORef (Session._sh_meta cur)</span>
+<span class="lineno">  502 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlyfalse">SessionTypes._sm_id curMeta == sid</span></span>
+<span class="lineno">  503 </span><span class="spaces">        </span><span class="istickedoff">then <span class="nottickedoff">do</span></span>
+<span class="lineno">  504 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">cacheSession store sid cur</span></span>
+<span class="lineno">  505 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure cur</span></span>
+<span class="lineno">  506 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  507 </span><span class="spaces">          </span><span class="istickedoff">-- TODO(8c.3): a wizard-reopened session whose handle was not minted</span>
+<span class="lineno">  508 </span><span class="spaces">          </span><span class="istickedoff">-- here. Open it from disk via the same sessions dir and cache it.</span>
+<span class="lineno">  509 </span><span class="spaces">          </span><span class="istickedoff">sh &lt;- openSessionFromDisk env sid</span>
+<span class="lineno">  510 </span><span class="spaces">          </span><span class="istickedoff">cacheSession store sid sh</span>
+<span class="lineno">  511 </span><span class="spaces">          </span><span class="istickedoff">pure sh</span></span>
+<span class="lineno">  512 </span>
+<span class="lineno">  513 </span>-- | Cache a resolved handle in the store under its id.
+<span class="lineno">  514 </span>cacheSession :: SessionStore -&gt; Core.SessionId -&gt; Session.SessionHandle -&gt; IO ()
+<span class="lineno">  515 </span><span class="decl"><span class="istickedoff">cacheSession store sid sh =</span>
+<span class="lineno">  516 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' store (\m -&gt; (Map.insert sid sh m, ()))</span></span>
+<span class="lineno">  517 </span>
+<span class="lineno">  518 </span>-- | Open a 'Session.SessionHandle' for an existing on-disk session id, rooted
+<span class="lineno">  519 </span>-- under the foreground session's sessions directory. Used only on the
+<span class="lineno">  520 </span>-- wizard-reopen fallback path (a 'BoundSession' whose handle was not minted by
+<span class="lineno">  521 </span>-- '_td_newDefaultSession' and is not the foreground session).
+<span class="lineno">  522 </span>--
+<span class="lineno">  523 </span>-- Resolves the REAL on-disk session via 'Session.resumeSession' — the same
+<span class="lineno">  524 </span>-- loader the CLI @--session@ resume and the @\/resume@ slash command use — so
+<span class="lineno">  525 </span>-- the handle carries the actual @session.json@ metadata (model, description,
+<span class="lineno">  526 </span>-- created\/last-active) and reopens the real @transcript.jsonl@ for append.
+<span class="lineno">  527 </span>-- This replaces the prior fabrication (which set @_sm_model = unSessionId sid@
+<span class="lineno">  528 </span>-- and @createdAt\/lastActive = now@ via 'baseProviderMeta'); that synthesized
+<span class="lineno">  529 </span>-- meta was then persisted by 'Session.setSourceIfAbsent' \/ 'saveMeta',
+<span class="lineno">  530 </span>-- corrupting the real @session.json@ (pureclaw-apv; #79).
+<span class="lineno">  531 </span>--
+<span class="lineno">  532 </span>-- On a resume failure (missing or corrupted @session.json@ — the session no
+<span class="lineno">  533 </span>-- longer exists or its metadata is unreadable) we log a warning and fall back
+<span class="lineno">  534 </span>-- to a freshly-minted handle. This does not corrupt a healthy session: resume
+<span class="lineno">  535 </span>-- only fails when there is no valid @session.json@ to preserve.
+<span class="lineno">  536 </span>openSessionFromDisk :: AgentEnv -&gt; Core.SessionId -&gt; IO Session.SessionHandle
+<span class="lineno">  537 </span><span class="decl"><span class="istickedoff">openSessionFromDisk env sid = do</span>
+<span class="lineno">  538 </span><span class="spaces">  </span><span class="istickedoff">dir &lt;- sessionsDirOf env</span>
+<span class="lineno">  539 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- Session.resumeSession (_env_broker env) <span class="nottickedoff">(_env_logger env)</span> dir sid</span>
+<span class="lineno">  540 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">  541 </span><span class="spaces">    </span><span class="istickedoff">Right sh -&gt; pure sh</span>
+<span class="lineno">  542 </span><span class="spaces">    </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  543 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn (_env_logger env) $</span></span>
+<span class="lineno">  544 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">&quot;Tabs.Wiring: could not resume wizard-reopened session &quot;</span></span>
+<span class="lineno">  545 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; Core.unSessionId sid &lt;&gt; &quot;: &quot; &lt;&gt; T.pack (show err)</span></span>
+<span class="lineno">  546 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; — falling back to a fresh session handle&quot;</span></span>
+<span class="lineno">  547 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">now &lt;- getCurrentTime</span></span>
+<span class="lineno">  548 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let meta = baseProviderMeta env now sid (ModelId (Core.unSessionId sid)) &quot;session&quot;</span></span>
+<span class="lineno">  549 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">Session.mkSessionHandle (_env_broker env) (_env_logger env) dir meta</span></span></span>
+<span class="lineno">  550 </span>
+<span class="lineno">  551 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  552 </span>-- TabDispatchDeps — built from the live AgentEnv
+<span class="lineno">  553 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  554 </span>
+<span class="lineno">  555 </span>-- | Build the per-conversation 'Dispatch.TabDispatchDeps' from the live
+<span class="lineno">  556 </span>-- 'AgentEnv': the runtime-binding seams are the 'Exec' ops applied to
+<span class="lineno">  557 </span>-- '_env_exec'; the emit seam writes a banner to the conversation's sink;
+<span class="lineno">  558 </span>-- '_td_newDefaultSession' mints a fresh default-provider session and caches its
+<span class="lineno">  559 </span>-- handle in @store@; the wizard candidate lists come from the harness registry
+<span class="lineno">  560 </span>-- and the sessions directory; '_td_fallthrough' handles non-tab slash commands.
+<span class="lineno">  561 </span>mkTabDispatchDeps
+<span class="lineno">  562 </span>  :: AgentEnv
+<span class="lineno">  563 </span>  -&gt; ExecDeps
+<span class="lineno">  564 </span>  -&gt; SessionStore
+<span class="lineno">  565 </span>  -&gt; (Core.SessionId -&gt; Maybe Text -&gt; IO (Either Text ()))
+<span class="lineno">  566 </span>     -- ^ The session-description seam threaded from the caller (built per
+<span class="lineno">  567 </span>     -- 'ServerMode' in &quot;PureClaw.CLI.Commands&quot;). Used by @\/rename@ on a
+<span class="lineno">  568 </span>     -- @BoundSession@ tab to set the session's canonical, cross-process name.
+<span class="lineno">  569 </span>  -&gt; Dispatch.TabDispatchDeps
+<span class="lineno">  570 </span><span class="decl"><span class="istickedoff">mkTabDispatchDeps env execDeps store setSessionDescription = TabDispatchDeps</span>
+<span class="lineno">  571 </span><span class="spaces">  </span><span class="istickedoff">{ _td_tabs              = _env_tabRegistry env</span>
+<span class="lineno">  572 </span><span class="spaces">  </span><span class="istickedoff">, _td_cursors           = _env_cursors env</span>
+<span class="lineno">  573 </span><span class="spaces">  </span><span class="istickedoff">, _td_wizard            = _env_wizard env</span>
+<span class="lineno">  574 </span><span class="spaces">  </span><span class="istickedoff">, _td_ensure            = ensure execDeps (_env_exec env)</span>
+<span class="lineno">  575 </span><span class="spaces">  </span><span class="istickedoff">, _td_release           = release (_env_exec env)</span>
+<span class="lineno">  576 </span><span class="spaces">  </span><span class="istickedoff">, _td_sendTo            = sendTo (_env_exec env)</span>
+<span class="lineno">  577 </span><span class="spaces">  </span><span class="istickedoff">, _td_emit              = emitToConversation env</span>
+<span class="lineno">  578 </span><span class="spaces">  </span><span class="istickedoff">, _td_newDefaultSession = mkNewDefaultSession env store</span>
+<span class="lineno">  579 </span><span class="spaces">  </span><span class="istickedoff">, _td_recentHarnesses   = recentHarnesses <span class="nottickedoff">env</span></span>
+<span class="lineno">  580 </span><span class="spaces">  </span><span class="istickedoff">, _td_recentSessions    = recentSessions <span class="nottickedoff">env</span></span>
+<span class="lineno">  581 </span><span class="spaces">  </span><span class="istickedoff">, _td_liveHarness       = liveHarness <span class="nottickedoff">env</span></span>
+<span class="lineno">  582 </span><span class="spaces">  </span><span class="istickedoff">, _td_relayDefault      = defaultRelayMode</span>
+<span class="lineno">  583 </span><span class="spaces">  </span><span class="istickedoff">, _td_routingConfig     = _env_routingConfig env</span>
+<span class="lineno">  584 </span><span class="spaces">  </span><span class="istickedoff">, _td_fallthrough       = fallthrough env store</span>
+<span class="lineno">  585 </span><span class="spaces">  </span><span class="istickedoff">, _td_onTabsChanged     = _env_onTabsChanged env</span>
+<span class="lineno">  586 </span><span class="spaces">  </span><span class="istickedoff">, _td_spawnHarness      = _env_startHarness env</span>
+<span class="lineno">  587 </span><span class="spaces">  </span><span class="istickedoff">, _td_setSessionDescription = setSessionDescription</span>
+<span class="lineno">  588 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  589 </span>
+<span class="lineno">  590 </span>-- | Emit a dispatcher banner\/reply to a conversation's registered sink. The
+<span class="lineno">  591 </span>-- CLI conversation's sink is '_env_channel'; a missing sink is a safe drop.
+<span class="lineno">  592 </span>emitToConversation :: AgentEnv -&gt; ConversationKey -&gt; Text -&gt; IO ()
+<span class="lineno">  593 </span><span class="decl"><span class="istickedoff">emitToConversation env convKey txt = do</span>
+<span class="lineno">  594 </span><span class="spaces">  </span><span class="istickedoff">mSink &lt;- lookupSinkFor env convKey</span>
+<span class="lineno">  595 </span><span class="spaces">  </span><span class="istickedoff">case mSink of</span>
+<span class="lineno">  596 </span><span class="spaces">    </span><span class="istickedoff">Just ch -&gt; _ch_send ch (OutgoingMessage txt)</span>
+<span class="lineno">  597 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span></span>
+<span class="lineno">  598 </span>
+<span class="lineno">  599 </span>-- | Look up a conversation's sink via the relay-writer registry.
+<span class="lineno">  600 </span>lookupSinkFor :: AgentEnv -&gt; ConversationKey -&gt; IO (Maybe ChannelHandle)
+<span class="lineno">  601 </span><span class="decl"><span class="istickedoff">lookupSinkFor env = lookupSink (_env_sinks env)</span></span>
+<span class="lineno">  602 </span>
+<span class="lineno">  603 </span>-- | Mint a fresh default-provider session, cache its handle in @store@, and
+<span class="lineno">  604 </span>-- return its 'BoundSession' ref. @'Left' msg@ when no default provider or
+<span class="lineno">  605 </span>-- model is configured; the message carries actionable setup guidance.
+<span class="lineno">  606 </span>mkNewDefaultSession :: AgentEnv -&gt; SessionStore -&gt; IO (Either Text TabRef)
+<span class="lineno">  607 </span><span class="decl"><span class="istickedoff">mkNewDefaultSession env store = do</span>
+<span class="lineno">  608 </span><span class="spaces">  </span><span class="istickedoff">mProvider &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">  609 </span><span class="spaces">  </span><span class="istickedoff">mModel    &lt;- readIORef (_env_model env)</span>
+<span class="lineno">  610 </span><span class="spaces">  </span><span class="istickedoff">case (mProvider, mModel) of</span>
+<span class="lineno">  611 </span><span class="spaces">    </span><span class="istickedoff">(Nothing, _) -&gt; pure (Left noProviderMsg)</span>
+<span class="lineno">  612 </span><span class="spaces">    </span><span class="istickedoff">(_, Nothing) -&gt; pure (Left noModelMsg)</span>
+<span class="lineno">  613 </span><span class="spaces">    </span><span class="istickedoff">(Just _, Just model) -&gt; do</span>
+<span class="lineno">  614 </span><span class="spaces">      </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">  615 </span><span class="spaces">      </span><span class="istickedoff">dir &lt;- sessionsDirOf env</span>
+<span class="lineno">  616 </span><span class="spaces">      </span><span class="istickedoff">let sid  = SessionTypes.newSessionId Nothing now</span>
+<span class="lineno">  617 </span><span class="spaces">          </span><span class="istickedoff">meta = baseProviderMeta env now sid model <span class="nottickedoff">&quot;session&quot;</span></span>
+<span class="lineno">  618 </span><span class="spaces">      </span><span class="istickedoff">sh &lt;- Session.mkSessionHandle (_env_broker env) <span class="nottickedoff">(_env_logger env)</span> dir meta</span>
+<span class="lineno">  619 </span><span class="spaces">      </span><span class="istickedoff">cacheSession store sid sh</span>
+<span class="lineno">  620 </span><span class="spaces">      </span><span class="istickedoff">pure (Right (BoundSession sid))</span></span>
+<span class="lineno">  621 </span>
+<span class="lineno">  622 </span>-- | Guidance emitted when no provider has been configured.
+<span class="lineno">  623 </span>noProviderMsg :: Text
+<span class="lineno">  624 </span><span class="decl"><span class="istickedoff">noProviderMsg =</span>
+<span class="lineno">  625 </span><span class="spaces">  </span><span class="istickedoff">&quot;No provider configured. To start chatting, configure your provider with:\n\n&quot;</span>
+<span class="lineno">  626 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;  /provider &lt;PROVIDER&gt;\n&quot;</span></span>
+<span class="lineno">  627 </span>
+<span class="lineno">  628 </span>-- | Guidance emitted when a provider is set but no model has been chosen.
+<span class="lineno">  629 </span>noModelMsg :: Text
+<span class="lineno">  630 </span><span class="decl"><span class="istickedoff">noModelMsg =</span>
+<span class="lineno">  631 </span><span class="spaces">  </span><span class="istickedoff">&quot;No model configured. Set a model with:\n\n&quot;</span>
+<span class="lineno">  632 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;  /target &lt;MODEL&gt;\n\n&quot;</span>
+<span class="lineno">  633 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;or add 'model = \&quot;&lt;model&gt;\&quot;' to your config file.&quot;</span></span>
+<span class="lineno">  634 </span>
+<span class="lineno">  635 </span>-- | A 'SessionTypes.SessionMeta' for a fresh provider-backed session.
+<span class="lineno">  636 </span>baseProviderMeta
+<span class="lineno">  637 </span>  :: AgentEnv
+<span class="lineno">  638 </span>  -&gt; UTCTime
+<span class="lineno">  639 </span>  -&gt; Core.SessionId
+<span class="lineno">  640 </span>  -&gt; ModelId
+<span class="lineno">  641 </span>  -&gt; Text
+<span class="lineno">  642 </span>  -&gt; SessionTypes.SessionMeta
+<span class="lineno">  643 </span><span class="decl"><span class="istickedoff">baseProviderMeta env now sid model _label =</span>
+<span class="lineno">  644 </span><span class="spaces">  </span><span class="istickedoff">SessionTypes.SessionMeta</span>
+<span class="lineno">  645 </span><span class="spaces">    </span><span class="istickedoff">{ SessionTypes._sm_id                = sid</span>
+<span class="lineno">  646 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_agent             = mAgent</span>
+<span class="lineno">  647 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_kind              = SessionTypes.SkProvider</span>
+<span class="lineno">  648 </span><span class="spaces">        </span><span class="istickedoff">(SessionTypes.ProviderSpec</span>
+<span class="lineno">  649 </span><span class="spaces">          </span><span class="istickedoff">(SessionTypes.inferProviderId (unModelId model)) model mAgent)</span>
+<span class="lineno">  650 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_model             = unModelId model</span>
+<span class="lineno">  651 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_channel           = &quot;cli&quot;</span>
+<span class="lineno">  652 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_createdAt         = now</span>
+<span class="lineno">  653 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_lastActive        = now</span>
+<span class="lineno">  654 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_bootstrapConsumed = False</span>
+<span class="lineno">  655 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_archived          = False</span>
+<span class="lineno">  656 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_description       = Nothing</span>
+<span class="lineno">  657 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_autoSummary       = Nothing</span>
+<span class="lineno">  658 </span><span class="spaces">    </span><span class="istickedoff">, SessionTypes._sm_source            = Nothing</span>
+<span class="lineno">  659 </span><span class="spaces">    </span><span class="istickedoff">}</span>
+<span class="lineno">  660 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  661 </span><span class="spaces">    </span><span class="istickedoff">mAgent = <span class="nottickedoff">AgentDef._ad_name</span> &lt;$&gt; _env_agentDef env</span></span>
+<span class="lineno">  662 </span>
+<span class="lineno">  663 </span>-- | The sessions directory: the parent of the foreground session's directory
+<span class="lineno">  664 </span>-- (the directory the frontend enumerates), falling back to
+<span class="lineno">  665 </span>-- 'Slash.getSessionsDir' when the foreground session has no on-disk dir.
+<span class="lineno">  666 </span>sessionsDirOf :: AgentEnv -&gt; IO FilePath
+<span class="lineno">  667 </span><span class="decl"><span class="istickedoff">sessionsDirOf env = do</span>
+<span class="lineno">  668 </span><span class="spaces">  </span><span class="istickedoff">sh &lt;- readIORef (_env_session env)</span>
+<span class="lineno">  669 </span><span class="spaces">  </span><span class="istickedoff">let dir = Session._sh_dir sh</span>
+<span class="lineno">  670 </span><span class="spaces">  </span><span class="istickedoff">if null dir then Slash.getSessionsDir else pure (takeDirectory dir)</span></span>
+<span class="lineno">  671 </span>
+<span class="lineno">  672 </span>-- | Running harnesses (id + label) for the @\/tab@ wizard menu.
+<span class="lineno">  673 </span>recentHarnesses :: AgentEnv -&gt; IO [(Registry.HarnessId, Text)]
+<span class="lineno">  674 </span><span class="decl"><span class="istickedoff">recentHarnesses env = do</span>
+<span class="lineno">  675 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- <span class="nottickedoff">Registry.snapshot (_env_harnessRegistry env)</span></span>
+<span class="lineno">  676 </span><span class="spaces">  </span><span class="istickedoff"><span class="nottickedoff">pure [ (Registry._he_id e, Registry._he_label e)</span></span>
+<span class="lineno">  677 </span><span class="spaces">       </span><span class="istickedoff"><span class="nottickedoff">| e &lt;- entries</span></span>
+<span class="lineno">  678 </span><span class="spaces">       </span><span class="istickedoff"><span class="nottickedoff">, isLive (Registry._he_liveness e)</span></span>
+<span class="lineno">  679 </span><span class="spaces">       </span><span class="istickedoff"><span class="nottickedoff">]</span></span></span>
+<span class="lineno">  680 </span>
+<span class="lineno">  681 </span>-- | Recent sessions (id + title) for the @\/tab@ wizard menu. Titles are
+<span class="lineno">  682 </span>-- computed by the shared 'Title.sessionTitle' so the TUI wizard and the web
+<span class="lineno">  683 </span>-- frontend display a session's name identically — including the
+<span class="lineno">  684 </span>-- first-message snippet fallback for sessions with no custom description
+<span class="lineno">  685 </span>-- (web parity).
+<span class="lineno">  686 </span>recentSessions :: AgentEnv -&gt; IO [(Core.SessionId, Text)]
+<span class="lineno">  687 </span><span class="decl"><span class="istickedoff">recentSessions env = do</span>
+<span class="lineno">  688 </span><span class="spaces">  </span><span class="istickedoff">dir   &lt;- sessionsDirOf env</span>
+<span class="lineno">  689 </span><span class="spaces">  </span><span class="istickedoff">metas &lt;- Session.listSessions dir Nothing 50</span>
+<span class="lineno">  690 </span><span class="spaces">  </span><span class="istickedoff">mapM (\m -&gt; (,) (SessionTypes._sm_id m) &lt;$&gt; Title.sessionTitle dir m) metas</span></span>
+<span class="lineno">  691 </span>
+<span class="lineno">  692 </span>-- | Liveness probe used by the wizard when a harness pick is resolved.
+<span class="lineno">  693 </span>liveHarness :: AgentEnv -&gt; Registry.HarnessId -&gt; IO Bool
+<span class="lineno">  694 </span><span class="decl"><span class="nottickedoff">liveHarness env hid = do</span>
+<span class="lineno">  695 </span><span class="spaces">  </span><span class="nottickedoff">mEntry &lt;- Registry.lookupById (_env_harnessRegistry env) hid</span>
+<span class="lineno">  696 </span><span class="spaces">  </span><span class="nottickedoff">pure (maybe False (isLive . Registry._he_liveness) mEntry)</span></span>
+<span class="lineno">  697 </span>
+<span class="lineno">  698 </span>-- | Whether a registry 'Registry.Liveness' counts as a live harness for the
+<span class="lineno">  699 </span>-- wizard menu (anything that is not 'Registry.Exited').
+<span class="lineno">  700 </span>isLive :: Registry.Liveness -&gt; Bool
+<span class="lineno">  701 </span><span class="decl"><span class="nottickedoff">isLive = \case</span>
+<span class="lineno">  702 </span><span class="spaces">  </span><span class="nottickedoff">Registry.LivenessExited -&gt; False</span>
+<span class="lineno">  703 </span><span class="spaces">  </span><span class="nottickedoff">_                       -&gt; True</span></span>
+<span class="lineno">  704 </span>
+<span class="lineno">  705 </span>-- | Handle a non-tab slash command (the routing grammar's
+<span class="lineno">  706 </span>-- 'RT.ParsedSlashCmd'): the legacy slash-command surface (@\/help@, @\/status@,
+<span class="lineno">  707 </span>-- @\/provider@, @\/vault@, …) still runs through 'Slash.executeSlashCommand',
+<span class="lineno">  708 </span>-- which emits to '_env_channel' — the CLI conversation's registered sink — so
+<span class="lineno">  709 </span>-- all non-tab commands behave exactly as before the flip.
+<span class="lineno">  710 </span>--
+<span class="lineno">  711 </span>-- @\/bg@ is special-cased: 'Slash.executeSlashCommand' only stubs it (it has no
+<span class="lineno">  712 </span>-- dispatcher), so the tabbed loop forks a self-contained background turn
+<span class="lineno">  713 </span>-- ('runBg') instead, matching the legacy loop's @\/bg@ handling.
+<span class="lineno">  714 </span>--
+<span class="lineno">  715 </span>-- The per-call 'Ctx.Context' is SEEDED from the conversation's ACTIVE bound
+<span class="lineno">  716 </span>-- session transcript ('seedSlashContext' over 'activeBoundSession'): the
+<span class="lineno">  717 </span>-- recent-message window plus the cumulative token usage. This is what
+<span class="lineno">  718 </span>-- @\/status@ (message count, context estimate, total tokens) and @\/compact@
+<span class="lineno">  719 </span>-- read — the live runtime worker keeps those in its own private 'Ctx.Context'
+<span class="lineno">  720 </span>-- the slash path cannot reach, so without seeding every count reads zero
+<span class="lineno">  721 </span>-- (pureclaw-25k). When there is no active session\/tab (or a harness ref) the
+<span class="lineno">  722 </span>-- context falls back to empty, the pre-fix behaviour. Most other fallthrough
+<span class="lineno">  723 </span>-- commands (help\/config\/provider\/…) ignore the context entirely, so seeding
+<span class="lineno">  724 </span>-- is harmless for them.
+<span class="lineno">  725 </span>fallthrough
+<span class="lineno">  726 </span>  :: AgentEnv -&gt; SessionStore -&gt; ConversationKey -&gt; Slash.SlashCommand -&gt; IO ()
+<span class="lineno">  727 </span><span class="decl"><span class="istickedoff">fallthrough env store convKey cmd = case cmd of</span>
+<span class="lineno">  728 </span><span class="spaces">  </span><span class="istickedoff">Slash.CmdBg prompt -&gt; do</span>
+<span class="lineno">  729 </span><span class="spaces">    </span><span class="istickedoff">_ch_send (_env_channel env)</span>
+<span class="lineno">  730 </span><span class="spaces">      </span><span class="istickedoff">(OutgoingMessage</span>
+<span class="lineno">  731 </span><span class="spaces">        </span><span class="istickedoff">&quot;\x1F504 /bg: running in the background \x2014 the result will appear here when ready.&quot;)</span>
+<span class="lineno">  732 </span><span class="spaces">    </span><span class="istickedoff">_ &lt;- _env_fork env (runBg <span class="nottickedoff">env</span> <span class="nottickedoff">prompt</span>)</span>
+<span class="lineno">  733 </span><span class="spaces">    </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  734 </span><span class="spaces">  </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  735 </span><span class="spaces">    </span><span class="istickedoff">ctx &lt;- slashContext env store convKey</span>
+<span class="lineno">  736 </span><span class="spaces">    </span><span class="istickedoff">_ &lt;- Slash.executeSlashCommand env cmd ctx</span>
+<span class="lineno">  737 </span><span class="spaces">    </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  738 </span>
+<span class="lineno">  739 </span>-- | The 'Ctx.Context' a fallthrough slash command runs against: seeded from the
+<span class="lineno">  740 </span>-- conversation's active bound session transcript when one exists, else an empty
+<span class="lineno">  741 </span>-- context carrying the env system prompt (the pre-fix fallback). See
+<span class="lineno">  742 </span>-- 'fallthrough' and 'seedSlashContext' (pureclaw-25k).
+<span class="lineno">  743 </span>slashContext :: AgentEnv -&gt; SessionStore -&gt; ConversationKey -&gt; IO Ctx.Context
+<span class="lineno">  744 </span><span class="decl"><span class="istickedoff">slashContext env store convKey = do</span>
+<span class="lineno">  745 </span><span class="spaces">  </span><span class="istickedoff">mSh &lt;- activeBoundSession env store convKey</span>
+<span class="lineno">  746 </span><span class="spaces">  </span><span class="istickedoff">case mSh of</span>
+<span class="lineno">  747 </span><span class="spaces">    </span><span class="istickedoff">Just sh -&gt; seedSlashContext env (Session._sh_transcript sh)</span>
+<span class="lineno">  748 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure (Ctx.emptyContext (_env_systemPrompt env))</span></span>
+<span class="lineno">  749 </span>
+<span class="lineno">  750 </span>-- | Fork a @\/bg@ background turn. Re-exported from the loop so the tabbed
+<span class="lineno">  751 </span>-- fallthrough preserves @\/bg@ semantics without importing the whole loop's
+<span class="lineno">  752 </span>-- internals. The result is pushed directly to the conversation channel by
+<span class="lineno">  753 </span>-- 'runBackgroundTurn'.
+<span class="lineno">  754 </span>runBg :: AgentEnv -&gt; Text -&gt; IO ()
+<span class="lineno">  755 </span><span class="decl"><span class="istickedoff">runBg = Loop.runBackgroundTurn</span></span>
+
+</pre>
+</body>
+</html>

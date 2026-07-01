@@ -1,0 +1,195 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Backend.Pty.Fake
+<span class="lineno">    3 </span>-- Description : Deterministic in-process 'PtyIO' for tests (WU7).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- This module is the second (and final) member of the @posix-pty@
+<span class="lineno">    6 </span>-- firewall — it can import the internal accessors of 'PtyFds' from
+<span class="lineno">    7 </span>-- &quot;PureClaw.Backend.Pty&quot; but, like 'PureClaw.Backend.Pty', the CI gate
+<span class="lineno">    8 </span>-- @scripts\/check-pty-firewall.sh@ keeps the rest of the codebase out.
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- A 'fakePtyIO' is driven by a 'FakePtyConfig' that scripts the bytes
+<span class="lineno">   11 </span>-- a PTY read will yield; the write\/resize\/close calls are recorded
+<span class="lineno">   12 </span>-- to 'IORef's for test introspection.
+<span class="lineno">   13 </span>module PureClaw.Backend.Pty.Fake
+<span class="lineno">   14 </span>  ( FakePtyConfig (..)
+<span class="lineno">   15 </span>  , fakePtyIO
+<span class="lineno">   16 </span>  , readFakeWriteLog
+<span class="lineno">   17 </span>  , readFakeResizeLog
+<span class="lineno">   18 </span>  , readFakeClosed
+<span class="lineno">   19 </span>  , readFakeBytesRead
+<span class="lineno">   20 </span>  ) where
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>import Data.ByteString (ByteString)
+<span class="lineno">   23 </span>import Data.ByteString qualified as BS
+<span class="lineno">   24 </span>import Control.Concurrent (threadDelay)
+<span class="lineno">   25 </span>import Data.IORef
+<span class="lineno">   26 </span>  ( atomicModifyIORef'
+<span class="lineno">   27 </span>  , newIORef
+<span class="lineno">   28 </span>  , readIORef
+<span class="lineno">   29 </span>  , writeIORef
+<span class="lineno">   30 </span>  )
+<span class="lineno">   31 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>import PureClaw.Backend.Pty
+<span class="lineno">   34 </span>  ( FakePtyState (..)
+<span class="lineno">   35 </span>  , PtyFds
+<span class="lineno">   36 </span>  , PtyIO (..)
+<span class="lineno">   37 </span>  , PtyOpenSpec
+<span class="lineno">   38 </span>  , mkFakePtyFds
+<span class="lineno">   39 </span>  , withFakePtyState
+<span class="lineno">   40 </span>  )
+<span class="lineno">   41 </span>import PureClaw.Handles.Backend (Cols, Rows)
+<span class="lineno">   42 </span>import PureClaw.Internal.FakeClock (FakeClock)
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>-- | Construction-time configuration for 'fakePtyIO'.
+<span class="lineno">   45 </span>--
+<span class="lineno">   46 </span>-- '_fpc_outputScript' is the sequence of chunks the next N
+<span class="lineno">   47 </span>-- @_pio_read@ calls will yield, in order. Once the script is
+<span class="lineno">   48 </span>-- exhausted (and '_fpc_eofAfterBytes' is reached, if set), @_pio_read@
+<span class="lineno">   49 </span>-- returns 'BS.empty' to signal EOF — which the drainer turns into an
+<span class="lineno">   50 </span>-- 'RsEof' on its queue.
+<span class="lineno">   51 </span>data FakePtyConfig = FakePtyConfig
+<span class="lineno">   52 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_fpc_clock</span></span></span>         :: !FakeClock
+<span class="lineno">   53 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fpc_initialOutput</span></span></span> :: !ByteString
+<span class="lineno">   54 </span>    -- ^ A single chunk emitted from the very first @_pio_read@ call
+<span class="lineno">   55 </span>    -- (placed at the head of the read queue at open-time). Empty
+<span class="lineno">   56 </span>    -- means: no initial chunk.
+<span class="lineno">   57 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fpc_eofAfterBytes</span></span></span> :: !(Maybe Int)
+<span class="lineno">   58 </span>    -- ^ Optional cap: once this many bytes have been read,
+<span class="lineno">   59 </span>    -- subsequent @_pio_read@ calls return 'BS.empty' (EOF) regardless
+<span class="lineno">   60 </span>    -- of any remaining script.
+<span class="lineno">   61 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fpc_outputScript</span></span></span>  :: ![ByteString]
+<span class="lineno">   62 </span>    -- ^ Subsequent chunks emitted on each @_pio_read@ call.
+<span class="lineno">   63 </span>  }
+<span class="lineno">   64 </span>
+<span class="lineno">   65 </span>-- | Allocate a 'PtyIO' backed by in-process 'IORef's.
+<span class="lineno">   66 </span>--
+<span class="lineno">   67 </span>-- Each call to 'fakePtyIO' produces a fresh, independent set of
+<span class="lineno">   68 </span>-- 'IORef' state via 'PtyOpenSpec'-time setup in @_pio_open@. The
+<span class="lineno">   69 </span>-- returned 'PtyIO' is safe to share across multiple opens, but the
+<span class="lineno">   70 </span>-- 'IORef' state is per-open — every @_pio_open@ allocates new refs.
+<span class="lineno">   71 </span>fakePtyIO :: FakePtyConfig -&gt; IO PtyIO
+<span class="lineno">   72 </span><span class="decl"><span class="istickedoff">fakePtyIO cfg = pure PtyIO</span>
+<span class="lineno">   73 </span><span class="spaces">  </span><span class="istickedoff">{ _pio_open   = fakeOpen</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="istickedoff">, _pio_read   = fakeRead</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">, _pio_write  = fakeWrite</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="istickedoff">, _pio_resize = <span class="nottickedoff">fakeResize</span></span>
+<span class="lineno">   77 </span><span class="spaces">  </span><span class="istickedoff">, _pio_close  = fakeClose</span>
+<span class="lineno">   78 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   80 </span><span class="spaces">    </span><span class="istickedoff">fakeOpen :: PtyOpenSpec -&gt; IO PtyFds</span>
+<span class="lineno">   81 </span><span class="spaces">    </span><span class="istickedoff">fakeOpen _spec = do</span>
+<span class="lineno">   82 </span><span class="spaces">      </span><span class="istickedoff">let initial = _fpc_initialOutput cfg</span>
+<span class="lineno">   83 </span><span class="spaces">          </span><span class="istickedoff">script  = _fpc_outputScript cfg</span>
+<span class="lineno">   84 </span><span class="spaces">          </span><span class="istickedoff">chunks  = if <span class="tickonlytrue">BS.null initial</span> then script else <span class="nottickedoff">initial : script</span></span>
+<span class="lineno">   85 </span><span class="spaces">      </span><span class="istickedoff">rq &lt;- newIORef chunks</span>
+<span class="lineno">   86 </span><span class="spaces">      </span><span class="istickedoff">wl &lt;- newIORef <span class="nottickedoff">[]</span></span>
+<span class="lineno">   87 </span><span class="spaces">      </span><span class="istickedoff">rl &lt;- newIORef <span class="nottickedoff">[]</span></span>
+<span class="lineno">   88 </span><span class="spaces">      </span><span class="istickedoff">cl &lt;- newIORef False</span>
+<span class="lineno">   89 </span><span class="spaces">      </span><span class="istickedoff">ea &lt;- newIORef (_fpc_eofAfterBytes cfg)</span>
+<span class="lineno">   90 </span><span class="spaces">      </span><span class="istickedoff">br &lt;- newIORef 0</span>
+<span class="lineno">   91 </span><span class="spaces">      </span><span class="istickedoff">pure $ mkFakePtyFds FakePtyState</span>
+<span class="lineno">   92 </span><span class="spaces">        </span><span class="istickedoff">{ _fps_readQueue = rq</span>
+<span class="lineno">   93 </span><span class="spaces">        </span><span class="istickedoff">, _fps_writeLog  = wl</span>
+<span class="lineno">   94 </span><span class="spaces">        </span><span class="istickedoff">, _fps_resizeLog = rl</span>
+<span class="lineno">   95 </span><span class="spaces">        </span><span class="istickedoff">, _fps_closed    = cl</span>
+<span class="lineno">   96 </span><span class="spaces">        </span><span class="istickedoff">, _fps_eofAfter  = ea</span>
+<span class="lineno">   97 </span><span class="spaces">        </span><span class="istickedoff">, _fps_bytesRead = br</span>
+<span class="lineno">   98 </span><span class="spaces">        </span><span class="istickedoff">, _fps_clock     = _fpc_clock cfg</span>
+<span class="lineno">   99 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  100 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  101 </span><span class="spaces">    </span><span class="istickedoff">fakeRead :: PtyFds -&gt; Int -&gt; IO ByteString</span>
+<span class="lineno">  102 </span><span class="spaces">    </span><span class="istickedoff">fakeRead fds _ = do</span>
+<span class="lineno">  103 </span><span class="spaces">      </span><span class="istickedoff">mResult &lt;- withFakePtyState fds $ \st -&gt; do</span>
+<span class="lineno">  104 </span><span class="spaces">        </span><span class="istickedoff">closed &lt;- readIORef (_fps_closed st)</span>
+<span class="lineno">  105 </span><span class="spaces">        </span><span class="istickedoff">if closed</span>
+<span class="lineno">  106 </span><span class="spaces">          </span><span class="istickedoff">then pure BS.empty</span>
+<span class="lineno">  107 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">  108 </span><span class="spaces">            </span><span class="istickedoff">mEof  &lt;- readIORef (_fps_eofAfter st)</span>
+<span class="lineno">  109 </span><span class="spaces">            </span><span class="istickedoff">sofar &lt;- readIORef (_fps_bytesRead st)</span>
+<span class="lineno">  110 </span><span class="spaces">            </span><span class="istickedoff">let pastCap = case mEof of</span>
+<span class="lineno">  111 </span><span class="spaces">                  </span><span class="istickedoff">Just cap -&gt; sofar &gt;= cap</span>
+<span class="lineno">  112 </span><span class="spaces">                  </span><span class="istickedoff">Nothing  -&gt; False</span>
+<span class="lineno">  113 </span><span class="spaces">            </span><span class="istickedoff">if pastCap</span>
+<span class="lineno">  114 </span><span class="spaces">              </span><span class="istickedoff">then pure BS.empty</span>
+<span class="lineno">  115 </span><span class="spaces">              </span><span class="istickedoff">else do</span>
+<span class="lineno">  116 </span><span class="spaces">                </span><span class="istickedoff">next &lt;- atomicModifyIORef' (_fps_readQueue st) $ \case</span>
+<span class="lineno">  117 </span><span class="spaces">                  </span><span class="istickedoff">[]      -&gt; ([], Nothing)</span>
+<span class="lineno">  118 </span><span class="spaces">                  </span><span class="istickedoff">(x:xs)  -&gt; (xs, Just x)</span>
+<span class="lineno">  119 </span><span class="spaces">                </span><span class="istickedoff">case next of</span>
+<span class="lineno">  120 </span><span class="spaces">                  </span><span class="istickedoff">Just bs -&gt; do</span>
+<span class="lineno">  121 </span><span class="spaces">                    </span><span class="istickedoff">atomicModifyIORef' (_fps_bytesRead st) $ \n -&gt;</span>
+<span class="lineno">  122 </span><span class="spaces">                      </span><span class="istickedoff">(n + BS.length bs, ())</span>
+<span class="lineno">  123 </span><span class="spaces">                    </span><span class="istickedoff">pure bs</span>
+<span class="lineno">  124 </span><span class="spaces">                  </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  125 </span><span class="spaces">                    </span><span class="istickedoff">-- Script exhausted but no EOF cap reached:</span>
+<span class="lineno">  126 </span><span class="spaces">                    </span><span class="istickedoff">-- block forever so the drainer\'s read sits</span>
+<span class="lineno">  127 </span><span class="spaces">                    </span><span class="istickedoff">-- waiting (mirroring a quiet real PTY). Polled</span>
+<span class="lineno">  128 </span><span class="spaces">                    </span><span class="istickedoff">-- on a coarse 50ms tick so cancellation from the</span>
+<span class="lineno">  129 </span><span class="spaces">                    </span><span class="istickedoff">-- drainer's 'Async.cancel' lands promptly.</span>
+<span class="lineno">  130 </span><span class="spaces">                    </span><span class="istickedoff">case mEof of</span>
+<span class="lineno">  131 </span><span class="spaces">                      </span><span class="istickedoff">Just _  -&gt; <span class="nottickedoff">pure BS.empty</span> -- EOF cap set: signal EOF</span>
+<span class="lineno">  132 </span><span class="spaces">                      </span><span class="istickedoff">Nothing -&gt; blockForever</span>
+<span class="lineno">  133 </span><span class="spaces">      </span><span class="istickedoff">pure (fromMaybe <span class="nottickedoff">BS.empty</span> mResult)</span>
+<span class="lineno">  134 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  135 </span><span class="spaces">    </span><span class="istickedoff">blockForever :: IO ByteString</span>
+<span class="lineno">  136 </span><span class="spaces">    </span><span class="istickedoff">blockForever = do</span>
+<span class="lineno">  137 </span><span class="spaces">      </span><span class="istickedoff">threadDelay 50_000</span>
+<span class="lineno">  138 </span><span class="spaces">      </span><span class="istickedoff">blockForever</span>
+<span class="lineno">  139 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  140 </span><span class="spaces">    </span><span class="istickedoff">fakeWrite :: PtyFds -&gt; ByteString -&gt; IO ()</span>
+<span class="lineno">  141 </span><span class="spaces">    </span><span class="istickedoff">fakeWrite fds bs = do</span>
+<span class="lineno">  142 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- withFakePtyState fds $ \st -&gt;</span>
+<span class="lineno">  143 </span><span class="spaces">        </span><span class="istickedoff">atomicModifyIORef' (_fps_writeLog st) $ \xs -&gt; (<span class="nottickedoff">bs</span> : <span class="nottickedoff">xs</span>, ())</span>
+<span class="lineno">  144 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  145 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  146 </span><span class="spaces">    </span><span class="istickedoff">fakeResize :: PtyFds -&gt; Cols -&gt; Rows -&gt; IO ()</span>
+<span class="lineno">  147 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">fakeResize fds c r = do</span></span>
+<span class="lineno">  148 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- withFakePtyState fds $ \st -&gt;</span></span>
+<span class="lineno">  149 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">atomicModifyIORef' (_fps_resizeLog st) $ \xs -&gt; ((c, r) : xs, ())</span></span>
+<span class="lineno">  150 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  151 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="istickedoff">fakeClose :: PtyFds -&gt; IO ()</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="istickedoff">fakeClose fds = do</span>
+<span class="lineno">  154 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- withFakePtyState fds $ \st -&gt;</span>
+<span class="lineno">  155 </span><span class="spaces">        </span><span class="istickedoff">writeIORef (_fps_closed st) True</span>
+<span class="lineno">  156 </span><span class="spaces">      </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  157 </span>
+<span class="lineno">  158 </span>-- | Read the recorded write log (newest-first).
+<span class="lineno">  159 </span>readFakeWriteLog :: FakePtyState -&gt; IO [ByteString]
+<span class="lineno">  160 </span><span class="decl"><span class="nottickedoff">readFakeWriteLog = readIORef . _fps_writeLog</span></span>
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>-- | Read the recorded resize log (newest-first).
+<span class="lineno">  163 </span>readFakeResizeLog :: FakePtyState -&gt; IO [(Cols, Rows)]
+<span class="lineno">  164 </span><span class="decl"><span class="nottickedoff">readFakeResizeLog = readIORef . _fps_resizeLog</span></span>
+<span class="lineno">  165 </span>
+<span class="lineno">  166 </span>-- | Has @_pio_close@ been called on this state?
+<span class="lineno">  167 </span>readFakeClosed :: FakePtyState -&gt; IO Bool
+<span class="lineno">  168 </span><span class="decl"><span class="nottickedoff">readFakeClosed = readIORef . _fps_closed</span></span>
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Total bytes ever returned from @_pio_read@.
+<span class="lineno">  171 </span>readFakeBytesRead :: FakePtyState -&gt; IO Int
+<span class="lineno">  172 </span><span class="decl"><span class="nottickedoff">readFakeBytesRead = readIORef . _fps_bytesRead</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.Registry
+<span class="lineno">    3 </span>-- Description : Pure tab CRUD over the AgentEnv's tab map (Tabbed Chat WU3).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- This module owns the in-memory tab registry — an
+<span class="lineno">    6 </span>-- @'IORef' ('IntMap' 'TabHandle')@ stored as
+<span class="lineno">    7 </span>-- 'PureClaw.Agent.Env._env_tabs'. Functions here are deliberately
+<span class="lineno">    8 </span>-- minimal: lookup, insert (rejecting the in-use case), remove, and a
+<span class="lineno">    9 </span>-- @lowestFreeIndex@ helper used by the auto-spawn path.
+<span class="lineno">   10 </span>--
+<span class="lineno">   11 </span>-- No factory dispatch (that belongs to 'PureClaw.Routing.Dispatcher',
+<span class="lineno">   12 </span>-- WU5), no spawning, no async exception discipline, no side effects
+<span class="lineno">   13 </span>-- beyond reading\/writing the supplied 'IORef'.
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- See @docs\/tabbed-chat.md@ §\&quot;Registry &amp; AgentEnv (E-series)\&quot; for
+<span class="lineno">   16 </span>-- the design context.
+<span class="lineno">   17 </span>module PureClaw.Routing.Registry
+<span class="lineno">   18 </span>  ( -- * Pure tab CRUD
+<span class="lineno">   19 </span>    lookupTab
+<span class="lineno">   20 </span>  , insertTab
+<span class="lineno">   21 </span>  , removeTab
+<span class="lineno">   22 </span>  , lowestFreeIndex
+<span class="lineno">   23 </span>    -- * tmux-style packing helper
+<span class="lineno">   24 </span>  , packAfterRemove
+<span class="lineno">   25 </span>  ) where
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>import Data.IORef (IORef, atomicModifyIORef', readIORef)
+<span class="lineno">   28 </span>import Data.IntMap.Strict (IntMap)
+<span class="lineno">   29 </span>import Data.IntMap.Strict qualified as IntMap
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>import PureClaw.Handles.Tab (TabError (..), TabHandle, TabIndex, mkTabIndex, unTabIndex)
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>-- | Look up a tab by index. Returns 'Nothing' if no tab is registered
+<span class="lineno">   34 </span>-- at that slot.
+<span class="lineno">   35 </span>lookupTab :: IORef (IntMap TabHandle) -&gt; TabIndex -&gt; IO (Maybe TabHandle)
+<span class="lineno">   36 </span><span class="decl"><span class="istickedoff">lookupTab ref idx = do</span>
+<span class="lineno">   37 </span><span class="spaces">  </span><span class="istickedoff">m &lt;- readIORef ref</span>
+<span class="lineno">   38 </span><span class="spaces">  </span><span class="istickedoff">pure (IntMap.lookup (unTabIndex idx) m)</span></span>
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | Insert a tab handle at the given index. Returns
+<span class="lineno">   41 </span>-- @'Left' ('TabIndexInUse' idx)@ if the slot is already occupied
+<span class="lineno">   42 </span>-- (callers must explicitly call 'removeTab' first if they want to
+<span class="lineno">   43 </span>-- replace an existing tab).
+<span class="lineno">   44 </span>insertTab :: IORef (IntMap TabHandle) -&gt; TabIndex -&gt; TabHandle
+<span class="lineno">   45 </span>          -&gt; IO (Either TabError ())
+<span class="lineno">   46 </span><span class="decl"><span class="istickedoff">insertTab ref idx h =</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">   48 </span><span class="spaces">    </span><span class="istickedoff">case IntMap.lookup (unTabIndex idx) m of</span>
+<span class="lineno">   49 </span><span class="spaces">      </span><span class="istickedoff">Just _  -&gt; (m, Left (TabIndexInUse idx))</span>
+<span class="lineno">   50 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; (IntMap.insert (unTabIndex idx) h m, Right ())</span></span>
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>-- | Remove the tab at the given index. Returns the removed handle (or
+<span class="lineno">   53 </span>-- 'Nothing' if no tab was present). The caller is responsible for
+<span class="lineno">   54 </span>-- running any kind-specific close logic on the returned handle.
+<span class="lineno">   55 </span>removeTab :: IORef (IntMap TabHandle) -&gt; TabIndex -&gt; IO (Maybe TabHandle)
+<span class="lineno">   56 </span><span class="decl"><span class="istickedoff">removeTab ref idx =</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">case IntMap.lookup (unTabIndex idx) m of</span>
+<span class="lineno">   59 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; (m, Nothing)</span>
+<span class="lineno">   60 </span><span class="spaces">      </span><span class="istickedoff">Just h  -&gt; (IntMap.delete (unTabIndex idx) m, Just h)</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Find the smallest non-negative 'TabIndex' that is strictly less
+<span class="lineno">   63 </span>-- than the supplied @maxN@ ceiling AND is not currently occupied.
+<span class="lineno">   64 </span>-- Returns 'Nothing' when every slot @0 .. maxN-1@ is taken (or when
+<span class="lineno">   65 </span>-- @maxN &lt;= 0@).
+<span class="lineno">   66 </span>--
+<span class="lineno">   67 </span>-- The expected caller is the auto-spawn path (WU9): given the
+<span class="lineno">   68 </span>-- routing config's @_rc_maxTabs@, find a slot for a new tab.
+<span class="lineno">   69 </span>lowestFreeIndex :: IORef (IntMap TabHandle) -&gt; Int -&gt; IO (Maybe TabIndex)
+<span class="lineno">   70 </span><span class="decl"><span class="istickedoff">lowestFreeIndex ref maxN</span>
+<span class="lineno">   71 </span><span class="spaces">  </span><span class="istickedoff">| maxN &lt;= 0 = pure Nothing</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">   73 </span><span class="spaces">      </span><span class="istickedoff">m &lt;- readIORef ref</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">pure (firstFree m 0 maxN)</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   76 </span><span class="spaces">    </span><span class="istickedoff">firstFree m n limit</span>
+<span class="lineno">   77 </span><span class="spaces">      </span><span class="istickedoff">| n &gt;= limit         = Nothing</span>
+<span class="lineno">   78 </span><span class="spaces">      </span><span class="istickedoff">| IntMap.member n m  = firstFree m (n + 1) limit</span>
+<span class="lineno">   79 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>          = mkTabIndex n</span></span>
+<span class="lineno">   80 </span>
+<span class="lineno">   81 </span>-- | Pure variant of the tmux-style \&quot;renumber-windows\&quot; pass: given a
+<span class="lineno">   82 </span>-- map whose entry at index @k@ has already been removed, shift every
+<span class="lineno">   83 </span>-- entry strictly greater than @k@ down by one key. Keys @\&lt; k@ are
+<span class="lineno">   84 </span>-- left untouched.
+<span class="lineno">   85 </span>--
+<span class="lineno">   86 </span>-- This is a no-op when no key exceeds @k@. The pass is value-preserving
+<span class="lineno">   87 </span>-- (only keys are remapped); duplicates cannot arise because the
+<span class="lineno">   88 </span>-- pre-shift map has unique keys and the shift is monotone.
+<span class="lineno">   89 </span>packAfterRemove :: Int -&gt; IntMap a -&gt; IntMap a
+<span class="lineno">   90 </span><span class="decl"><span class="istickedoff">packAfterRemove k =</span>
+<span class="lineno">   91 </span><span class="spaces">  </span><span class="istickedoff">-- Walk in ascending order so the destination key for an entry is</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">-- always free by the time we write it (the previous entry at that</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">-- key was either removed or also shifted down).</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">IntMap.foldlWithKey'</span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">(\acc i v -&gt;</span>
+<span class="lineno">   96 </span><span class="spaces">       </span><span class="istickedoff">if i &gt; k</span>
+<span class="lineno">   97 </span><span class="spaces">         </span><span class="istickedoff">then IntMap.insert (i - 1) v acc</span>
+<span class="lineno">   98 </span><span class="spaces">         </span><span class="istickedoff">else IntMap.insert i v acc)</span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">IntMap.empty</span></span>
+
+</pre>
+</body>
+</html>

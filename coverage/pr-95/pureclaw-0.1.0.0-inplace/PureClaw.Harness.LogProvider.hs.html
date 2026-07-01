@@ -1,0 +1,431 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | Turn-content provider seam (Harness log content source — Task 4) plus the
+<span class="lineno">    2 </span>-- recorded-id dedup helpers + the tailer driving loop (Task 5).
+<span class="lineno">    3 </span>--
+<span class="lineno">    4 </span>-- A 'TurnProvider' is the source of a harness turn's text, a finalize signal,
+<span class="lineno">    5 </span>-- and an optional stable turn id, consumed by the reconcile loop's
+<span class="lineno">    6 </span>-- content-driven turn watcher ('PureClaw.Harness.Reconcile.stepTurns'). It
+<span class="lineno">    7 </span>-- decouples /where/ a turn's text comes from (tmux screen capture today, the
+<span class="lineno">    8 </span>-- claude JSONL log later) from the loop that streams + finalizes it.
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- This module is a LEAF below &quot;PureClaw.Harness.Reconcile&quot; for the provider
+<span class="lineno">   11 </span>-- seam — it must NOT import Reconcile for that purpose (Reconcile imports this
+<span class="lineno">   12 </span>-- for 'TurnProvider'). The Task-5 helpers ('recordOnce', 'seedRecordedIds',
+<span class="lineno">   13 </span>-- 'runLogTailer') live here too; 'recordOnce' wraps the record closure and only
+<span class="lineno">   14 </span>-- references 'mkTurnEntry'/'TranscriptEntry' types, not the loop, so no cycle is
+<span class="lineno">   15 </span>-- introduced.
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- == The two built-in providers
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>--   * 'tmuxProvider' — preserves today's behavior VERBATIM: the turn text is
+<span class="lineno">   20 </span>--     the handle's '_hh_snapshotTurn', it never finalizes itself
+<span class="lineno">   21 </span>--     (@finalized = False@), and it derives no id (@_tp_turnId = pure Nothing@,
+<span class="lineno">   22 </span>--     so the loop falls back to its '_rd_mintTurn'). The tmux path stays
+<span class="lineno">   23 </span>--     byte-identical.
+<span class="lineno">   24 </span>--   * 'nullProvider' — a handle-less entry: empty text, never finalizes, no
+<span class="lineno">   25 </span>--     derived id.
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- == Idempotent replay (Task 5)
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- The durable transcript write path is append-only with no upsert, so dedup
+<span class="lineno">   30 </span>-- must happen in front of the record call. 'seedRecordedIds' loads the set of
+<span class="lineno">   31 </span>-- '_te_id's already on disk at tailer startup (via the UNTRIMMED
+<span class="lineno">   32 </span>-- @_th_query emptyFilter@ — not 'loadRecentMessages', which trims at compaction
+<span class="lineno">   33 </span>-- boundaries and could miss a pre-boundary id). 'recordOnce' refuses to record
+<span class="lineno">   34 </span>-- a turn whose derived id is already in that set and adds each newly-recorded id
+<span class="lineno">   35 </span>-- to it. Because the log provider's turn id is deterministic from durable JSONL
+<span class="lineno">   36 </span>-- bytes, a turn re-folded after a crash/restart derives the SAME id, which is
+<span class="lineno">   37 </span>-- already disk-seeded → skipped (no duplicate).
+<span class="lineno">   38 </span>--
+<span class="lineno">   39 </span>-- == The tailer driver (Task 5)
+<span class="lineno">   40 </span>--
+<span class="lineno">   41 </span>-- 'runLogTailer' is the driving loop around 'tailStep': poll and forward each
+<span class="lineno">   42 </span>-- 'ProseTurn' to a sink. No tail offset is persisted across (re)starts — on
+<span class="lineno">   43 </span>-- every (re)start it seeks to EOF ('seekStart' … 'Nothing'); replay correctness
+<span class="lineno">   44 </span>-- rests entirely on the disk-seeded recorded-id set ('seedRecordedIds' +
+<span class="lineno">   45 </span>-- 'recordOnce'), not on a saved byte offset. It
+<span class="lineno">   46 </span>-- treats 'TailUnavailable' as TERMINAL — a loud WARN + STOP so the harness falls
+<span class="lineno">   47 </span>-- back to the tmux provider — because 'tailStep' returns the UNCHANGED offset on
+<span class="lineno">   48 </span>-- a cap trip, so re-looping would spin forever. It runs the loop under
+<span class="lineno">   49 </span>-- 'Async.withAsync' and re-raises 'SomeAsyncException' (not only
+<span class="lineno">   50 </span>-- 'AsyncCancelled') on teardown per the recurring darwin-CI-hang invariant.
+<span class="lineno">   51 </span>module PureClaw.Harness.LogProvider
+<span class="lineno">   52 </span>  ( -- * Turn-content provider seam
+<span class="lineno">   53 </span>    TurnProvider (..)
+<span class="lineno">   54 </span>  , tmuxProvider
+<span class="lineno">   55 </span>  , nullProvider
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>    -- * Log provider over a shared tail state
+<span class="lineno">   58 </span>  , LogTurnState (..)
+<span class="lineno">   59 </span>  , emptyLogTurnState
+<span class="lineno">   60 </span>  , applyProseTurn
+<span class="lineno">   61 </span>  , mkLogTurnProvider
+<span class="lineno">   62 </span>
+<span class="lineno">   63 </span>    -- * Cached provider selection (no per-tick decode/WARN spam)
+<span class="lineno">   64 </span>  , LogProviderState (..)
+<span class="lineno">   65 </span>  , ResolveInputs (..)
+<span class="lineno">   66 </span>  , selectLogProvider
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>    -- * Recorded-id dedup (idempotent replay)
+<span class="lineno">   69 </span>  , seedRecordedIds
+<span class="lineno">   70 </span>  , recordOnce
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>    -- * Tailer driver
+<span class="lineno">   73 </span>  , runLogTailer
+<span class="lineno">   74 </span>  ) where
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>import Control.Concurrent (threadDelay)
+<span class="lineno">   77 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   78 </span>import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
+<span class="lineno">   79 </span>import Control.Monad qualified as Monad
+<span class="lineno">   80 </span>import Data.IORef (IORef, atomicModifyIORef', modifyIORef', readIORef)
+<span class="lineno">   81 </span>import Data.Map.Strict (Map)
+<span class="lineno">   82 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   83 </span>import Data.Set (Set)
+<span class="lineno">   84 </span>import Data.Set qualified as Set
+<span class="lineno">   85 </span>import Data.Text (Text)
+<span class="lineno">   86 </span>import Data.Text qualified as T
+<span class="lineno">   87 </span>import Data.Time (UTCTime)
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>import PureClaw.Core.Types (SessionId)
+<span class="lineno">   90 </span>import PureClaw.Handles.Harness (HarnessHandle (..))
+<span class="lineno">   91 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   92 </span>import PureClaw.Handles.Transcript (TranscriptHandle (..))
+<span class="lineno">   93 </span>import PureClaw.Harness.ClaudeLogPath
+<span class="lineno">   94 </span>  ( ClaudeLogPathError (..)
+<span class="lineno">   95 </span>  , SafeClaudeLogPath
+<span class="lineno">   96 </span>  )
+<span class="lineno">   97 </span>import PureClaw.Harness.ClaudeLogProse
+<span class="lineno">   98 </span>  ( ProseTurn (..)
+<span class="lineno">   99 </span>  , deriveTurnId
+<span class="lineno">  100 </span>  , emptyProseState
+<span class="lineno">  101 </span>  )
+<span class="lineno">  102 </span>import PureClaw.Harness.ClaudeLogTail
+<span class="lineno">  103 </span>  ( JsonlTailDeps
+<span class="lineno">  104 </span>  , TailCaps
+<span class="lineno">  105 </span>  , TailEvent (..)
+<span class="lineno">  106 </span>  , seekStart
+<span class="lineno">  107 </span>  , tailStep
+<span class="lineno">  108 </span>  )
+<span class="lineno">  109 </span>import PureClaw.Harness.JsonlTail (emptyBuffer)
+<span class="lineno">  110 </span>import PureClaw.Transcript.Types (TranscriptEntry (..), emptyFilter)
+<span class="lineno">  111 </span>
+<span class="lineno">  112 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  113 </span>-- Turn-content provider seam
+<span class="lineno">  114 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  115 </span>
+<span class="lineno">  116 </span>-- | The source of a harness turn's content for the reconcile loop.
+<span class="lineno">  117 </span>--
+<span class="lineno">  118 </span>--   * '_tp_snapshot' returns @(currentTurnText, finalized?)@. @finalized == True@
+<span class="lineno">  119 </span>--     is an authoritative finalize that bypasses the loop's idle-stability guard.
+<span class="lineno">  120 </span>--   * '_tp_turnId' returns @Just (derivedId, ts)@ to pin a stable id + the
+<span class="lineno">  121 </span>--     turn's timestamp (the log provider derives both from the JSONL event), or
+<span class="lineno">  122 </span>--     'Nothing' to fall back to the loop's @_rd_mintTurn :: IO (Text, UTCTime)@.
+<span class="lineno">  123 </span>--     Carrying the timestamp avoids a second clock call — 'mkTurnEntry' needs
+<span class="lineno">  124 </span>--     both the id AND a 'UTCTime'.
+<span class="lineno">  125 </span>data TurnProvider = TurnProvider
+<span class="lineno">  126 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tp_snapshot</span></span></span> :: IO (Text, Bool)
+<span class="lineno">  127 </span>    -- ^ @(currentTurnText, finalized?)@
+<span class="lineno">  128 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tp_turnId</span></span></span>   :: IO (Maybe (Text, UTCTime))
+<span class="lineno">  129 </span>    -- ^ @Just (derivedId, ts)@ for the log provider; 'Nothing' → fall back to
+<span class="lineno">  130 </span>    --   @_rd_mintTurn@.
+<span class="lineno">  131 </span>  }
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | The tmux content provider: text from '_hh_snapshotTurn', never finalizes,
+<span class="lineno">  134 </span>-- derives no id. Preserves today's tmux behavior verbatim.
+<span class="lineno">  135 </span>tmuxProvider :: HarnessHandle -&gt; TurnProvider
+<span class="lineno">  136 </span><span class="decl"><span class="istickedoff">tmuxProvider hh = TurnProvider</span>
+<span class="lineno">  137 </span><span class="spaces">  </span><span class="istickedoff">{ _tp_snapshot = (,) &lt;$&gt; _hh_snapshotTurn hh &lt;*&gt; pure False</span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="istickedoff">, _tp_turnId   = pure Nothing</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>-- | A provider for a handle-less entry: empty text, never finalizes, no id.
+<span class="lineno">  142 </span>nullProvider :: TurnProvider
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">nullProvider = TurnProvider</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">{ _tp_snapshot = pure (&quot;&quot;, False)</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">, _tp_turnId   = pure Nothing</span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  149 </span>-- Log provider over a shared tail state
+<span class="lineno">  150 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | The mutable state shared between the tailer (writer) and the log
+<span class="lineno">  153 </span>-- 'TurnProvider' (reader): the current turn's text, its finalize flag, and its
+<span class="lineno">  154 </span>-- pinned @(derivedId, timestamp)@ (Nothing until the first assistant line of a
+<span class="lineno">  155 </span>-- turn arrives).
+<span class="lineno">  156 </span>data LogTurnState = LogTurnState
+<span class="lineno">  157 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_lts_text</span></span></span>      :: !Text
+<span class="lineno">  158 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_lts_finalized</span></span></span> :: !Bool
+<span class="lineno">  159 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_lts_turnId</span></span></span>    :: !(Maybe (Text, UTCTime))
+<span class="lineno">  160 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>-- | The initial empty turn state.
+<span class="lineno">  163 </span>emptyLogTurnState :: LogTurnState
+<span class="lineno">  164 </span><span class="decl"><span class="istickedoff">emptyLogTurnState = LogTurnState</span>
+<span class="lineno">  165 </span><span class="spaces">  </span><span class="istickedoff">{ _lts_text      = &quot;&quot;</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">, _lts_finalized = False</span>
+<span class="lineno">  167 </span><span class="spaces">  </span><span class="istickedoff">, _lts_turnId    = Nothing</span>
+<span class="lineno">  168 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Fold a freshly-yielded 'ProseTurn' into the shared state. The derived id is
+<span class="lineno">  171 </span>-- @deriveTurnId sessionId (_pt_sourceUuid)@ — deterministic from durable JSONL
+<span class="lineno">  172 </span>-- bytes (the first assistant line's uuid), pinned with the supplied event
+<span class="lineno">  173 </span>-- timestamp @ts@. The text + finalize flag track the latest 'ProseTurn'.
+<span class="lineno">  174 </span>applyProseTurn :: Text -&gt; UTCTime -&gt; ProseTurn -&gt; LogTurnState -&gt; LogTurnState
+<span class="lineno">  175 </span><span class="decl"><span class="istickedoff">applyProseTurn sessionId ts pt _prev = LogTurnState</span>
+<span class="lineno">  176 </span><span class="spaces">  </span><span class="istickedoff">{ _lts_text      = _pt_text pt</span>
+<span class="lineno">  177 </span><span class="spaces">  </span><span class="istickedoff">, _lts_finalized = _pt_finalized pt</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="istickedoff">, _lts_turnId    = Just (deriveTurnId sessionId (_pt_sourceUuid pt), ts)</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- | A log 'TurnProvider' that reads the shared 'LogTurnState' IORef. The tailer
+<span class="lineno">  182 </span>-- sink writes the IORef (via 'applyProseTurn'); the reconcile loop reads it.
+<span class="lineno">  183 </span>mkLogTurnProvider :: IORef LogTurnState -&gt; TurnProvider
+<span class="lineno">  184 </span><span class="decl"><span class="istickedoff">mkLogTurnProvider ref = TurnProvider</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">{ _tp_snapshot = do</span>
+<span class="lineno">  186 </span><span class="spaces">      </span><span class="istickedoff">s &lt;- readIORef ref</span>
+<span class="lineno">  187 </span><span class="spaces">      </span><span class="istickedoff">pure (_lts_text s, _lts_finalized s)</span>
+<span class="lineno">  188 </span><span class="spaces">  </span><span class="istickedoff">, _tp_turnId = _lts_turnId &lt;$&gt; readIORef ref</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  190 </span>
+<span class="lineno">  191 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  192 </span>-- Cached provider selection (no per-tick decode/WARN spam)
+<span class="lineno">  193 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  194 </span>
+<span class="lineno">  195 </span>-- | Per-harness cached selection state. The reconcile loop runs the selector
+<span class="lineno">  196 </span>-- every tick (~2s) for every bound entry; without a cache a freshly-spawned
+<span class="lineno">  197 </span>-- claude harness — which has NO JSONL file until its first output — would
+<span class="lineno">  198 </span>-- re-decode @session.json@, re-resolve the base, and re-attempt (and re-WARN)
+<span class="lineno">  199 </span>-- on every tick for the entire pre-first-output window. These three states make
+<span class="lineno">  200 </span>-- that cheap and quiet:
+<span class="lineno">  201 </span>--
+<span class="lineno">  202 </span>--   * 'LpResolved' — success: the log tailer has engaged; return the cached
+<span class="lineno">  203 </span>--     log 'TurnProvider' as-is.
+<span class="lineno">  204 </span>--   * 'LpPending' — a valid @claude-code@ harness whose log file is not present
+<span class="lineno">  205 </span>--     YET (a 'ClaudeLogNotFound', the NORMAL pre-output state). Caches a CHEAP
+<span class="lineno">  206 </span>--     re-attempt closure (only 'mkSafeClaudeLogPath' — the validated uuid\/base
+<span class="lineno">  207 </span>--     are already closed over), so subsequent ticks do NOT re-decode
+<span class="lineno">  208 </span>--     @session.json@ and do NOT WARN, yet the provider still ENGAGES the moment
+<span class="lineno">  209 </span>--     the JSONL appears (a later 'Right' transitions to 'LpResolved').
+<span class="lineno">  210 </span>--   * 'LpFallback' — permanently the tmux\/null fallback: not @claude-code@, no
+<span class="lineno">  211 </span>--     or invalid uuid, OR a genuine (non-not-found) resolution error. WARNed at
+<span class="lineno">  212 </span>--     most once; the input resolver is never re-run.
+<span class="lineno">  213 </span>data LogProviderState
+<span class="lineno">  214 </span>  = LpResolved !TurnProvider
+<span class="lineno">  215 </span>  | LpPending !(IO (Either ClaudeLogPathError SafeClaudeLogPath))
+<span class="lineno">  216 </span>  | LpFallback
+<span class="lineno">  217 </span>
+<span class="lineno">  218 </span>-- | Outcome of the one-time \&quot;resolve inputs\&quot; phase (decode @session.json@,
+<span class="lineno">  219 </span>-- resolve the claude base). Keeps the expensive\/fragile input resolution OUT
+<span class="lineno">  220 </span>-- of the per-tick path: it runs once, and its result is cached as either a
+<span class="lineno">  221 </span>-- permanent 'LpFallback' or a cheap re-attemptable 'LpPending'\/'LpResolved'.
+<span class="lineno">  222 </span>data ResolveInputs
+<span class="lineno">  223 </span>  = -- | Not a resolvable @claude-code@ log source (not @claude-code@, no uuid,
+<span class="lineno">  224 </span>    -- invalid uuid). Carries the one-shot WARN text. Cached as 'LpFallback'.
+<span class="lineno">  225 </span>    RiFallback !Text
+<span class="lineno">  226 </span>  | -- | The inputs are valid; carries a CHEAP re-attempt closure that only
+<span class="lineno">  227 </span>    -- re-runs 'mkSafeClaudeLogPath' (no @session.json@ decode, no base
+<span class="lineno">  228 </span>    -- re-resolution). Its first result is classified by 'selectLogProvider':
+<span class="lineno">  229 </span>    -- 'Right' → engage ('LpResolved'); 'Left' 'ClaudeLogNotFound' → 'LpPending'
+<span class="lineno">  230 </span>    -- (re-attempt next tick, no WARN); any other 'Left' → 'LpFallback' (WARN
+<span class="lineno">  231 </span>    -- once).
+<span class="lineno">  232 </span>    RiReady !(IO (Either ClaudeLogPathError SafeClaudeLogPath))
+<span class="lineno">  233 </span>
+<span class="lineno">  234 </span>-- | True for the one error that means \&quot;the log just is not on disk yet\&quot; — the
+<span class="lineno">  235 </span>-- expected, transient pre-first-output state. Every OTHER error
+<span class="lineno">  236 </span>-- (ambiguity, symlink escape, owner\/mode) is a genuine fault that must NOT be
+<span class="lineno">  237 </span>-- treated as Pending (it would re-attempt forever); those become 'LpFallback'.
+<span class="lineno">  238 </span>isNotFound :: ClaudeLogPathError -&gt; Bool
+<span class="lineno">  239 </span><span class="decl"><span class="istickedoff">isNotFound (ClaudeLogNotFound _) = True</span>
+<span class="lineno">  240 </span><span class="spaces"></span><span class="istickedoff">isNotFound _                     = False</span></span>
+<span class="lineno">  241 </span>
+<span class="lineno">  242 </span>-- | Choose the turn-content provider for one entry, caching the decision per
+<span class="lineno">  243 </span>-- key so the per-tick path neither re-decodes inputs nor WARN-spams.
+<span class="lineno">  244 </span>--
+<span class="lineno">  245 </span>-- On a cache HIT: 'LpResolved' returns the cached provider; 'LpFallback'
+<span class="lineno">  246 </span>-- returns @fallback@ (no work, no WARN); 'LpPending' cheaply RE-ATTEMPTS via the
+<span class="lineno">  247 </span>-- cached closure — on 'Right' it transitions to 'LpResolved' (engage), on a
+<span class="lineno">  248 </span>-- still-not-found 'Left' it stays Pending and returns @fallback@ WITHOUT
+<span class="lineno">  249 </span>-- WARNing, and on a genuine non-not-found 'Left' it transitions to 'LpFallback'
+<span class="lineno">  250 </span>-- (WARN once).
+<span class="lineno">  251 </span>--
+<span class="lineno">  252 </span>-- On a cache MISS: run the one-time @resolveInputs@. 'RiFallback' caches
+<span class="lineno">  253 </span>-- 'LpFallback' and WARNs once; 'RiReady' runs the cheap attempt once and
+<span class="lineno">  254 </span>-- classifies it exactly as the Pending re-attempt does.
+<span class="lineno">  255 </span>--
+<span class="lineno">  256 </span>-- @engage@ is the IO that seeds the recorded-id set, starts the tailer Async,
+<span class="lineno">  257 </span>-- and builds the log 'TurnProvider' (run at most once, on the first 'Right').
+<span class="lineno">  258 </span>selectLogProvider
+<span class="lineno">  259 </span>  :: Ord k
+<span class="lineno">  260 </span>  =&gt; IORef (Map k LogProviderState)
+<span class="lineno">  261 </span>  -&gt; k
+<span class="lineno">  262 </span>  -&gt; TurnProvider
+<span class="lineno">  263 </span>  -- ^ tmux\/null fallback provider for this entry
+<span class="lineno">  264 </span>  -&gt; IO ResolveInputs
+<span class="lineno">  265 </span>  -- ^ one-time input resolution (decode @session.json@, resolve base)
+<span class="lineno">  266 </span>  -&gt; (SafeClaudeLogPath -&gt; IO TurnProvider)
+<span class="lineno">  267 </span>  -- ^ engage on the first 'Right': seed + start tailer + build provider
+<span class="lineno">  268 </span>  -&gt; (Text -&gt; IO ())
+<span class="lineno">  269 </span>  -- ^ WARN sink (fired at most once per key)
+<span class="lineno">  270 </span>  -&gt; IO TurnProvider
+<span class="lineno">  271 </span><span class="decl"><span class="istickedoff">selectLogProvider cacheRef key fallback resolveInputs engage warn = do</span>
+<span class="lineno">  272 </span><span class="spaces">  </span><span class="istickedoff">cached &lt;- Map.lookup key &lt;$&gt; readIORef cacheRef</span>
+<span class="lineno">  273 </span><span class="spaces">  </span><span class="istickedoff">case cached of</span>
+<span class="lineno">  274 </span><span class="spaces">    </span><span class="istickedoff">Just (LpResolved p) -&gt; pure p</span>
+<span class="lineno">  275 </span><span class="spaces">    </span><span class="istickedoff">Just LpFallback     -&gt; pure <span class="nottickedoff">fallback</span></span>
+<span class="lineno">  276 </span><span class="spaces">    </span><span class="istickedoff">Just (LpPending reattempt) -&gt; reattempt &gt;&gt;= classify reattempt</span>
+<span class="lineno">  277 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  278 </span><span class="spaces">      </span><span class="istickedoff">ri &lt;- resolveInputs</span>
+<span class="lineno">  279 </span><span class="spaces">      </span><span class="istickedoff">case ri of</span>
+<span class="lineno">  280 </span><span class="spaces">        </span><span class="istickedoff">RiFallback warnTxt -&gt; do</span>
+<span class="lineno">  281 </span><span class="spaces">          </span><span class="istickedoff">modifyIORef' cacheRef (Map.insert key LpFallback)</span>
+<span class="lineno">  282 </span><span class="spaces">          </span><span class="istickedoff">warn warnTxt</span>
+<span class="lineno">  283 </span><span class="spaces">          </span><span class="istickedoff">pure fallback</span>
+<span class="lineno">  284 </span><span class="spaces">        </span><span class="istickedoff">RiReady reattempt -&gt;</span>
+<span class="lineno">  285 </span><span class="spaces">          </span><span class="istickedoff">reattempt &gt;&gt;= classify reattempt</span>
+<span class="lineno">  286 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  287 </span><span class="spaces">    </span><span class="istickedoff">-- Classify one attempt result, transitioning the cache + (at most once)</span>
+<span class="lineno">  288 </span><span class="spaces">    </span><span class="istickedoff">-- WARNing. A genuine fault transitions to 'LpFallback' exactly once per key</span>
+<span class="lineno">  289 </span><span class="spaces">    </span><span class="istickedoff">-- — whether reached on the first attempt (cache miss) or on a later Pending</span>
+<span class="lineno">  290 </span><span class="spaces">    </span><span class="istickedoff">-- re-attempt — so the WARN here fires at most once per key.</span>
+<span class="lineno">  291 </span><span class="spaces">    </span><span class="istickedoff">classify reattempt = \case</span>
+<span class="lineno">  292 </span><span class="spaces">      </span><span class="istickedoff">Right safePath -&gt; do</span>
+<span class="lineno">  293 </span><span class="spaces">        </span><span class="istickedoff">prov &lt;- engage <span class="nottickedoff">safePath</span></span>
+<span class="lineno">  294 </span><span class="spaces">        </span><span class="istickedoff">modifyIORef' cacheRef (Map.insert key (LpResolved prov))</span>
+<span class="lineno">  295 </span><span class="spaces">        </span><span class="istickedoff">pure prov</span>
+<span class="lineno">  296 </span><span class="spaces">      </span><span class="istickedoff">Left err</span>
+<span class="lineno">  297 </span><span class="spaces">        </span><span class="istickedoff">| isNotFound err -&gt; do</span>
+<span class="lineno">  298 </span><span class="spaces">            </span><span class="istickedoff">-- Expected pre-output state: stay Pending, re-attempt next tick,</span>
+<span class="lineno">  299 </span><span class="spaces">            </span><span class="istickedoff">-- NO WARN. (Idempotent re-insert keeps the closure cached.)</span>
+<span class="lineno">  300 </span><span class="spaces">            </span><span class="istickedoff">modifyIORef' cacheRef (Map.insert key (LpPending reattempt))</span>
+<span class="lineno">  301 </span><span class="spaces">            </span><span class="istickedoff">pure fallback</span>
+<span class="lineno">  302 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; do</span>
+<span class="lineno">  303 </span><span class="spaces">            </span><span class="istickedoff">modifyIORef' cacheRef (Map.insert key LpFallback)</span>
+<span class="lineno">  304 </span><span class="spaces">            </span><span class="istickedoff">warn <span class="nottickedoff">(faultWarn err)</span></span>
+<span class="lineno">  305 </span><span class="spaces">            </span><span class="istickedoff">pure fallback</span>
+<span class="lineno">  306 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  307 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">faultWarn err =</span></span>
+<span class="lineno">  308 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">&quot;harness log unavailable (&quot; &lt;&gt; textShow err &lt;&gt; &quot;) — falling back to tmux&quot;</span></span></span>
+<span class="lineno">  309 </span>
+<span class="lineno">  310 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  311 </span>-- Recorded-id dedup (idempotent replay)
+<span class="lineno">  312 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  313 </span>
+<span class="lineno">  314 </span>-- | Seed the recorded-id set from this session's on-disk transcript at tailer
+<span class="lineno">  315 </span>-- startup. Reads EVERY entry via the UNTRIMMED @_th_query emptyFilter@ (NOT
+<span class="lineno">  316 </span>-- 'loadRecentMessages', which trims to the last compaction boundary and could
+<span class="lineno">  317 </span>-- miss a pre-boundary id, re-introducing a duplicate on replay).
+<span class="lineno">  318 </span>seedRecordedIds :: TranscriptHandle -&gt; IO (Set Text)
+<span class="lineno">  319 </span><span class="decl"><span class="istickedoff">seedRecordedIds th =</span>
+<span class="lineno">  320 </span><span class="spaces">  </span><span class="istickedoff">Set.fromList . map _te_id &lt;$&gt; _th_query th emptyFilter</span></span>
+<span class="lineno">  321 </span>
+<span class="lineno">  322 </span>-- | Record a turn at most once. If the entry's '_te_id' is already in the
+<span class="lineno">  323 </span>-- (disk-seeded, mutable) set, skip the record entirely; otherwise record via
+<span class="lineno">  324 </span>-- the supplied append action and insert the id. The reconcile loop is
+<span class="lineno">  325 </span>-- single-threaded, so check-set → record → add-id is atomic w.r.t. itself.
+<span class="lineno">  326 </span>recordOnce
+<span class="lineno">  327 </span>  :: IORef (Set Text)
+<span class="lineno">  328 </span>  -&gt; (SessionId -&gt; TranscriptEntry -&gt; IO ())
+<span class="lineno">  329 </span>  -&gt; SessionId
+<span class="lineno">  330 </span>  -&gt; TranscriptEntry
+<span class="lineno">  331 </span>  -&gt; IO ()
+<span class="lineno">  332 </span><span class="decl"><span class="istickedoff">recordOnce ref record sid entry = do</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">let tid = _te_id entry</span>
+<span class="lineno">  334 </span><span class="spaces">  </span><span class="istickedoff">-- atomicModifyIORef' returns whether the id was newly inserted; only then do</span>
+<span class="lineno">  335 </span><span class="spaces">  </span><span class="istickedoff">-- we record. Insert-before-record so a re-entrant call for the same id during</span>
+<span class="lineno">  336 </span><span class="spaces">  </span><span class="istickedoff">-- the record (impossible in the single-threaded loop, but cheap to be safe)</span>
+<span class="lineno">  337 </span><span class="spaces">  </span><span class="istickedoff">-- still dedups.</span>
+<span class="lineno">  338 </span><span class="spaces">  </span><span class="istickedoff">isNew &lt;- atomicModifyIORef' ref $ \s -&gt;</span>
+<span class="lineno">  339 </span><span class="spaces">    </span><span class="istickedoff">if Set.member tid s</span>
+<span class="lineno">  340 </span><span class="spaces">      </span><span class="istickedoff">then (s, False)</span>
+<span class="lineno">  341 </span><span class="spaces">      </span><span class="istickedoff">else (Set.insert tid s, True)</span>
+<span class="lineno">  342 </span><span class="spaces">  </span><span class="istickedoff">Monad.when isNew (record <span class="nottickedoff">sid</span> entry)</span></span>
+<span class="lineno">  343 </span>
+<span class="lineno">  344 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  345 </span>-- Tailer driver
+<span class="lineno">  346 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  347 </span>
+<span class="lineno">  348 </span>-- | Poll interval between tail steps (250 ms).
+<span class="lineno">  349 </span>tailerPollMicros :: Int
+<span class="lineno">  350 </span><span class="decl"><span class="istickedoff">tailerPollMicros = 250 * 1000</span></span>
+<span class="lineno">  351 </span>
+<span class="lineno">  352 </span>-- | Drive 'tailStep' in a loop, forwarding each yielded 'ProseTurn' to @sink@.
+<span class="lineno">  353 </span>--
+<span class="lineno">  354 </span>-- Runs the loop body under 'Async.withAsync' so a teardown cancellation is
+<span class="lineno">  355 </span>-- delivered as an async exception; 'SomeAsyncException' is RE-RAISED (not only
+<span class="lineno">  356 </span>-- 'AsyncCancelled') per the darwin-CI-hang invariant, while a logged
+<span class="lineno">  357 </span>-- non-async exception terminates the loop cleanly.
+<span class="lineno">  358 </span>--
+<span class="lineno">  359 </span>-- 'TailUnavailable' is TERMINAL: a loud WARN + STOP (so the harness falls back
+<span class="lineno">  360 </span>-- to the tmux provider). 'tailStep' returns the UNCHANGED offset on a cap trip,
+<span class="lineno">  361 </span>-- so re-looping on the same bytes would spin forever — hence we never re-loop
+<span class="lineno">  362 </span>-- on it.
+<span class="lineno">  363 </span>runLogTailer
+<span class="lineno">  364 </span>  :: JsonlTailDeps
+<span class="lineno">  365 </span>  -&gt; TailCaps
+<span class="lineno">  366 </span>  -&gt; LogHandle
+<span class="lineno">  367 </span>  -&gt; SafeClaudeLogPath
+<span class="lineno">  368 </span>  -&gt; (ProseTurn -&gt; IO ())
+<span class="lineno">  369 </span>  -&gt; IO ()
+<span class="lineno">  370 </span><span class="decl"><span class="istickedoff">runLogTailer deps caps logH path sink =</span>
+<span class="lineno">  371 </span><span class="spaces">  </span><span class="istickedoff">Async.withAsync loop $ \a -&gt; do</span>
+<span class="lineno">  372 </span><span class="spaces">    </span><span class="istickedoff">r &lt;- try (Async.wait a)</span>
+<span class="lineno">  373 </span><span class="spaces">    </span><span class="istickedoff">case r of</span>
+<span class="lineno">  374 </span><span class="spaces">      </span><span class="istickedoff">Right () -&gt; pure ()</span>
+<span class="lineno">  375 </span><span class="spaces">      </span><span class="istickedoff">Left e</span>
+<span class="lineno">  376 </span><span class="spaces">        </span><span class="istickedoff">-- Re-raise async exceptions (cancellation/shutdown) so teardown is not</span>
+<span class="lineno">  377 </span><span class="spaces">        </span><span class="istickedoff">-- swallowed (darwin-CI-hang invariant).</span>
+<span class="lineno">  378 </span><span class="spaces">        </span><span class="istickedoff">| Just ae &lt;- fromException e -&gt; throwIO <span class="nottickedoff">(ae :: SomeAsyncException)</span></span>
+<span class="lineno">  379 </span><span class="spaces">        </span><span class="istickedoff">-- A non-async exception terminates the loop; log it and stop.</span>
+<span class="lineno">  380 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; _lh_logWarn logH</span>
+<span class="lineno">  381 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">(&quot;claude log tailer error: &quot; &lt;&gt; textShow (e :: SomeException))</span></span>
+<span class="lineno">  382 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  383 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  384 </span><span class="spaces">      </span><span class="istickedoff">-- No persisted offset: 'Nothing' seeks to EOF on every (re)start. Replay</span>
+<span class="lineno">  385 </span><span class="spaces">      </span><span class="istickedoff">-- correctness rests on the disk-seeded recorded-id set, not a saved</span>
+<span class="lineno">  386 </span><span class="spaces">      </span><span class="istickedoff">-- offset (see this module's header).</span>
+<span class="lineno">  387 </span><span class="spaces">      </span><span class="istickedoff">off0 &lt;- seekStart deps path Nothing</span>
+<span class="lineno">  388 </span><span class="spaces">      </span><span class="istickedoff">go (off0, emptyBuffer, emptyProseState)</span>
+<span class="lineno">  389 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  390 </span><span class="spaces">    </span><span class="istickedoff">go st = do</span>
+<span class="lineno">  391 </span><span class="spaces">      </span><span class="istickedoff">(st', evs) &lt;- tailStep deps caps path st</span>
+<span class="lineno">  392 </span><span class="spaces">      </span><span class="istickedoff">if any isUnavailable evs</span>
+<span class="lineno">  393 </span><span class="spaces">        </span><span class="istickedoff">then _lh_logWarn logH</span>
+<span class="lineno">  394 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">&quot;claude log unavailable for harness — falling back to tmux&quot;</span></span>
+<span class="lineno">  395 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  396 </span><span class="spaces">          </span><span class="istickedoff">mapM_ emit evs</span>
+<span class="lineno">  397 </span><span class="spaces">          </span><span class="istickedoff">threadDelay tailerPollMicros</span>
+<span class="lineno">  398 </span><span class="spaces">          </span><span class="istickedoff">go st'</span>
+<span class="lineno">  399 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  400 </span><span class="spaces">    </span><span class="istickedoff">emit (TailProse pt) = sink pt</span>
+<span class="lineno">  401 </span><span class="spaces">    </span><span class="istickedoff">emit TailUnavailable = <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  402 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  403 </span><span class="spaces">    </span><span class="istickedoff">isUnavailable TailUnavailable = True</span>
+<span class="lineno">  404 </span><span class="spaces">    </span><span class="istickedoff">isUnavailable (TailProse _)   = False</span></span>
+<span class="lineno">  405 </span>
+<span class="lineno">  406 </span>-- Local helper to render an exception as 'Text'.
+<span class="lineno">  407 </span>textShow :: Show a =&gt; a -&gt; Text
+<span class="lineno">  408 </span><span class="decl"><span class="nottickedoff">textShow = T.pack . show</span></span>
+
+</pre>
+</body>
+</html>

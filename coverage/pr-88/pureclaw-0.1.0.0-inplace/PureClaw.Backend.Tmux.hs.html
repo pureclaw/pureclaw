@@ -1,0 +1,670 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Backend.Tmux
+<span class="lineno">    3 </span>-- Description : Tmux Attach backend factory (WU10).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- == Overview
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- 'mkTmuxBackendHandle' produces a 'Pty'-kind 'BackendHandle' that
+<span class="lineno">    8 </span>-- attaches to a __pre-existing__ tmux window — either via a local
+<span class="lineno">    9 </span>-- @tmux attach-session@ inside a PTY or via @ssh -tt user\@host tmux
+<span class="lineno">   10 </span>-- attach-session@ inside a PTY. The factory never creates the window;
+<span class="lineno">   11 </span>-- if the target session\/window does not exist at construction time it
+<span class="lineno">   12 </span>-- returns @Left (BackendTmuxTargetMissing _)@ and spawns no further
+<span class="lineno">   13 </span>-- subprocesses.
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>-- == Two phases at construction
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- 1. __Pin-resolve__ (TOCTOU mitigation, design doc § &quot;Pinning to
+<span class="lineno">   18 </span>--    stable ids&quot;). Run @tmux display-message -p -t \'sess:win\'
+<span class="lineno">   19 </span>--    \'#{window_id}\'@ as a one-shot (NOT a PTY); validate the stdout
+<span class="lineno">   20 </span>--    against @^@[0-9]+$@. The pinned @@@@ID@ is what subsequent
+<span class="lineno">   21 </span>--    @attach-session@ targets use. If a human later destroys and
+<span class="lineno">   22 </span>--    re-creates the same-named window, the pinned @@@@ID@ will be
+<span class="lineno">   23 </span>--    stale and the optional mid-session probe (DoD #21) surfaces a
+<span class="lineno">   24 </span>--    'BackendBrokenTmuxTarget' rather than silently writing to the
+<span class="lineno">   25 </span>--    new window.
+<span class="lineno">   26 </span>-- 2. __Attach__. Spawn the tmux client inside a PTY via
+<span class="lineno">   27 </span>--    'mkDrainerBackendHandle'. For 'LocalHost' the spawned program is
+<span class="lineno">   28 </span>--    the local tmux binary; for 'RemoteHost' the spawned program is
+<span class="lineno">   29 </span>--    ssh, with the remote tmux argv composed via
+<span class="lineno">   30 </span>--    'PureClaw.Backend.SSH.buildSshArgv'.
+<span class="lineno">   31 </span>--
+<span class="lineno">   32 </span>-- == Detach-only close
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- '_bh_close' writes the tmux detach key sequence (Ctrl-B @d@ — bytes
+<span class="lineno">   35 </span>-- @[0x02, 0x64]@) into the existing PTY and then calls the inner
+<span class="lineno">   36 </span>-- handle's close. It does NOT open a new ssh hop, NOT issue
+<span class="lineno">   37 </span>-- @kill-window@\/@kill-session@\/@kill-pane@. A pre-existing window
+<span class="lineno">   38 </span>-- survives close. Idempotent and never throws.
+<span class="lineno">   39 </span>--
+<span class="lineno">   40 </span>-- == Mid-session destruction (DoD #21)
+<span class="lineno">   41 </span>--
+<span class="lineno">   42 </span>-- When '_to_brokenTargetCheck' is 'True', the wrapper around
+<span class="lineno">   43 </span>-- '_bh_recv' re-resolves the pinned @@@@ID@ after a settled recv; if
+<span class="lineno">   44 </span>-- the resolution returns a different @@@@ID@ (window destroyed and
+<span class="lineno">   45 </span>-- re-created by some other actor) the next caller-visible operation
+<span class="lineno">   46 </span>-- raises 'BackendException' with @_be_context = 'BcTmuxDetach'@ whose
+<span class="lineno">   47 </span>-- @_be_cause@ wraps a 'BackendBrokenTmuxTarget' payload (via the
+<span class="lineno">   48 </span>-- internal 'BrokenTmuxTargetException' carrier — recovered by tests
+<span class="lineno">   49 </span>-- via 'fromException').
+<span class="lineno">   50 </span>--
+<span class="lineno">   51 </span>-- The check is OFF by default (the production cost of an extra
+<span class="lineno">   52 </span>-- @display-message@ probe per recv is real); tests turn it on
+<span class="lineno">   53 </span>-- explicitly. See @docs\/terminal-backend-abstractions.md@ DoD #21.
+<span class="lineno">   54 </span>module PureClaw.Backend.Tmux
+<span class="lineno">   55 </span>  ( -- * Smart-constructed name newtypes (constructors NOT exported)
+<span class="lineno">   56 </span>    TmuxSession
+<span class="lineno">   57 </span>  , TmuxWindow
+<span class="lineno">   58 </span>  , TmuxPane
+<span class="lineno">   59 </span>  , mkTmuxSession
+<span class="lineno">   60 </span>  , mkTmuxWindow
+<span class="lineno">   61 </span>  , mkTmuxPane
+<span class="lineno">   62 </span>  , getTmuxSession
+<span class="lineno">   63 </span>  , getTmuxWindow
+<span class="lineno">   64 </span>  , getTmuxPane
+<span class="lineno">   65 </span>    -- * Target + options
+<span class="lineno">   66 </span>  , TmuxTarget (..)
+<span class="lineno">   67 </span>  , TmuxOpts (..)
+<span class="lineno">   68 </span>  , defaultTmuxOpts
+<span class="lineno">   69 </span>    -- * Authorization split (sum type)
+<span class="lineno">   70 </span>  , SshLocation (..)
+<span class="lineno">   71 </span>    -- * Factories
+<span class="lineno">   72 </span>  , mkTmuxBackendHandle
+<span class="lineno">   73 </span>  , mkTmuxBackendHandleWith
+<span class="lineno">   74 </span>    -- * Injection seam for the pin-resolve probe
+<span class="lineno">   75 </span>  , TmuxIO (..)
+<span class="lineno">   76 </span>  , realTmuxIO
+<span class="lineno">   77 </span>    -- * Test seams: argv builders (no I/O)
+<span class="lineno">   78 </span>  , buildPinResolveArgv
+<span class="lineno">   79 </span>  , buildAttachArgv
+<span class="lineno">   80 </span>    -- * Internal exception wrapper for 'BackendBrokenTmuxTarget'
+<span class="lineno">   81 </span>  , BrokenTmuxTargetException (..)
+<span class="lineno">   82 </span>  ) where
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>import Control.Concurrent.MVar (modifyMVar_, newMVar)
+<span class="lineno">   85 </span>import Control.Exception (Exception, SomeException, throwIO, toException, try)
+<span class="lineno">   86 </span>import Data.ByteString (ByteString)
+<span class="lineno">   87 </span>import Data.ByteString qualified as BS
+<span class="lineno">   88 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   89 </span>import Data.Char (isAscii, isAsciiLower, isAsciiUpper, isDigit)
+<span class="lineno">   90 </span>import Data.IORef (newIORef, readIORef, writeIORef)
+<span class="lineno">   91 </span>import Data.Text (Text)
+<span class="lineno">   92 </span>import Data.Text qualified as T
+<span class="lineno">   93 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   94 </span>import System.Exit (ExitCode (..))
+<span class="lineno">   95 </span>import System.Process.Typed qualified as P
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>import PureClaw.Backend.Pty
+<span class="lineno">   98 </span>  ( PtyIO (..)
+<span class="lineno">   99 </span>  , PtyOpenSpec (..)
+<span class="lineno">  100 </span>  , mkDrainerBackendHandle
+<span class="lineno">  101 </span>  )
+<span class="lineno">  102 </span>import PureClaw.Backend.SSH
+<span class="lineno">  103 </span>  ( RemoteCommand
+<span class="lineno">  104 </span>  , SshTarget (..)
+<span class="lineno">  105 </span>  , buildSshArgvFromParts
+<span class="lineno">  106 </span>  , getRemoteProgram
+<span class="lineno">  107 </span>  )
+<span class="lineno">  108 </span>import PureClaw.Handles.Backend
+<span class="lineno">  109 </span>  ( BackendContext (..)
+<span class="lineno">  110 </span>  , BackendError (..)
+<span class="lineno">  111 </span>  , BackendException (..)
+<span class="lineno">  112 </span>  , BackendHandle (..)
+<span class="lineno">  113 </span>  , BackendKind (..)
+<span class="lineno">  114 </span>  , InvalidOptionDetail (..)
+<span class="lineno">  115 </span>  , PtyOpts (..)
+<span class="lineno">  116 </span>  , RecvResult (..)
+<span class="lineno">  117 </span>  , TmuxTargetRef (..)
+<span class="lineno">  118 </span>  , defaultPtyOpts
+<span class="lineno">  119 </span>  , tmuxIdle
+<span class="lineno">  120 </span>  , withConcurrentUseGuard
+<span class="lineno">  121 </span>  )
+<span class="lineno">  122 </span>import PureClaw.Security.Command
+<span class="lineno">  123 </span>  ( AuthorizedCommand
+<span class="lineno">  124 </span>  , getCommandProgram
+<span class="lineno">  125 </span>  )
+<span class="lineno">  126 </span>import PureClaw.Security.Path
+<span class="lineno">  127 </span>  ( SafeRuntimePath
+<span class="lineno">  128 </span>  , getSafeRuntimePath
+<span class="lineno">  129 </span>  )
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>--------------------------------------------------------------------------------
+<span class="lineno">  132 </span>-- Smart-constructed name newtypes
+<span class="lineno">  133 </span>--------------------------------------------------------------------------------
+<span class="lineno">  134 </span>
+<span class="lineno">  135 </span>-- | A validated tmux session name.
+<span class="lineno">  136 </span>--
+<span class="lineno">  137 </span>-- The constructor is intentionally NOT exported. Obtain a value only
+<span class="lineno">  138 </span>-- via 'mkTmuxSession', which enforces the charset rules below.
+<span class="lineno">  139 </span>--
+<span class="lineno">  140 </span>-- Validation (matches 'mkTmuxWindow' \/ 'mkTmuxPane'):
+<span class="lineno">  141 </span>--
+<span class="lineno">  142 </span>-- 1. Empty rejected.
+<span class="lineno">  143 </span>-- 2. Leading @-@ rejected (defends against argv injection at the tmux
+<span class="lineno">  144 </span>--    binary).
+<span class="lineno">  145 </span>-- 3. NUL byte rejected.
+<span class="lineno">  146 </span>-- 4. Any non-ASCII byte rejected.
+<span class="lineno">  147 </span>-- 5. Length must be &lt;= 200.
+<span class="lineno">  148 </span>-- 6. Permitted charset: @[A-Za-z0-9_./@:=+-]@.
+<span class="lineno">  149 </span>newtype TmuxSession = TmuxSession Text
+<span class="lineno">  150 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | A validated tmux window name. See 'TmuxSession' for the validation
+<span class="lineno">  153 </span>-- rules — they are identical.
+<span class="lineno">  154 </span>newtype TmuxWindow = TmuxWindow Text
+<span class="lineno">  155 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  156 </span>
+<span class="lineno">  157 </span>-- | A validated tmux pane id (or pane name). See 'TmuxSession' for the
+<span class="lineno">  158 </span>-- validation rules — they are identical.
+<span class="lineno">  159 </span>newtype TmuxPane = TmuxPane Text
+<span class="lineno">  160 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>-- | The ONLY way to construct a 'TmuxSession'.
+<span class="lineno">  163 </span>--
+<span class="lineno">  164 </span>-- See the haddock on 'TmuxSession' for the numbered validation rules.
+<span class="lineno">  165 </span>mkTmuxSession :: Text -&gt; Either InvalidOptionDetail TmuxSession
+<span class="lineno">  166 </span><span class="decl"><span class="istickedoff">mkTmuxSession t = TmuxSession &lt;$&gt; validateTmuxName <span class="nottickedoff">&quot;TmuxSession&quot;</span> t</span></span>
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>-- | The ONLY way to construct a 'TmuxWindow'.
+<span class="lineno">  169 </span>--
+<span class="lineno">  170 </span>-- See the haddock on 'TmuxSession' for the numbered validation rules.
+<span class="lineno">  171 </span>mkTmuxWindow :: Text -&gt; Either InvalidOptionDetail TmuxWindow
+<span class="lineno">  172 </span><span class="decl"><span class="istickedoff">mkTmuxWindow t = TmuxWindow &lt;$&gt; validateTmuxName <span class="nottickedoff">&quot;TmuxWindow&quot;</span> t</span></span>
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>-- | The ONLY way to construct a 'TmuxPane'.
+<span class="lineno">  175 </span>--
+<span class="lineno">  176 </span>-- See the haddock on 'TmuxSession' for the numbered validation rules.
+<span class="lineno">  177 </span>mkTmuxPane :: Text -&gt; Either InvalidOptionDetail TmuxPane
+<span class="lineno">  178 </span><span class="decl"><span class="istickedoff">mkTmuxPane t = TmuxPane &lt;$&gt; validateTmuxName <span class="nottickedoff">&quot;TmuxPane&quot;</span> t</span></span>
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>-- | Project a 'TmuxSession' to its 'Text' form for inclusion in tmux
+<span class="lineno">  181 </span>-- argv. Not for logging — the human-readable name is not a secret but
+<span class="lineno">  182 </span>-- the design treats names as routing data, not display surface.
+<span class="lineno">  183 </span>getTmuxSession :: TmuxSession -&gt; Text
+<span class="lineno">  184 </span><span class="decl"><span class="istickedoff">getTmuxSession (TmuxSession t) = t</span></span>
+<span class="lineno">  185 </span>
+<span class="lineno">  186 </span>-- | Project a 'TmuxWindow' to its 'Text' form.
+<span class="lineno">  187 </span>getTmuxWindow :: TmuxWindow -&gt; Text
+<span class="lineno">  188 </span><span class="decl"><span class="istickedoff">getTmuxWindow (TmuxWindow t) = t</span></span>
+<span class="lineno">  189 </span>
+<span class="lineno">  190 </span>-- | Project a 'TmuxPane' to its 'Text' form.
+<span class="lineno">  191 </span>getTmuxPane :: TmuxPane -&gt; Text
+<span class="lineno">  192 </span><span class="decl"><span class="istickedoff">getTmuxPane (TmuxPane t) = t</span></span>
+<span class="lineno">  193 </span>
+<span class="lineno">  194 </span>-- | Shared validator for 'mkTmuxSession' \/ 'mkTmuxWindow' \/
+<span class="lineno">  195 </span>-- 'mkTmuxPane'. The first argument is the prefix used in the
+<span class="lineno">  196 </span>-- 'InvalidOptionDetail' message.
+<span class="lineno">  197 </span>validateTmuxName :: Text -&gt; Text -&gt; Either InvalidOptionDetail Text
+<span class="lineno">  198 </span><span class="decl"><span class="istickedoff">validateTmuxName ctx t</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">| T.null t =</span>
+<span class="lineno">  200 </span><span class="spaces">      </span><span class="istickedoff">reject <span class="nottickedoff">&quot;empty name&quot;</span></span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">| T.head t == '-' =</span>
+<span class="lineno">  202 </span><span class="spaces">      </span><span class="istickedoff">reject <span class="nottickedoff">&quot;leading dash&quot;</span></span>
+<span class="lineno">  203 </span><span class="spaces">  </span><span class="istickedoff">| T.any (== '\NUL') t =</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">reject <span class="nottickedoff">&quot;NUL byte&quot;</span></span>
+<span class="lineno">  205 </span><span class="spaces">  </span><span class="istickedoff">| T.any (not . isAscii) t =</span>
+<span class="lineno">  206 </span><span class="spaces">      </span><span class="istickedoff">reject <span class="nottickedoff">&quot;non-ASCII&quot;</span></span>
+<span class="lineno">  207 </span><span class="spaces">  </span><span class="istickedoff">| T.length t &gt; 200 =</span>
+<span class="lineno">  208 </span><span class="spaces">      </span><span class="istickedoff">reject <span class="nottickedoff">&quot;too long (&gt; 200)&quot;</span></span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="istickedoff">| T.any (not . allowed) t =</span>
+<span class="lineno">  210 </span><span class="spaces">      </span><span class="istickedoff">reject <span class="nottickedoff">&quot;disallowed character&quot;</span></span>
+<span class="lineno">  211 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  212 </span><span class="spaces">      </span><span class="istickedoff">Right t</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  214 </span><span class="spaces">    </span><span class="istickedoff">reject :: Text -&gt; Either InvalidOptionDetail Text</span>
+<span class="lineno">  215 </span><span class="spaces">    </span><span class="istickedoff">reject msg = Left <span class="nottickedoff">(InvalidOptionDetail (ctx &lt;&gt; &quot;: &quot; &lt;&gt; msg))</span></span>
+<span class="lineno">  216 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  217 </span><span class="spaces">    </span><span class="istickedoff">allowed :: Char -&gt; Bool</span>
+<span class="lineno">  218 </span><span class="spaces">    </span><span class="istickedoff">allowed c =</span>
+<span class="lineno">  219 </span><span class="spaces">      </span><span class="istickedoff">isAsciiLower c</span>
+<span class="lineno">  220 </span><span class="spaces">        </span><span class="istickedoff">|| isAsciiUpper c</span>
+<span class="lineno">  221 </span><span class="spaces">        </span><span class="istickedoff">|| isDigit c</span>
+<span class="lineno">  222 </span><span class="spaces">        </span><span class="istickedoff">|| c == '_'</span>
+<span class="lineno">  223 </span><span class="spaces">        </span><span class="istickedoff">|| c == '.'</span>
+<span class="lineno">  224 </span><span class="spaces">        </span><span class="istickedoff">|| c == '/'</span>
+<span class="lineno">  225 </span><span class="spaces">        </span><span class="istickedoff">|| c == '@'</span>
+<span class="lineno">  226 </span><span class="spaces">        </span><span class="istickedoff">|| c == ':'</span>
+<span class="lineno">  227 </span><span class="spaces">        </span><span class="istickedoff">|| c == '='</span>
+<span class="lineno">  228 </span><span class="spaces">        </span><span class="istickedoff">|| c == '+'</span>
+<span class="lineno">  229 </span><span class="spaces">        </span><span class="istickedoff">|| c == '-'</span></span>
+<span class="lineno">  230 </span>
+<span class="lineno">  231 </span>--------------------------------------------------------------------------------
+<span class="lineno">  232 </span>-- TmuxTarget / TmuxOpts
+<span class="lineno">  233 </span>--------------------------------------------------------------------------------
+<span class="lineno">  234 </span>
+<span class="lineno">  235 </span>-- | The session, window, and optional pane the backend will attach to.
+<span class="lineno">  236 </span>data TmuxTarget = TmuxTarget
+<span class="lineno">  237 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tt_session</span></span></span> :: !TmuxSession
+<span class="lineno">  238 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tt_window</span></span></span>  :: !TmuxWindow
+<span class="lineno">  239 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tt_pane</span></span></span>    :: !(Maybe TmuxPane)
+<span class="lineno">  240 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  241 </span>
+<span class="lineno">  242 </span>-- | Construction options for the tmux backend.
+<span class="lineno">  243 </span>--
+<span class="lineno">  244 </span>-- '_to_socketPath' pins the tmux server socket (@tmux -S \&lt;path\&gt;@);
+<span class="lineno">  245 </span>-- when 'Nothing', the system-default socket is used (a v1 limitation on
+<span class="lineno">  246 </span>-- multi-tenant hosts — see design doc § &quot;V1 Known Limitations&quot;).
+<span class="lineno">  247 </span>--
+<span class="lineno">  248 </span>-- '_to_brokenTargetCheck' is the opt-in flag for the DoD #21 mid-session
+<span class="lineno">  249 </span>-- destruction probe; default 'False'. When 'True', every @RecvSettled@
+<span class="lineno">  250 </span>-- triggers a fresh pin-resolve probe and a different @@\&lt;id\&gt;@ surfaces
+<span class="lineno">  251 </span>-- as 'BackendException' carrying a 'BackendBrokenTmuxTarget' payload.
+<span class="lineno">  252 </span>--
+<span class="lineno">  253 </span>-- (This field is a v1 superset over the active plan's WU10 spec —
+<span class="lineno">  254 </span>-- needed to gate the cost of the extra @display-message@ probe per
+<span class="lineno">  255 </span>-- recv. Production callers leave it 'False'; the WU10 DoD #21 test
+<span class="lineno">  256 </span>-- enables it explicitly.)
+<span class="lineno">  257 </span>data TmuxOpts = TmuxOpts
+<span class="lineno">  258 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_to_pty</span></span></span>                :: !PtyOpts
+<span class="lineno">  259 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_to_socketPath</span></span></span>         :: !(Maybe SafeRuntimePath)
+<span class="lineno">  260 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_to_brokenTargetCheck</span></span></span>  :: !Bool
+<span class="lineno">  261 </span>  }
+<span class="lineno">  262 </span>
+<span class="lineno">  263 </span>-- | Default 'TmuxOpts': 'defaultPtyOpts' with 'tmuxIdle' as the idle
+<span class="lineno">  264 </span>-- policy, no socket pinning, and the mid-session probe disabled.
+<span class="lineno">  265 </span>defaultTmuxOpts :: TmuxOpts
+<span class="lineno">  266 </span><span class="decl"><span class="istickedoff">defaultTmuxOpts = TmuxOpts</span>
+<span class="lineno">  267 </span><span class="spaces">  </span><span class="istickedoff">{ _to_pty                = defaultPtyOpts { _pto_idle = tmuxIdle }</span>
+<span class="lineno">  268 </span><span class="spaces">  </span><span class="istickedoff">, _to_socketPath         = Nothing</span>
+<span class="lineno">  269 </span><span class="spaces">  </span><span class="istickedoff">, _to_brokenTargetCheck  = False</span>
+<span class="lineno">  270 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  271 </span>
+<span class="lineno">  272 </span>--------------------------------------------------------------------------------
+<span class="lineno">  273 </span>-- SshLocation
+<span class="lineno">  274 </span>--------------------------------------------------------------------------------
+<span class="lineno">  275 </span>
+<span class="lineno">  276 </span>-- | Type-enforced authorization split for the two operating modes.
+<span class="lineno">  277 </span>--
+<span class="lineno">  278 </span>-- * 'LocalHost' carries a local 'AuthorizedCommand' (the @tmux@ binary).
+<span class="lineno">  279 </span>-- * 'RemoteHost' carries: the 'SshTarget' (user, host, identity), the
+<span class="lineno">  280 </span>--   local 'AuthorizedCommand' (the @ssh@ binary, allowlisted via
+<span class="lineno">  281 </span>--   'PureClaw.Security.Command.authorize'), AND the 'RemoteCommand' (the
+<span class="lineno">  282 </span>--   remote @tmux@ binary, allowlisted via
+<span class="lineno">  283 </span>--   'PureClaw.Backend.SSH.authorizeRemote'). Both authorizations are
+<span class="lineno">  284 </span>--   required to construct the value — the factory cannot be called
+<span class="lineno">  285 </span>--   with only one or with a local 'AuthorizedCommand' standing in for
+<span class="lineno">  286 </span>--   the remote tmux.
+<span class="lineno">  287 </span>data SshLocation
+<span class="lineno">  288 </span>  = LocalHost !AuthorizedCommand
+<span class="lineno">  289 </span>  | RemoteHost !SshTarget !AuthorizedCommand !RemoteCommand
+<span class="lineno">  290 </span>
+<span class="lineno">  291 </span>-- | The SINGLE permitted close action for a tmux Attach-mode backend
+<span class="lineno">  292 </span>-- handle.
+<span class="lineno">  293 </span>--
+<span class="lineno">  294 </span>-- The constructor is intentionally NOT exported — there is no way (and
+<span class="lineno">  295 </span>-- no API) to ask the handle to @kill-window@, @kill-session@, or
+<span class="lineno">  296 </span>-- @kill-pane@. The close path consumes a 'TmuxCloseAction' value and
+<span class="lineno">  297 </span>-- 'TmuxDetach' is the only inhabitant, so the only thing the close
+<span class="lineno">  298 </span>-- path can do is write the detach key sequence into the existing PTY.
+<span class="lineno">  299 </span>--
+<span class="lineno">  300 </span>-- See @docs\/terminal-backend-abstractions.md@ § &quot;Tmux Attach mode&quot;
+<span class="lineno">  301 </span>-- and the active plan § WU10.
+<span class="lineno">  302 </span>data TmuxCloseAction = TmuxDetach
+<span class="lineno">  303 </span>
+<span class="lineno">  304 </span>--------------------------------------------------------------------------------
+<span class="lineno">  305 </span>-- TmuxIO injection seam
+<span class="lineno">  306 </span>--------------------------------------------------------------------------------
+<span class="lineno">  307 </span>
+<span class="lineno">  308 </span>-- | Injection seam for the pin-resolve probe.
+<span class="lineno">  309 </span>--
+<span class="lineno">  310 </span>-- Production uses 'realTmuxIO', which shells out to @tmux
+<span class="lineno">  311 </span>-- display-message -p -t ... '#{window_id}'@ (or its remote analogue
+<span class="lineno">  312 </span>-- via @ssh user\@host -- tmux ...@). Tests inject a fake that returns
+<span class="lineno">  313 </span>-- a scripted 'Right' \/ 'Left' for each call.
+<span class="lineno">  314 </span>newtype TmuxIO = TmuxIO
+<span class="lineno">  315 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tio_resolvePin</span></span></span> :: SshLocation -&gt; TmuxTarget -&gt; Maybe SafeRuntimePath -&gt; IO (Either BackendError Text)
+<span class="lineno">  316 </span>  }
+<span class="lineno">  317 </span>
+<span class="lineno">  318 </span>-- | Production 'TmuxIO': spawns the pin-resolve subprocess via
+<span class="lineno">  319 </span>-- @typed-process@'s 'P.readProcessStdout_'.
+<span class="lineno">  320 </span>--
+<span class="lineno">  321 </span>-- For 'LocalHost' the program is the local tmux binary; for
+<span class="lineno">  322 </span>-- 'RemoteHost' it is ssh, with the remote tmux argv built via
+<span class="lineno">  323 </span>-- 'PureClaw.Backend.SSH.buildSshArgv' (shell-quoted on the remote
+<span class="lineno">  324 </span>-- side).
+<span class="lineno">  325 </span>--
+<span class="lineno">  326 </span>-- The pin-resolve probe is NEVER spawned in a PTY — a one-shot pipe
+<span class="lineno">  327 </span>-- is sufficient (and avoids burning a PTY on each construction).
+<span class="lineno">  328 </span>realTmuxIO :: TmuxIO
+<span class="lineno">  329 </span><span class="decl"><span class="nottickedoff">realTmuxIO = TmuxIO</span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="nottickedoff">{ _tio_resolvePin = resolvePinReal</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  332 </span>
+<span class="lineno">  333 </span>-- | Spawn the pin-resolve probe as a one-shot subprocess and validate
+<span class="lineno">  334 </span>-- the stdout against the expected @@@@\&lt;digits\&gt;@ regex.
+<span class="lineno">  335 </span>--
+<span class="lineno">  336 </span>-- A non-zero exit, an empty stdout, or a stdout that does not match
+<span class="lineno">  337 </span>-- the regex collapses to @Left (BackendTmuxTargetMissing _)@. This is
+<span class="lineno">  338 </span>-- intentional: from the caller\'s point of view, &quot;the window does not
+<span class="lineno">  339 </span>-- exist&quot; and &quot;tmux returned malformed output&quot; are indistinguishable
+<span class="lineno">  340 </span>-- — both mean &quot;do not attach&quot;.
+<span class="lineno">  341 </span>resolvePinReal
+<span class="lineno">  342 </span>  :: SshLocation
+<span class="lineno">  343 </span>  -&gt; TmuxTarget
+<span class="lineno">  344 </span>  -&gt; Maybe SafeRuntimePath
+<span class="lineno">  345 </span>  -&gt; IO (Either BackendError Text)
+<span class="lineno">  346 </span><span class="decl"><span class="nottickedoff">resolvePinReal loc tgt mSock = do</span>
+<span class="lineno">  347 </span><span class="spaces">  </span><span class="nottickedoff">let (prog, argv) = buildPinResolveArgv loc tgt mSock</span>
+<span class="lineno">  348 </span><span class="spaces">      </span><span class="nottickedoff">config = P.setStdin (P.byteStringInput BL.empty)</span>
+<span class="lineno">  349 </span><span class="spaces">             </span><span class="nottickedoff">$ P.setStderr P.nullStream</span>
+<span class="lineno">  350 </span><span class="spaces">             </span><span class="nottickedoff">$ P.proc prog argv</span>
+<span class="lineno">  351 </span><span class="spaces">  </span><span class="nottickedoff">r &lt;- try @SomeException (P.readProcessStdout config)</span>
+<span class="lineno">  352 </span><span class="spaces">  </span><span class="nottickedoff">let missing = Left (BackendTmuxTargetMissing (tmuxTargetRef tgt))</span>
+<span class="lineno">  353 </span><span class="spaces">  </span><span class="nottickedoff">case r of</span>
+<span class="lineno">  354 </span><span class="spaces">    </span><span class="nottickedoff">Left _ -&gt; pure missing</span>
+<span class="lineno">  355 </span><span class="spaces">    </span><span class="nottickedoff">Right (ExitSuccess, bsLazy) -&gt;</span>
+<span class="lineno">  356 </span><span class="spaces">      </span><span class="nottickedoff">let bs   = BL.toStrict bsLazy</span>
+<span class="lineno">  357 </span><span class="spaces">          </span><span class="nottickedoff">line = T.strip (TE.decodeUtf8 bs)</span>
+<span class="lineno">  358 </span><span class="spaces">      </span><span class="nottickedoff">in if isPinId line then pure (Right line) else pure missing</span>
+<span class="lineno">  359 </span><span class="spaces">    </span><span class="nottickedoff">Right (ExitFailure _, _) -&gt; pure missing</span></span>
+<span class="lineno">  360 </span>
+<span class="lineno">  361 </span>-- | Predicate: does the supplied 'Text' match the @^@[0-9]+$@ regex
+<span class="lineno">  362 </span>-- that tmux\'s @#{window_id}@ format string produces?
+<span class="lineno">  363 </span>--
+<span class="lineno">  364 </span>-- We deliberately accept @@@@&lt;digits&gt;@ rather than the pane-id form
+<span class="lineno">  365 </span>-- @%@&lt;digits&gt;@ — the pin we cache is the window id, even when the
+<span class="lineno">  366 </span>-- caller also specified a pane.
+<span class="lineno">  367 </span>isPinId :: Text -&gt; Bool
+<span class="lineno">  368 </span><span class="decl"><span class="nottickedoff">isPinId t = case T.unpack t of</span>
+<span class="lineno">  369 </span><span class="spaces">  </span><span class="nottickedoff">'@' : rest@(_:_) -&gt; all isAsciiDigit rest</span>
+<span class="lineno">  370 </span><span class="spaces">  </span><span class="nottickedoff">_                -&gt; False</span>
+<span class="lineno">  371 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  372 </span><span class="spaces">    </span><span class="nottickedoff">isAsciiDigit c = isAscii c &amp;&amp; isDigit c</span></span>
+<span class="lineno">  373 </span>
+<span class="lineno">  374 </span>--------------------------------------------------------------------------------
+<span class="lineno">  375 </span>-- argv builders
+<span class="lineno">  376 </span>--------------------------------------------------------------------------------
+<span class="lineno">  377 </span>
+<span class="lineno">  378 </span>-- | Build the argv list for the pin-resolve subprocess.
+<span class="lineno">  379 </span>--
+<span class="lineno">  380 </span>-- Exported as the test seam. The returned tuple is @(program, args)@,
+<span class="lineno">  381 </span>-- ready to splice into a 'P.proc' call. For 'LocalHost' the program
+<span class="lineno">  382 </span>-- is the local tmux binary path (from the local 'AuthorizedCommand');
+<span class="lineno">  383 </span>-- for 'RemoteHost' the program is ssh, and the tmux invocation is
+<span class="lineno">  384 </span>-- spliced into the argv via 'PureClaw.Backend.SSH.buildSshArgv'
+<span class="lineno">  385 </span>-- (which is also the only legal way to construct the hardened ssh
+<span class="lineno">  386 </span>-- prefix).
+<span class="lineno">  387 </span>--
+<span class="lineno">  388 </span>-- The probe always asks for @#{window_id}@ specifically (NOT pane
+<span class="lineno">  389 </span>-- id), even when '_tt_pane' is set: the pin is the window-level id.
+<span class="lineno">  390 </span>buildPinResolveArgv
+<span class="lineno">  391 </span>  :: SshLocation
+<span class="lineno">  392 </span>  -&gt; TmuxTarget
+<span class="lineno">  393 </span>  -&gt; Maybe SafeRuntimePath
+<span class="lineno">  394 </span>  -&gt; (FilePath, [String])
+<span class="lineno">  395 </span><span class="decl"><span class="istickedoff">buildPinResolveArgv loc tgt mSock = case loc of</span>
+<span class="lineno">  396 </span><span class="spaces">  </span><span class="istickedoff">LocalHost authCmd -&gt;</span>
+<span class="lineno">  397 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">let prog = getCommandProgram authCmd</span></span>
+<span class="lineno">  398 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">argv = socketArgs mSock</span></span>
+<span class="lineno">  399 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; [ &quot;display-message&quot;</span></span>
+<span class="lineno">  400 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">, &quot;-p&quot;</span></span>
+<span class="lineno">  401 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">, &quot;-t&quot;, T.unpack targetExpr</span></span>
+<span class="lineno">  402 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">, &quot;#{window_id}&quot;</span></span>
+<span class="lineno">  403 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  404 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">in (prog, argv)</span></span>
+<span class="lineno">  405 </span><span class="spaces">  </span><span class="istickedoff">RemoteHost sshTgt sshAuthCmd remoteCmd -&gt;</span>
+<span class="lineno">  406 </span><span class="spaces">    </span><span class="istickedoff">let <span class="nottickedoff">prog       = getCommandProgram sshAuthCmd</span></span>
+<span class="lineno">  407 </span><span class="spaces">        </span><span class="istickedoff">remoteProg = getRemoteProgram remoteCmd</span>
+<span class="lineno">  408 </span><span class="spaces">        </span><span class="istickedoff">remoteArgs = map <span class="nottickedoff">T.pack</span> (socketArgs mSock)</span>
+<span class="lineno">  409 </span><span class="spaces">                  </span><span class="istickedoff">&lt;&gt; [ &quot;display-message&quot;</span>
+<span class="lineno">  410 </span><span class="spaces">                     </span><span class="istickedoff">, &quot;-p&quot;</span>
+<span class="lineno">  411 </span><span class="spaces">                     </span><span class="istickedoff">, &quot;-t&quot;, targetExpr</span>
+<span class="lineno">  412 </span><span class="spaces">                     </span><span class="istickedoff">, &quot;#{window_id}&quot;</span>
+<span class="lineno">  413 </span><span class="spaces">                     </span><span class="istickedoff">]</span>
+<span class="lineno">  414 </span><span class="spaces">        </span><span class="istickedoff">argv = buildSshArgvFromParts sshTgt remoteProg remoteArgs</span>
+<span class="lineno">  415 </span><span class="spaces">                 </span><span class="istickedoff">Nothing Nothing False</span>
+<span class="lineno">  416 </span><span class="spaces">    </span><span class="istickedoff">in (<span class="nottickedoff">prog</span>, argv)</span>
+<span class="lineno">  417 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  418 </span><span class="spaces">    </span><span class="istickedoff">targetExpr :: Text</span>
+<span class="lineno">  419 </span><span class="spaces">    </span><span class="istickedoff">targetExpr =</span>
+<span class="lineno">  420 </span><span class="spaces">      </span><span class="istickedoff">getTmuxSession (_tt_session tgt)</span>
+<span class="lineno">  421 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; &quot;:&quot;</span>
+<span class="lineno">  422 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; getTmuxWindow (_tt_window tgt)</span></span>
+<span class="lineno">  423 </span>
+<span class="lineno">  424 </span>-- | Build the argv for the attach-session step.
+<span class="lineno">  425 </span>--
+<span class="lineno">  426 </span>-- Returned as @(program, args)@ — ready for 'PtyOpenSpec'. The pin
+<span class="lineno">  427 </span>-- argument is the @@@\&lt;id\&gt;@ produced by the pin-resolve step; it is
+<span class="lineno">  428 </span>-- spliced as the @-t@ target so the attach is bound to the stable id,
+<span class="lineno">  429 </span>-- not the user-facing @session:window@ name. (Mid-session window
+<span class="lineno">  430 </span>-- destruction is therefore detectable: the @@@\&lt;id\&gt;@ probe and the
+<span class="lineno">  431 </span>-- attach diverge.)
+<span class="lineno">  432 </span>--
+<span class="lineno">  433 </span>-- For 'RemoteHost' the program path comes from the local @ssh@
+<span class="lineno">  434 </span>-- 'AuthorizedCommand'; the remote tmux invocation is spliced into the
+<span class="lineno">  435 </span>-- ssh argv via 'buildSshArgv', so the program-path and arg quoting
+<span class="lineno">  436 </span>-- (DoD #11) goes through 'PureClaw.Internal.ShellQuote.shellQuote' on
+<span class="lineno">  437 </span>-- the remote half.
+<span class="lineno">  438 </span>buildAttachArgv
+<span class="lineno">  439 </span>  :: SshLocation
+<span class="lineno">  440 </span>  -&gt; Text               -- ^ the pinned @@@\&lt;id\&gt;@
+<span class="lineno">  441 </span>  -&gt; Maybe SafeRuntimePath
+<span class="lineno">  442 </span>  -&gt; (FilePath, [String])
+<span class="lineno">  443 </span><span class="decl"><span class="istickedoff">buildAttachArgv loc pinned mSock = case loc of</span>
+<span class="lineno">  444 </span><span class="spaces">  </span><span class="istickedoff">LocalHost authCmd -&gt;</span>
+<span class="lineno">  445 </span><span class="spaces">    </span><span class="istickedoff">let prog = getCommandProgram authCmd</span>
+<span class="lineno">  446 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">argv = socketArgs mSock</span></span>
+<span class="lineno">  447 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; [ &quot;attach-session&quot;</span></span>
+<span class="lineno">  448 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">, &quot;-t&quot;, T.unpack pinned</span></span>
+<span class="lineno">  449 </span><span class="spaces">               </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  450 </span><span class="spaces">    </span><span class="istickedoff">in (prog, <span class="nottickedoff">argv</span>)</span>
+<span class="lineno">  451 </span><span class="spaces">  </span><span class="istickedoff">RemoteHost sshTgt sshAuthCmd remoteCmd -&gt;</span>
+<span class="lineno">  452 </span><span class="spaces">    </span><span class="istickedoff">let <span class="nottickedoff">prog       = getCommandProgram sshAuthCmd</span></span>
+<span class="lineno">  453 </span><span class="spaces">        </span><span class="istickedoff">remoteProg = getRemoteProgram remoteCmd</span>
+<span class="lineno">  454 </span><span class="spaces">        </span><span class="istickedoff">remoteArgs = map <span class="nottickedoff">T.pack</span> (socketArgs mSock)</span>
+<span class="lineno">  455 </span><span class="spaces">                  </span><span class="istickedoff">&lt;&gt; [ &quot;attach-session&quot;</span>
+<span class="lineno">  456 </span><span class="spaces">                     </span><span class="istickedoff">, &quot;-t&quot;, pinned</span>
+<span class="lineno">  457 </span><span class="spaces">                     </span><span class="istickedoff">]</span>
+<span class="lineno">  458 </span><span class="spaces">        </span><span class="istickedoff">argv = buildSshArgvFromParts sshTgt remoteProg remoteArgs</span>
+<span class="lineno">  459 </span><span class="spaces">                 </span><span class="istickedoff">Nothing Nothing True</span>
+<span class="lineno">  460 </span><span class="spaces">    </span><span class="istickedoff">in (<span class="nottickedoff">prog</span>, argv)</span></span>
+<span class="lineno">  461 </span>
+<span class="lineno">  462 </span>-- | The @-S \&lt;path\&gt;@ prefix when '_to_socketPath' is set.
+<span class="lineno">  463 </span>socketArgs :: Maybe SafeRuntimePath -&gt; [String]
+<span class="lineno">  464 </span><span class="decl"><span class="istickedoff">socketArgs Nothing  = []</span>
+<span class="lineno">  465 </span><span class="spaces"></span><span class="istickedoff">socketArgs (Just p) = <span class="nottickedoff">[&quot;-S&quot;, getSafeRuntimePath p]</span></span></span>
+<span class="lineno">  466 </span>
+<span class="lineno">  467 </span>-- | Build a 'TmuxTargetRef' from a 'TmuxTarget' for error reporting.
+<span class="lineno">  468 </span>--
+<span class="lineno">  469 </span>-- 'TmuxTargetRef' carries 'Text' fields (the design picked the
+<span class="lineno">  470 </span>-- 'Text'-only carrier in WU1 to avoid an import cycle); we project
+<span class="lineno">  471 </span>-- the validated newtypes back to 'Text' here.
+<span class="lineno">  472 </span>tmuxTargetRef :: TmuxTarget -&gt; TmuxTargetRef
+<span class="lineno">  473 </span><span class="decl"><span class="istickedoff">tmuxTargetRef tgt = TmuxTargetRef</span>
+<span class="lineno">  474 </span><span class="spaces">  </span><span class="istickedoff">(getTmuxSession (_tt_session tgt))</span>
+<span class="lineno">  475 </span><span class="spaces">  </span><span class="istickedoff">(getTmuxWindow  (_tt_window  tgt))</span>
+<span class="lineno">  476 </span><span class="spaces">  </span><span class="istickedoff">(<span class="nottickedoff">getTmuxPane</span> &lt;$&gt; _tt_pane tgt)</span></span>
+<span class="lineno">  477 </span>
+<span class="lineno">  478 </span>--------------------------------------------------------------------------------
+<span class="lineno">  479 </span>-- BrokenTmuxTargetException — internal carrier for BackendBrokenTmuxTarget
+<span class="lineno">  480 </span>--------------------------------------------------------------------------------
+<span class="lineno">  481 </span>
+<span class="lineno">  482 </span>-- | Internal exception used as the @_be_cause@ when the mid-session
+<span class="lineno">  483 </span>-- destruction probe fires.
+<span class="lineno">  484 </span>--
+<span class="lineno">  485 </span>-- 'BackendException._be_cause' has type 'SomeException', so to embed a
+<span class="lineno">  486 </span>-- structured 'BackendBrokenTmuxTarget' payload we wrap it in this
+<span class="lineno">  487 </span>-- typed exception. Tests recover the payload via
+<span class="lineno">  488 </span>-- 'Control.Exception.fromException' on the outer 'BackendException'\'s
+<span class="lineno">  489 </span>-- cause.
+<span class="lineno">  490 </span>newtype BrokenTmuxTargetException = BrokenTmuxTargetException TmuxTargetRef
+<span class="lineno">  491 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  492 </span>
+<span class="lineno">  493 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Exception BrokenTmuxTargetException</span></span></span></span></span></span></span></span>
+<span class="lineno">  494 </span>
+<span class="lineno">  495 </span>--------------------------------------------------------------------------------
+<span class="lineno">  496 </span>-- Factories
+<span class="lineno">  497 </span>--------------------------------------------------------------------------------
+<span class="lineno">  498 </span>
+<span class="lineno">  499 </span>-- | Construct a tmux Attach backend, using 'realPtyIO' for the attach
+<span class="lineno">  500 </span>-- step and 'realTmuxIO' for the pin-resolve probe.
+<span class="lineno">  501 </span>--
+<span class="lineno">  502 </span>-- See 'mkTmuxBackendHandleWith' for the full semantics; this is the
+<span class="lineno">  503 </span>-- production entry point.
+<span class="lineno">  504 </span>mkTmuxBackendHandle
+<span class="lineno">  505 </span>  :: PtyIO
+<span class="lineno">  506 </span>  -&gt; SshLocation
+<span class="lineno">  507 </span>  -&gt; TmuxTarget
+<span class="lineno">  508 </span>  -&gt; TmuxOpts
+<span class="lineno">  509 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  510 </span><span class="decl"><span class="nottickedoff">mkTmuxBackendHandle = mkTmuxBackendHandleWith realTmuxIO</span></span>
+<span class="lineno">  511 </span>
+<span class="lineno">  512 </span>-- | Construct a tmux Attach backend with caller-supplied 'TmuxIO' and
+<span class="lineno">  513 </span>-- 'PtyIO'. Test seam.
+<span class="lineno">  514 </span>--
+<span class="lineno">  515 </span>-- Steps:
+<span class="lineno">  516 </span>--
+<span class="lineno">  517 </span>-- 1. Run the pin-resolve probe via @_tio_resolvePin@. On failure
+<span class="lineno">  518 </span>--    surface the error as-is (typically
+<span class="lineno">  519 </span>--    @Left (BackendTmuxTargetMissing _)@; the SSH-hop case may surface
+<span class="lineno">  520 </span>--    @Left (BackendSshConnectFailed _)@ from the fake or production
+<span class="lineno">  521 </span>--    'TmuxIO').
+<span class="lineno">  522 </span>-- 2. Compose the attach argv via 'buildAttachArgv' against the pinned
+<span class="lineno">  523 </span>--    @@@\&lt;id\&gt;@ from step 1.
+<span class="lineno">  524 </span>-- 3. Delegate to 'mkDrainerBackendHandle' to spawn the PTY + drainer.
+<span class="lineno">  525 </span>-- 4. Wrap the resulting handle: substitute '_bh_close' for the
+<span class="lineno">  526 </span>--    detach-key write, optionally re-arm the mid-session probe in
+<span class="lineno">  527 </span>--    '_bh_recv', and apply 'withConcurrentUseGuard'.
+<span class="lineno">  528 </span>mkTmuxBackendHandleWith
+<span class="lineno">  529 </span>  :: TmuxIO
+<span class="lineno">  530 </span>  -&gt; PtyIO
+<span class="lineno">  531 </span>  -&gt; SshLocation
+<span class="lineno">  532 </span>  -&gt; TmuxTarget
+<span class="lineno">  533 </span>  -&gt; TmuxOpts
+<span class="lineno">  534 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  535 </span><span class="decl"><span class="istickedoff">mkTmuxBackendHandleWith tio pio loc tgt opts = do</span>
+<span class="lineno">  536 </span><span class="spaces">  </span><span class="istickedoff">pinResult &lt;- _tio_resolvePin tio <span class="nottickedoff">loc</span> <span class="nottickedoff">tgt</span> <span class="nottickedoff">(_to_socketPath opts)</span></span>
+<span class="lineno">  537 </span><span class="spaces">  </span><span class="istickedoff">case pinResult of</span>
+<span class="lineno">  538 </span><span class="spaces">    </span><span class="istickedoff">Left e -&gt; pure (Left e)</span>
+<span class="lineno">  539 </span><span class="spaces">    </span><span class="istickedoff">Right pinned -&gt; do</span>
+<span class="lineno">  540 </span><span class="spaces">      </span><span class="istickedoff">let (prog, argv) = <span class="nottickedoff">buildAttachArgv loc pinned (_to_socketPath opts)</span></span>
+<span class="lineno">  541 </span><span class="spaces">          </span><span class="istickedoff">ptyOpts = _to_pty opts</span>
+<span class="lineno">  542 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">spec = PtyOpenSpec</span></span>
+<span class="lineno">  543 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">{ _pos_program = prog</span></span>
+<span class="lineno">  544 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, _pos_args    = map T.pack argv</span></span>
+<span class="lineno">  545 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, _pos_env     = _pto_env ptyOpts</span></span>
+<span class="lineno">  546 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, _pos_cwd     = _pto_cwd ptyOpts</span></span>
+<span class="lineno">  547 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, _pos_cols    = _pto_cols ptyOpts</span></span>
+<span class="lineno">  548 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, _pos_rows    = _pto_rows ptyOpts</span></span>
+<span class="lineno">  549 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">}</span></span>
+<span class="lineno">  550 </span><span class="spaces">      </span><span class="istickedoff">inner &lt;- mkDrainerBackendHandle pio ptyOpts <span class="nottickedoff">spec</span> Pty</span>
+<span class="lineno">  551 </span><span class="spaces">      </span><span class="istickedoff">case inner of</span>
+<span class="lineno">  552 </span><span class="spaces">        </span><span class="istickedoff">Left e   -&gt; <span class="nottickedoff">pure (Left e)</span></span>
+<span class="lineno">  553 </span><span class="spaces">        </span><span class="istickedoff">Right bh -&gt; do</span>
+<span class="lineno">  554 </span><span class="spaces">          </span><span class="istickedoff">wrapped &lt;- wrapTmuxHandle tio <span class="nottickedoff">loc</span> tgt opts pinned bh</span>
+<span class="lineno">  555 </span><span class="spaces">          </span><span class="istickedoff">Right &lt;$&gt; withConcurrentUseGuard wrapped</span></span>
+<span class="lineno">  556 </span>
+<span class="lineno">  557 </span>-- | Wrap a freshly-constructed PTY 'BackendHandle' with the tmux-
+<span class="lineno">  558 </span>-- specific invariants:
+<span class="lineno">  559 </span>--
+<span class="lineno">  560 </span>-- * @_bh_close@ writes Ctrl-B @d@ into the existing PTY, then calls
+<span class="lineno">  561 </span>--   the inner close. Idempotent (MVar-guarded), never throws.
+<span class="lineno">  562 </span>-- * @_bh_recv@ optionally re-runs the pin-resolve probe after a
+<span class="lineno">  563 </span>--   settled recv when @_to_brokenTargetCheck@ is 'True'. If the
+<span class="lineno">  564 </span>--   probe returns a different @@@\&lt;id\&gt;@, the next recv (or send)
+<span class="lineno">  565 </span>--   surfaces 'BackendException' carrying
+<span class="lineno">  566 </span>--   'BrokenTmuxTargetException'.
+<span class="lineno">  567 </span>wrapTmuxHandle
+<span class="lineno">  568 </span>  :: TmuxIO
+<span class="lineno">  569 </span>  -&gt; SshLocation
+<span class="lineno">  570 </span>  -&gt; TmuxTarget
+<span class="lineno">  571 </span>  -&gt; TmuxOpts
+<span class="lineno">  572 </span>  -&gt; Text                     -- ^ the pinned @@@\&lt;id\&gt;@ from construction
+<span class="lineno">  573 </span>  -&gt; BackendHandle
+<span class="lineno">  574 </span>  -&gt; IO BackendHandle
+<span class="lineno">  575 </span><span class="decl"><span class="istickedoff">wrapTmuxHandle tio loc tgt opts pinnedAtCtor bh = do</span>
+<span class="lineno">  576 </span><span class="spaces">  </span><span class="istickedoff">closeLock &lt;- newMVar ()</span>
+<span class="lineno">  577 </span><span class="spaces">  </span><span class="istickedoff">closedRef &lt;- newIORef False</span>
+<span class="lineno">  578 </span><span class="spaces">  </span><span class="istickedoff">brokenRef &lt;- newIORef False     -- latches True once probe disagrees</span>
+<span class="lineno">  579 </span><span class="spaces">  </span><span class="istickedoff">let trackedRecv mIdle = do</span>
+<span class="lineno">  580 </span><span class="spaces">        </span><span class="istickedoff">-- Pre-check: if a prior probe already detected divergence,</span>
+<span class="lineno">  581 </span><span class="spaces">        </span><span class="istickedoff">-- raise immediately (don't even talk to the PTY).</span>
+<span class="lineno">  582 </span><span class="spaces">        </span><span class="istickedoff">wasBroken &lt;- readIORef brokenRef</span>
+<span class="lineno">  583 </span><span class="spaces">        </span><span class="istickedoff">if <span class="tickonlyfalse">wasBroken</span></span>
+<span class="lineno">  584 </span><span class="spaces">          </span><span class="istickedoff">then <span class="nottickedoff">throwBroken</span></span>
+<span class="lineno">  585 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">  586 </span><span class="spaces">            </span><span class="istickedoff">res &lt;- _bh_recv bh mIdle</span>
+<span class="lineno">  587 </span><span class="spaces">            </span><span class="istickedoff">postCheck res</span>
+<span class="lineno">  588 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">pure res</span></span>
+<span class="lineno">  589 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  590 </span><span class="spaces">      </span><span class="istickedoff">postCheck :: RecvResult ByteString -&gt; IO ()</span>
+<span class="lineno">  591 </span><span class="spaces">      </span><span class="istickedoff">postCheck r</span>
+<span class="lineno">  592 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">_to_brokenTargetCheck opts</span> = case r of</span>
+<span class="lineno">  593 </span><span class="spaces">            </span><span class="istickedoff">RecvSettled _ -&gt; do</span>
+<span class="lineno">  594 </span><span class="spaces">              </span><span class="istickedoff">probe &lt;- _tio_resolvePin tio <span class="nottickedoff">loc</span> <span class="nottickedoff">tgt</span> <span class="nottickedoff">(_to_socketPath opts)</span></span>
+<span class="lineno">  595 </span><span class="spaces">              </span><span class="istickedoff">case probe of</span>
+<span class="lineno">  596 </span><span class="spaces">                </span><span class="istickedoff">Right newPin</span>
+<span class="lineno">  597 </span><span class="spaces">                  </span><span class="istickedoff">| <span class="tickonlytrue">newPin /= pinnedAtCtor</span> -&gt; do</span>
+<span class="lineno">  598 </span><span class="spaces">                      </span><span class="istickedoff">writeIORef brokenRef <span class="nottickedoff">True</span></span>
+<span class="lineno">  599 </span><span class="spaces">                      </span><span class="istickedoff">throwBroken</span>
+<span class="lineno">  600 </span><span class="spaces">                  </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  601 </span><span class="spaces">                </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  602 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">-- Probe failed entirely — treat as broken.</span></span>
+<span class="lineno">  603 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">writeIORef brokenRef True</span></span>
+<span class="lineno">  604 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">throwBroken</span></span>
+<span class="lineno">  605 </span><span class="spaces">            </span><span class="istickedoff">_ -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  606 </span><span class="spaces">        </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> = <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  607 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  608 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">trackedSend bs = do</span></span>
+<span class="lineno">  609 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">wasBroken &lt;- readIORef brokenRef</span></span>
+<span class="lineno">  610 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">if wasBroken</span></span>
+<span class="lineno">  611 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">then throwBroken</span></span>
+<span class="lineno">  612 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">else _bh_send bh bs</span></span>
+<span class="lineno">  613 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  614 </span><span class="spaces">      </span><span class="istickedoff">performClose :: TmuxCloseAction -&gt; IO ()</span>
+<span class="lineno">  615 </span><span class="spaces">      </span><span class="istickedoff">performClose TmuxDetach = do</span>
+<span class="lineno">  616 </span><span class="spaces">        </span><span class="istickedoff">-- Ctrl-B (0x02) + 'd' (0x64). Tmux's default prefix +</span>
+<span class="lineno">  617 </span><span class="spaces">        </span><span class="istickedoff">-- detach-client binding. Write failures are non-fatal:</span>
+<span class="lineno">  618 </span><span class="spaces">        </span><span class="istickedoff">-- the transport may already be dead. We swallow the</span>
+<span class="lineno">  619 </span><span class="spaces">        </span><span class="istickedoff">-- exception to honour the &quot;_bh_close never throws&quot;</span>
+<span class="lineno">  620 </span><span class="spaces">        </span><span class="istickedoff">-- contract.</span>
+<span class="lineno">  621 </span><span class="spaces">        </span><span class="istickedoff">_ &lt;- try @SomeException (_bh_send bh <span class="nottickedoff">(BS.pack [0x02, 0x64])</span>)</span>
+<span class="lineno">  622 </span><span class="spaces">        </span><span class="istickedoff">-- Defensive: the inner close is documented total today, but</span>
+<span class="lineno">  623 </span><span class="spaces">        </span><span class="istickedoff">-- the contract on this wrapper is &quot;MUST NOT throw&quot;. Swallow</span>
+<span class="lineno">  624 </span><span class="spaces">        </span><span class="istickedoff">-- any exception escaping the inner close so a future</span>
+<span class="lineno">  625 </span><span class="spaces">        </span><span class="istickedoff">-- regression cannot silently break the wrapper contract.</span>
+<span class="lineno">  626 </span><span class="spaces">        </span><span class="istickedoff">_ &lt;- try @SomeException (_bh_close bh)</span>
+<span class="lineno">  627 </span><span class="spaces">        </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  628 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  629 </span><span class="spaces">      </span><span class="istickedoff">detachClose = modifyMVar_ closeLock $ \() -&gt; do</span>
+<span class="lineno">  630 </span><span class="spaces">        </span><span class="istickedoff">wasClosed &lt;- readIORef closedRef</span>
+<span class="lineno">  631 </span><span class="spaces">        </span><span class="istickedoff">if <span class="tickonlyfalse">wasClosed</span></span>
+<span class="lineno">  632 </span><span class="spaces">          </span><span class="istickedoff">then <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  633 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">  634 </span><span class="spaces">            </span><span class="istickedoff">writeIORef closedRef <span class="nottickedoff">True</span></span>
+<span class="lineno">  635 </span><span class="spaces">            </span><span class="istickedoff">performClose TmuxDetach</span>
+<span class="lineno">  636 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  637 </span><span class="spaces">      </span><span class="istickedoff">throwBroken :: IO a</span>
+<span class="lineno">  638 </span><span class="spaces">      </span><span class="istickedoff">throwBroken = throwIO $ BackendException</span>
+<span class="lineno">  639 </span><span class="spaces">        </span><span class="istickedoff">BcTmuxDetach</span>
+<span class="lineno">  640 </span><span class="spaces">        </span><span class="istickedoff">(toException (BrokenTmuxTargetException (tmuxTargetRef tgt)))</span>
+<span class="lineno">  641 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  642 </span><span class="spaces">  </span><span class="istickedoff">pure bh</span>
+<span class="lineno">  643 </span><span class="spaces">    </span><span class="istickedoff">{ _bh_name  = &quot;tmux-attach&quot;</span>
+<span class="lineno">  644 </span><span class="spaces">    </span><span class="istickedoff">, _bh_send  = <span class="nottickedoff">trackedSend</span></span>
+<span class="lineno">  645 </span><span class="spaces">    </span><span class="istickedoff">, _bh_recv  = trackedRecv</span>
+<span class="lineno">  646 </span><span class="spaces">    </span><span class="istickedoff">, _bh_close = detachClose</span>
+<span class="lineno">  647 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

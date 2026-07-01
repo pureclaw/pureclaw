@@ -1,0 +1,160 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Handles.Harness
+<span class="lineno">    2 </span>  ( -- * Types
+<span class="lineno">    3 </span>    HarnessStatus (..)
+<span class="lineno">    4 </span>  , HarnessHandle (..)
+<span class="lineno">    5 </span>  , HarnessError (..)
+<span class="lineno">    6 </span>    -- * Implementations
+<span class="lineno">    7 </span>  , mkNoOpHarnessHandle
+<span class="lineno">    8 </span>    -- * Output formatting
+<span class="lineno">    9 </span>  , prefixHarnessOutput
+<span class="lineno">   10 </span>  , sanitizeHarnessOutput
+<span class="lineno">   11 </span>  ) where
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import Data.ByteString (ByteString)
+<span class="lineno">   14 </span>import Data.Char qualified as Char
+<span class="lineno">   15 </span>import Data.Text (Text)
+<span class="lineno">   16 </span>import Data.Text qualified as T
+<span class="lineno">   17 </span>import System.Exit
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>import PureClaw.Security.Command
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>-- | Status of a harness process.
+<span class="lineno">   22 </span>data HarnessStatus
+<span class="lineno">   23 </span>  = HarnessRunning
+<span class="lineno">   24 </span>  | HarnessExited ExitCode
+<span class="lineno">   25 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   26 </span>
+<span class="lineno">   27 </span>-- | Errors that can occur during harness operations.
+<span class="lineno">   28 </span>data HarnessError
+<span class="lineno">   29 </span>  = HarnessNotAuthorized CommandError
+<span class="lineno">   30 </span>  | HarnessBinaryNotFound Text
+<span class="lineno">   31 </span>  | HarnessTmuxNotAvailable Text  -- ^ detail message (stderr from tmux, or &quot;not found&quot;)
+<span class="lineno">   32 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>-- | Capability handle for interacting with a harness (e.g. Claude Code in tmux).
+<span class="lineno">   35 </span>data HarnessHandle = HarnessHandle
+<span class="lineno">   36 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_send</span></span></span>    :: ByteString -&gt; IO ()   -- ^ Write to harness input
+<span class="lineno">   37 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_receive</span></span></span> :: IO ByteString         -- ^ Read harness output (scrollback capture)
+<span class="lineno">   38 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_name</span></span></span>    :: Text                  -- ^ Human-readable name
+<span class="lineno">   39 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_session</span></span></span> :: Text                  -- ^ tmux session name
+<span class="lineno">   40 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_status</span></span></span>  :: IO HarnessStatus      -- ^ Check if running
+<span class="lineno">   41 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_stop</span></span></span>    :: IO ()                 -- ^ Kill and cleanup
+<span class="lineno">   42 </span>  }
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>-- | No-op harness handle for testing.
+<span class="lineno">   45 </span>mkNoOpHarnessHandle :: HarnessHandle
+<span class="lineno">   46 </span><span class="decl"><span class="istickedoff">mkNoOpHarnessHandle = HarnessHandle</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">{ _hh_send    = \_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">, _hh_receive = pure &quot;&quot;</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">, _hh_name    = &quot;&quot;</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">, _hh_session = &quot;&quot;</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">, _hh_status  = pure HarnessRunning</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">, _hh_stop    = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   54 </span>
+<span class="lineno">   55 </span>-- | Prefix harness output with the origin name on the first line only.
+<span class="lineno">   56 </span>-- e.g. @&quot;claude-code-0\&gt; line1\\nline2\\nline3&quot;@.
+<span class="lineno">   57 </span>-- This is the single abstraction for displaying messages from a harness\/model.
+<span class="lineno">   58 </span>prefixHarnessOutput :: Text -&gt; Text -&gt; Text
+<span class="lineno">   59 </span><span class="decl"><span class="istickedoff">prefixHarnessOutput name output = name &lt;&gt; &quot;&gt; &quot; &lt;&gt; output</span></span>
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>-- | Sanitize harness output for display in a TUI.
+<span class="lineno">   62 </span>-- Strips ANSI escape sequences (CSI, OSC, DCS, etc.), C0\/C1 control
+<span class="lineno">   63 </span>-- characters, and decorative Unicode (box drawing, block elements,
+<span class="lineno">   64 </span>-- Private Use Area, etc.) that TUI applications use for rendering.
+<span class="lineno">   65 </span>-- Also trims leading and trailing blank lines from tmux capture output.
+<span class="lineno">   66 </span>sanitizeHarnessOutput :: Text -&gt; Text
+<span class="lineno">   67 </span><span class="decl"><span class="istickedoff">sanitizeHarnessOutput =</span>
+<span class="lineno">   68 </span><span class="spaces">    </span><span class="istickedoff">trimBlankLines . T.pack . go . T.unpack</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   70 </span><span class="spaces">    </span><span class="istickedoff">trimBlankLines =</span>
+<span class="lineno">   71 </span><span class="spaces">      </span><span class="istickedoff">T.intercalate &quot;\n&quot;</span>
+<span class="lineno">   72 </span><span class="spaces">      </span><span class="istickedoff">. dropWhileEnd isBlankLine</span>
+<span class="lineno">   73 </span><span class="spaces">      </span><span class="istickedoff">. dropWhile isBlankLine</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">. T.splitOn &quot;\n&quot;</span>
+<span class="lineno">   75 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   76 </span><span class="spaces">    </span><span class="istickedoff">isBlankLine = T.all Char.isSpace</span>
+<span class="lineno">   77 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   78 </span><span class="spaces">    </span><span class="istickedoff">dropWhileEnd _ [] = []</span>
+<span class="lineno">   79 </span><span class="spaces">    </span><span class="istickedoff">dropWhileEnd p xs = reverse (dropWhile p (reverse xs))</span>
+<span class="lineno">   80 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   81 </span><span class="spaces">    </span><span class="istickedoff">go [] = []</span>
+<span class="lineno">   82 </span><span class="spaces">    </span><span class="istickedoff">go ('\ESC' : rest) = skipEscape rest</span>
+<span class="lineno">   83 </span><span class="spaces">    </span><span class="istickedoff">-- Keep newlines and tabs</span>
+<span class="lineno">   84 </span><span class="spaces">    </span><span class="istickedoff">go ('\n' : cs) = '\n' : go cs</span>
+<span class="lineno">   85 </span><span class="spaces">    </span><span class="istickedoff">go ('\t' : cs) = '\t' : go cs</span>
+<span class="lineno">   86 </span><span class="spaces">    </span><span class="istickedoff">-- Replace carriage return with newline (handles \r\n and bare \r)</span>
+<span class="lineno">   87 </span><span class="spaces">    </span><span class="istickedoff">go ('\r' : '\n' : cs) = '\n' : go cs</span>
+<span class="lineno">   88 </span><span class="spaces">    </span><span class="istickedoff">go ('\r' : cs) = '\n' : go cs</span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="istickedoff">-- Drop control characters, then decorative Unicode</span>
+<span class="lineno">   90 </span><span class="spaces">    </span><span class="istickedoff">go (c : cs)</span>
+<span class="lineno">   91 </span><span class="spaces">      </span><span class="istickedoff">| Char.isControl c  = go cs</span>
+<span class="lineno">   92 </span><span class="spaces">      </span><span class="istickedoff">| isDecorativeChar c = go cs</span>
+<span class="lineno">   93 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>          = c : go cs</span>
+<span class="lineno">   94 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">-- Skip ESC [ ... (final byte) — CSI sequences</span>
+<span class="lineno">   96 </span><span class="spaces">    </span><span class="istickedoff">skipEscape ('[' : cs) = skipCsi cs</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">-- Skip ESC ] ... ST — OSC sequences (terminated by BEL or ESC \)</span>
+<span class="lineno">   98 </span><span class="spaces">    </span><span class="istickedoff">skipEscape (']' : cs) = skipOsc cs</span>
+<span class="lineno">   99 </span><span class="spaces">    </span><span class="istickedoff">-- Skip ESC P ... ST — DCS sequences</span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">skipEscape ('P' : cs) = skipOsc cs</span>
+<span class="lineno">  101 </span><span class="spaces">    </span><span class="istickedoff">-- Skip ESC ( X, ESC ) X — charset designators</span>
+<span class="lineno">  102 </span><span class="spaces">    </span><span class="istickedoff">skipEscape ('(' : _ : cs) = go cs</span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">skipEscape (')' : _ : cs) = <span class="nottickedoff">go cs</span></span>
+<span class="lineno">  104 </span><span class="spaces">    </span><span class="istickedoff">-- Skip ESC followed by any single character (SS2, SS3, etc.)</span>
+<span class="lineno">  105 </span><span class="spaces">    </span><span class="istickedoff">skipEscape (_ : cs) = <span class="nottickedoff">go cs</span></span>
+<span class="lineno">  106 </span><span class="spaces">    </span><span class="istickedoff">skipEscape [] = <span class="nottickedoff">[]</span></span>
+<span class="lineno">  107 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  108 </span><span class="spaces">    </span><span class="istickedoff">-- CSI: skip parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F)</span>
+<span class="lineno">  109 </span><span class="spaces">    </span><span class="istickedoff">-- until a final byte (0x40-0x7E)</span>
+<span class="lineno">  110 </span><span class="spaces">    </span><span class="istickedoff">skipCsi [] = <span class="nottickedoff">[]</span></span>
+<span class="lineno">  111 </span><span class="spaces">    </span><span class="istickedoff">skipCsi (c : cs)</span>
+<span class="lineno">  112 </span><span class="spaces">      </span><span class="istickedoff">| c &gt;= '@' &amp;&amp; c &lt;= '~' = go cs  -- final byte, done</span>
+<span class="lineno">  113 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>             = skipCsi cs</span>
+<span class="lineno">  114 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  115 </span><span class="spaces">    </span><span class="istickedoff">-- OSC / DCS: skip until BEL (0x07) or ST (ESC \)</span>
+<span class="lineno">  116 </span><span class="spaces">    </span><span class="istickedoff">skipOsc [] = <span class="nottickedoff">[]</span></span>
+<span class="lineno">  117 </span><span class="spaces">    </span><span class="istickedoff">skipOsc ('\BEL' : cs) = go cs</span>
+<span class="lineno">  118 </span><span class="spaces">    </span><span class="istickedoff">skipOsc ('\ESC' : '\\' : cs) = go cs</span>
+<span class="lineno">  119 </span><span class="spaces">    </span><span class="istickedoff">skipOsc (_ : cs) = skipOsc cs</span></span>
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- | Characters used by TUI applications for rendering decorative elements.
+<span class="lineno">  122 </span>-- These are valid Unicode but produce visual garbage when displayed outside
+<span class="lineno">  123 </span>-- the originating terminal application.
+<span class="lineno">  124 </span>isDecorativeChar :: Char -&gt; Bool
+<span class="lineno">  125 </span><span class="decl"><span class="istickedoff">isDecorativeChar c = let cp = Char.ord c in</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">-- Box Drawing (U+2500–U+257F)</span>
+<span class="lineno">  127 </span><span class="spaces">     </span><span class="istickedoff">(cp &gt;= 0x2500 &amp;&amp; cp &lt;= 0x257F)</span>
+<span class="lineno">  128 </span><span class="spaces">  </span><span class="istickedoff">-- Block Elements (U+2580–U+259F)</span>
+<span class="lineno">  129 </span><span class="spaces">  </span><span class="istickedoff">|| (cp &gt;= 0x2580 &amp;&amp; cp &lt;= 0x259F)</span>
+<span class="lineno">  130 </span><span class="spaces">  </span><span class="istickedoff">-- Geometric Shapes (U+25A0–U+25FF) — squares, circles, triangles</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">|| (cp &gt;= 0x25A0 &amp;&amp; cp &lt;= 0x25FF)</span>
+<span class="lineno">  132 </span><span class="spaces">  </span><span class="istickedoff">-- Braille Patterns (U+2800–U+28FF) — used for sparklines/graphs</span>
+<span class="lineno">  133 </span><span class="spaces">  </span><span class="istickedoff">|| (cp &gt;= 0x2800 &amp;&amp; cp &lt;= 0x28FF)</span>
+<span class="lineno">  134 </span><span class="spaces">  </span><span class="istickedoff">-- Private Use Area (U+E000–U+F8FF) — Powerline, Nerd Font icons</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">|| (cp &gt;= 0xE000 &amp;&amp; cp &lt;= 0xF8FF)</span>
+<span class="lineno">  136 </span><span class="spaces">  </span><span class="istickedoff">-- Supplementary Private Use Areas (U+F0000–U+10FFFF)</span>
+<span class="lineno">  137 </span><span class="spaces">  </span><span class="istickedoff">|| cp &gt;= 0xF0000</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,285 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Path
+<span class="lineno">    2 </span>  ( -- * Safe path type (constructor intentionally NOT exported)
+<span class="lineno">    3 </span>    SafePath
+<span class="lineno">    4 </span>    -- * Path errors
+<span class="lineno">    5 </span>  , PathError (..)
+<span class="lineno">    6 </span>    -- * Construction (the ONLY way to obtain a SafePath)
+<span class="lineno">    7 </span>  , mkSafePath
+<span class="lineno">    8 </span>    -- * Read-only accessor
+<span class="lineno">    9 </span>  , getSafePath
+<span class="lineno">   10 </span>    -- * Path roots (exported configuration values)
+<span class="lineno">   11 </span>  , KeysRoot (..)
+<span class="lineno">   12 </span>  , RuntimeRoot (..)
+<span class="lineno">   13 </span>    -- * Identity-key paths (constructor intentionally NOT exported)
+<span class="lineno">   14 </span>  , SafeKeyPath
+<span class="lineno">   15 </span>  , mkSafeKeyPath
+<span class="lineno">   16 </span>  , getSafeKeyPath
+<span class="lineno">   17 </span>    -- * Runtime paths (constructor intentionally NOT exported)
+<span class="lineno">   18 </span>  , SafeRuntimePath
+<span class="lineno">   19 </span>  , mkSafeRuntimePath
+<span class="lineno">   20 </span>  , getSafeRuntimePath
+<span class="lineno">   21 </span>    -- * Setup helpers
+<span class="lineno">   22 </span>  , ensureKeysRoot
+<span class="lineno">   23 </span>  , ensureRuntimeRoot
+<span class="lineno">   24 </span>  ) where
+<span class="lineno">   25 </span>
+<span class="lineno">   26 </span>import Data.List
+<span class="lineno">   27 </span>import Data.Set (Set)
+<span class="lineno">   28 </span>import Data.Set qualified as Set
+<span class="lineno">   29 </span>import Data.Text (Text)
+<span class="lineno">   30 </span>import System.Directory
+<span class="lineno">   31 </span>import System.FilePath
+<span class="lineno">   32 </span>import System.Posix.Files qualified as PF
+<span class="lineno">   33 </span>import System.Posix.Types (FileMode)
+<span class="lineno">   34 </span>import System.Posix.User qualified as PU
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>import PureClaw.Core.Types
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>-- | A filesystem path that has been validated to be within the workspace
+<span class="lineno">   39 </span>-- and not on the blocked list. Constructor is intentionally NOT exported —
+<span class="lineno">   40 </span>-- the only way to obtain a 'SafePath' is through 'mkSafePath'.
+<span class="lineno">   41 </span>newtype SafePath = SafePath { <span class="istickedoff"><span class="decl"><span class="istickedoff">getSafePath</span></span></span> :: FilePath }
+<span class="lineno">   42 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   43 </span>
+<span class="lineno">   44 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show SafePath</span></span></span></span> where
+<span class="lineno">   45 </span>  <span class="decl"><span class="nottickedoff">show sp = &quot;SafePath &quot; ++ show (getSafePath sp)</span></span>
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>-- | Errors that can occur during path validation.
+<span class="lineno">   48 </span>data PathError
+<span class="lineno">   49 </span>  = PathEscapesWorkspace FilePath FilePath
+<span class="lineno">   50 </span>    -- ^ requested, resolved
+<span class="lineno">   51 </span>  | PathIsBlocked FilePath Text
+<span class="lineno">   52 </span>    -- ^ requested, reason
+<span class="lineno">   53 </span>  | PathDoesNotExist FilePath
+<span class="lineno">   54 </span>    -- ^ the requested path does not exist
+<span class="lineno">   55 </span>  | PathInsecureMode FilePath FileMode FileMode
+<span class="lineno">   56 </span>    -- ^ path, actual mode (masked to 0o777), expected mode (masked to 0o777)
+<span class="lineno">   57 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>-- | Paths that must never be readable or writable, regardless of workspace.
+<span class="lineno">   60 </span>-- Checked against the first component of the relative path within the workspace.
+<span class="lineno">   61 </span>blockedPaths :: Set String
+<span class="lineno">   62 </span><span class="decl"><span class="istickedoff">blockedPaths = Set.fromList</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;.env&quot;</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.env.local&quot;</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.env.production&quot;</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.ssh&quot;</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.gnupg&quot;</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.netrc&quot;</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">, &quot;.pureclaw&quot;  -- protects vault and config from agent file tools</span>
+<span class="lineno">   70 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>-- | The ONLY way to obtain a 'SafePath'. Canonicalizes the path (following
+<span class="lineno">   73 </span>-- symlinks), verifies it stays within the workspace, checks the blocked list,
+<span class="lineno">   74 </span>-- and verifies the path exists.
+<span class="lineno">   75 </span>--
+<span class="lineno">   76 </span>-- Checks run in order, each as an early return:
+<span class="lineno">   77 </span>--  1. Reject @..@ traversal (prevents workspace escape)
+<span class="lineno">   78 </span>--  2. Reject absolute paths outside workspace
+<span class="lineno">   79 </span>--  3. Reject blocked paths (@.env@, @.ssh@, etc.)
+<span class="lineno">   80 </span>--  4. Reject non-existent paths
+<span class="lineno">   81 </span>--  5. Reject symlinks that resolve outside workspace
+<span class="lineno">   82 </span>mkSafePath :: WorkspaceRoot -&gt; FilePath -&gt; IO (Either PathError SafePath)
+<span class="lineno">   83 </span><span class="decl"><span class="istickedoff">mkSafePath (WorkspaceRoot root) requested = do</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">canonRoot &lt;- canonicalizePath root</span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">let raw = if isAbsolute requested then requested else canonRoot &lt;/&gt; requested</span>
+<span class="lineno">   86 </span><span class="spaces">      </span><span class="istickedoff">relative = makeRelative canonRoot raw</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">-- Pure checks first (no IO, no filesystem access)</span>
+<span class="lineno">   88 </span><span class="spaces">  </span><span class="istickedoff">let pureCheck</span>
+<span class="lineno">   89 </span><span class="spaces">        </span><span class="istickedoff">| hasParentTraversal requested = Just (PathEscapesWorkspace <span class="nottickedoff">requested</span> <span class="nottickedoff">raw</span>)</span>
+<span class="lineno">   90 </span><span class="spaces">        </span><span class="istickedoff">| isAbsolute requested &amp;&amp; not (canonRoot `isPrefixOf` raw) = Just (PathEscapesWorkspace <span class="nottickedoff">requested</span> <span class="nottickedoff">raw</span>)</span>
+<span class="lineno">   91 </span><span class="spaces">        </span><span class="istickedoff">| isBlockedPath relative = Just (PathIsBlocked <span class="nottickedoff">requested</span> <span class="nottickedoff">&quot;blocked path&quot;</span>)</span>
+<span class="lineno">   92 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Nothing</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">case pureCheck of</span>
+<span class="lineno">   94 </span><span class="spaces">    </span><span class="istickedoff">Just err -&gt; pure (Left err)</span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">   96 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- doesPathExist raw</span>
+<span class="lineno">   97 </span><span class="spaces">      </span><span class="istickedoff">if not exists</span>
+<span class="lineno">   98 </span><span class="spaces">        </span><span class="istickedoff">then pure $ Left (PathDoesNotExist <span class="nottickedoff">requested</span>)</span>
+<span class="lineno">   99 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  100 </span><span class="spaces">          </span><span class="istickedoff">-- Canonicalize resolves symlinks — a symlink inside the workspace</span>
+<span class="lineno">  101 </span><span class="spaces">          </span><span class="istickedoff">-- could point outside it, so we re-check containment.</span>
+<span class="lineno">  102 </span><span class="spaces">          </span><span class="istickedoff">canonical &lt;- canonicalizePath raw</span>
+<span class="lineno">  103 </span><span class="spaces">          </span><span class="istickedoff">pure $ if <span class="tickonlytrue">canonRoot `isPrefixOf` canonical</span></span>
+<span class="lineno">  104 </span><span class="spaces">            </span><span class="istickedoff">then Right (SafePath canonical)</span>
+<span class="lineno">  105 </span><span class="spaces">            </span><span class="istickedoff">else <span class="nottickedoff">Left (PathEscapesWorkspace requested canonical)</span></span></span>
+<span class="lineno">  106 </span>
+<span class="lineno">  107 </span>-- | Check if a path contains &quot;..&quot; components that could traverse upward.
+<span class="lineno">  108 </span>hasParentTraversal :: FilePath -&gt; Bool
+<span class="lineno">  109 </span><span class="decl"><span class="istickedoff">hasParentTraversal path = &quot;..&quot; `elem` splitDirectories path</span></span>
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>-- | Check if a relative path matches any blocked path.
+<span class="lineno">  112 </span>-- Matches on the first path component (e.g. &quot;.env&quot; matches &quot;.env&quot; and &quot;.env/foo&quot;).
+<span class="lineno">  113 </span>isBlockedPath :: FilePath -&gt; Bool
+<span class="lineno">  114 </span><span class="decl"><span class="istickedoff">isBlockedPath relative =</span>
+<span class="lineno">  115 </span><span class="spaces">  </span><span class="istickedoff">let firstComponent = Prelude.takeWhile (\c -&gt; c /= '/' &amp;&amp; c /= '\\') relative</span>
+<span class="lineno">  116 </span><span class="spaces">  </span><span class="istickedoff">in Set.member firstComponent blockedPaths</span></span>
+<span class="lineno">  117 </span>
+<span class="lineno">  118 </span>--------------------------------------------------------------------------------
+<span class="lineno">  119 </span>-- Identity &amp; runtime path roots
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- | Root directory where ssh identity keys live. Project-controlled,
+<span class="lineno">  122 </span>-- created mode 0700 at startup. Exported as a configuration value.
+<span class="lineno">  123 </span>newtype KeysRoot = KeysRoot FilePath
+<span class="lineno">  124 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  125 </span>
+<span class="lineno">  126 </span>-- | Root directory where short-lived sockets and @known_hosts@ live.
+<span class="lineno">  127 </span>-- Project-controlled, created mode 0700 at startup. Exported as a
+<span class="lineno">  128 </span>-- configuration value.
+<span class="lineno">  129 </span>newtype RuntimeRoot = RuntimeRoot FilePath
+<span class="lineno">  130 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  131 </span>
+<span class="lineno">  132 </span>-- | A filesystem path validated to live under a 'KeysRoot'. Constructor is
+<span class="lineno">  133 </span>-- intentionally NOT exported — the only way to obtain a 'SafeKeyPath' is
+<span class="lineno">  134 </span>-- through 'mkSafeKeyPath'. The 'Show' instance is redacted to prevent
+<span class="lineno">  135 </span>-- accidental leakage of key paths via logs or error messages.
+<span class="lineno">  136 </span>newtype SafeKeyPath = SafeKeyPath { <span class="istickedoff"><span class="decl"><span class="istickedoff">getSafeKeyPath</span></span></span> :: FilePath }
+<span class="lineno">  137 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  138 </span>
+<span class="lineno">  139 </span>-- | Redacted on purpose. See 'SafeKeyPath' haddock.
+<span class="lineno">  140 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show SafeKeyPath</span></span></span></span> where
+<span class="lineno">  141 </span>  <span class="decl"><span class="istickedoff">show _ = &quot;SafeKeyPath &lt;redacted&gt;&quot;</span></span>
+<span class="lineno">  142 </span>
+<span class="lineno">  143 </span>-- | A filesystem path validated to live under a 'RuntimeRoot'. Constructor
+<span class="lineno">  144 </span>-- is intentionally NOT exported — the only way to obtain a
+<span class="lineno">  145 </span>-- 'SafeRuntimePath' is through 'mkSafeRuntimePath'. The 'Show' instance
+<span class="lineno">  146 </span>-- is redacted to prevent accidental leakage.
+<span class="lineno">  147 </span>newtype SafeRuntimePath = SafeRuntimePath { <span class="istickedoff"><span class="decl"><span class="istickedoff">getSafeRuntimePath</span></span></span> :: FilePath }
+<span class="lineno">  148 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  149 </span>
+<span class="lineno">  150 </span>-- | Redacted on purpose. See 'SafeRuntimePath' haddock.
+<span class="lineno">  151 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show SafeRuntimePath</span></span></span></span> where
+<span class="lineno">  152 </span>  <span class="decl"><span class="istickedoff">show _ = &quot;SafeRuntimePath &lt;redacted&gt;&quot;</span></span>
+<span class="lineno">  153 </span>
+<span class="lineno">  154 </span>-- | The ONLY way to obtain a 'SafeKeyPath'.
+<span class="lineno">  155 </span>--
+<span class="lineno">  156 </span>-- Validation rules (match the rigor of 'mkSafePath'):
+<span class="lineno">  157 </span>--
+<span class="lineno">  158 </span>--  1. Reject @..@ traversal in the requested path.
+<span class="lineno">  159 </span>--  2. Canonicalize the keys root; reject if the root directory does not exist.
+<span class="lineno">  160 </span>--  3. Canonicalize the requested file (when it already exists) and verify
+<span class="lineno">  161 </span>--     the result is under the canonicalized keys root. This catches
+<span class="lineno">  162 </span>--     symlinks that point outside the root.
+<span class="lineno">  163 </span>--  4. When the file already exists, @fstat@ it and verify
+<span class="lineno">  164 </span>--     @mode `intersectFileModes` 0o777 == 0o400@ and
+<span class="lineno">  165 </span>--     @owner == geteuid()@; surface 'PathInsecureMode' otherwise.
+<span class="lineno">  166 </span>--
+<span class="lineno">  167 </span>-- Note: a 'SafeKeyPath' for a file that does not yet exist is permitted —
+<span class="lineno">  168 </span>-- it is the caller's responsibility (typically the ssh-key-write path) to
+<span class="lineno">  169 </span>-- create the file with mode 0400. Re-validating after write is the
+<span class="lineno">  170 </span>-- caller's job.
+<span class="lineno">  171 </span>mkSafeKeyPath :: KeysRoot -&gt; FilePath -&gt; IO (Either PathError SafeKeyPath)
+<span class="lineno">  172 </span><span class="decl"><span class="istickedoff">mkSafeKeyPath (KeysRoot root) requested =</span>
+<span class="lineno">  173 </span><span class="spaces">  </span><span class="istickedoff">validateUnderRoot root requested SafeKeyPath (Just (0o400, <span class="nottickedoff">expectedKeyMode</span>))</span>
+<span class="lineno">  174 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  175 </span><span class="spaces">    </span><span class="istickedoff">expectedKeyMode :: FileMode</span>
+<span class="lineno">  176 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">expectedKeyMode = 0o400</span></span></span>
+<span class="lineno">  177 </span>
+<span class="lineno">  178 </span>-- | The ONLY way to obtain a 'SafeRuntimePath'.
+<span class="lineno">  179 </span>--
+<span class="lineno">  180 </span>-- Same validation rules as 'mkSafeKeyPath' except no mode/owner check on
+<span class="lineno">  181 </span>-- the file — sockets are typically created by ssh itself and known_hosts
+<span class="lineno">  182 </span>-- mode is enforced elsewhere.
+<span class="lineno">  183 </span>mkSafeRuntimePath :: RuntimeRoot -&gt; FilePath -&gt; IO (Either PathError SafeRuntimePath)
+<span class="lineno">  184 </span><span class="decl"><span class="istickedoff">mkSafeRuntimePath (RuntimeRoot root) requested =</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">validateUnderRoot root requested SafeRuntimePath Nothing</span></span>
+<span class="lineno">  186 </span>
+<span class="lineno">  187 </span>-- | Shared validation pipeline for 'mkSafeKeyPath' and 'mkSafeRuntimePath'.
+<span class="lineno">  188 </span>-- Takes a wrapping constructor and an optional @(expectedMode, expectedMode)@
+<span class="lineno">  189 </span>-- pair. The pair carries the expected mode twice because the same value is
+<span class="lineno">  190 </span>-- both the value reported in 'PathInsecureMode' (the &quot;expected&quot; field) and
+<span class="lineno">  191 </span>-- the value we compare against — having a single source kept the call sites
+<span class="lineno">  192 </span>-- intentional.
+<span class="lineno">  193 </span>validateUnderRoot
+<span class="lineno">  194 </span>  :: FilePath
+<span class="lineno">  195 </span>  -&gt; FilePath
+<span class="lineno">  196 </span>  -&gt; (FilePath -&gt; a)
+<span class="lineno">  197 </span>  -&gt; Maybe (FileMode, FileMode)
+<span class="lineno">  198 </span>  -&gt; IO (Either PathError a)
+<span class="lineno">  199 </span><span class="decl"><span class="istickedoff">validateUnderRoot root requested wrap mModeCheck = do</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="istickedoff">if hasParentTraversal requested</span>
+<span class="lineno">  201 </span><span class="spaces">    </span><span class="istickedoff">then pure $ Left (PathEscapesWorkspace <span class="nottickedoff">requested</span> <span class="nottickedoff">requested</span>)</span>
+<span class="lineno">  202 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  203 </span><span class="spaces">      </span><span class="istickedoff">rootExists &lt;- doesDirectoryExist root</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="istickedoff">if not rootExists</span>
+<span class="lineno">  205 </span><span class="spaces">        </span><span class="istickedoff">then pure $ Left (PathDoesNotExist <span class="nottickedoff">root</span>)</span>
+<span class="lineno">  206 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  207 </span><span class="spaces">          </span><span class="istickedoff">canonRoot &lt;- canonicalizePath root</span>
+<span class="lineno">  208 </span><span class="spaces">          </span><span class="istickedoff">let raw = if <span class="tickonlyfalse">isAbsolute requested</span></span>
+<span class="lineno">  209 </span><span class="spaces">                      </span><span class="istickedoff">then <span class="nottickedoff">requested</span></span>
+<span class="lineno">  210 </span><span class="spaces">                      </span><span class="istickedoff">else canonRoot &lt;/&gt; requested</span>
+<span class="lineno">  211 </span><span class="spaces">          </span><span class="istickedoff">fileExists &lt;- doesPathExist raw</span>
+<span class="lineno">  212 </span><span class="spaces">          </span><span class="istickedoff">if fileExists</span>
+<span class="lineno">  213 </span><span class="spaces">            </span><span class="istickedoff">then do</span>
+<span class="lineno">  214 </span><span class="spaces">              </span><span class="istickedoff">canonical &lt;- canonicalizePath raw</span>
+<span class="lineno">  215 </span><span class="spaces">              </span><span class="istickedoff">if canonRoot `isPrefixOf` canonical</span>
+<span class="lineno">  216 </span><span class="spaces">                </span><span class="istickedoff">then case mModeCheck of</span>
+<span class="lineno">  217 </span><span class="spaces">                       </span><span class="istickedoff">Nothing -&gt; pure $ Right (wrap canonical)</span>
+<span class="lineno">  218 </span><span class="spaces">                       </span><span class="istickedoff">Just (expected, _) -&gt; checkModeAndOwner canonical expected wrap</span>
+<span class="lineno">  219 </span><span class="spaces">                </span><span class="istickedoff">else pure $ Left (PathEscapesWorkspace <span class="nottickedoff">requested</span> <span class="nottickedoff">canonical</span>)</span>
+<span class="lineno">  220 </span><span class="spaces">            </span><span class="istickedoff">else</span>
+<span class="lineno">  221 </span><span class="spaces">              </span><span class="istickedoff">-- File does not exist yet (e.g. ssh has not written the key).</span>
+<span class="lineno">  222 </span><span class="spaces">              </span><span class="istickedoff">-- Verify the *requested* location resolves under the root.</span>
+<span class="lineno">  223 </span><span class="spaces">              </span><span class="istickedoff">if <span class="tickonlytrue">canonRoot `isPrefixOf` raw</span></span>
+<span class="lineno">  224 </span><span class="spaces">                </span><span class="istickedoff">then pure $ Right (wrap raw)</span>
+<span class="lineno">  225 </span><span class="spaces">                </span><span class="istickedoff">else <span class="nottickedoff">pure $ Left (PathEscapesWorkspace requested raw)</span></span></span>
+<span class="lineno">  226 </span>
+<span class="lineno">  227 </span>-- | Verify the file's mode (masked to the standard permission bits) and
+<span class="lineno">  228 </span>-- effective-uid owner match the expected mode. Returns 'PathInsecureMode'
+<span class="lineno">  229 </span>-- on mismatch.
+<span class="lineno">  230 </span>checkModeAndOwner
+<span class="lineno">  231 </span>  :: FilePath
+<span class="lineno">  232 </span>  -&gt; FileMode
+<span class="lineno">  233 </span>  -&gt; (FilePath -&gt; a)
+<span class="lineno">  234 </span>  -&gt; IO (Either PathError a)
+<span class="lineno">  235 </span><span class="decl"><span class="istickedoff">checkModeAndOwner canonical expectedMode wrap = do</span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="istickedoff">status &lt;- PF.getFileStatus canonical</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">let actualMode = PF.fileMode status `PF.intersectFileModes` 0o777</span>
+<span class="lineno">  238 </span><span class="spaces">      </span><span class="istickedoff">ownerUid   = PF.fileOwner status</span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="istickedoff">euid &lt;- PU.getEffectiveUserID</span>
+<span class="lineno">  240 </span><span class="spaces">  </span><span class="istickedoff">if actualMode == expectedMode &amp;&amp; ownerUid == euid</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">then pure $ Right (wrap canonical)</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">else pure $ Left (PathInsecureMode <span class="nottickedoff">canonical</span> <span class="nottickedoff">actualMode</span> <span class="nottickedoff">expectedMode</span>)</span></span>
+<span class="lineno">  243 </span>
+<span class="lineno">  244 </span>-- | Create the keys-root directory if missing (mode 0700) and return a
+<span class="lineno">  245 </span>-- 'KeysRoot' wrapping it. Idempotent — if the directory already exists, the
+<span class="lineno">  246 </span>-- mode is re-applied. Callers wire this into agent startup before any
+<span class="lineno">  247 </span>-- 'mkSafeKeyPath' call.
+<span class="lineno">  248 </span>ensureKeysRoot :: FilePath -&gt; IO KeysRoot
+<span class="lineno">  249 </span><span class="decl"><span class="istickedoff">ensureKeysRoot dir = do</span>
+<span class="lineno">  250 </span><span class="spaces">  </span><span class="istickedoff">createDirectoryIfMissing True dir</span>
+<span class="lineno">  251 </span><span class="spaces">  </span><span class="istickedoff">PF.setFileMode dir 0o700</span>
+<span class="lineno">  252 </span><span class="spaces">  </span><span class="istickedoff">pure (KeysRoot dir)</span></span>
+<span class="lineno">  253 </span>
+<span class="lineno">  254 </span>-- | Create the runtime-root directory if missing (mode 0700) and return a
+<span class="lineno">  255 </span>-- 'RuntimeRoot' wrapping it. Idempotent. Callers wire this into agent
+<span class="lineno">  256 </span>-- startup before any 'mkSafeRuntimePath' call.
+<span class="lineno">  257 </span>ensureRuntimeRoot :: FilePath -&gt; IO RuntimeRoot
+<span class="lineno">  258 </span><span class="decl"><span class="istickedoff">ensureRuntimeRoot dir = do</span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">createDirectoryIfMissing True dir</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">PF.setFileMode dir 0o700</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="istickedoff">pure (RuntimeRoot dir)</span></span>
+<span class="lineno">  262 </span>
+
+</pre>
+</body>
+</html>

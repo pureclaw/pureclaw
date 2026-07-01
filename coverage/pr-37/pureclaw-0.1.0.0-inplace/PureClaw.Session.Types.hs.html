@@ -1,0 +1,194 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Session.Types
+<span class="lineno">    2 </span>  ( -- * Session prefix (smart constructor)
+<span class="lineno">    3 </span>    -- The data constructor is intentionally NOT exported. The only way to
+<span class="lineno">    4 </span>    -- obtain a 'SessionPrefix' is via 'mkSessionPrefix' (or its 'FromJSON'
+<span class="lineno">    5 </span>    -- instance, which routes through the same validation).
+<span class="lineno">    6 </span>    SessionPrefix
+<span class="lineno">    7 </span>  , unSessionPrefix
+<span class="lineno">    8 </span>  , mkSessionPrefix
+<span class="lineno">    9 </span>  , SessionPrefixError (..)
+<span class="lineno">   10 </span>    -- * Session ID generation
+<span class="lineno">   11 </span>  , newSessionId
+<span class="lineno">   12 </span>    -- * Runtime type
+<span class="lineno">   13 </span>  , RuntimeType (..)
+<span class="lineno">   14 </span>  , defaultTarget
+<span class="lineno">   15 </span>    -- * Session metadata
+<span class="lineno">   16 </span>  , SessionMeta (..)
+<span class="lineno">   17 </span>  ) where
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>import Data.Aeson ((.=), (.:), (.:?))
+<span class="lineno">   20 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   21 </span>import Data.Char qualified as Char
+<span class="lineno">   22 </span>import Data.Text (Text)
+<span class="lineno">   23 </span>import Data.Text qualified as T
+<span class="lineno">   24 </span>import Data.Time (UTCTime (..), diffTimeToPicoseconds)
+<span class="lineno">   25 </span>import Data.Time.Format (defaultTimeLocale, formatTime)
+<span class="lineno">   26 </span>import GHC.Generics (Generic)
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>import PureClaw.Agent.AgentDef (AgentName, unAgentName)
+<span class="lineno">   29 </span>import PureClaw.Core.Types (MessageTarget (..), SessionId (..))
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>-- | Validated session prefix. Used as the human-readable leading segment
+<span class="lineno">   32 </span>-- of a 'PureClaw.Core.Types.SessionId'. Same character rules as
+<span class="lineno">   33 </span>-- 'PureClaw.Agent.AgentDef.AgentName' plus a reserved-word denylist.
+<span class="lineno">   34 </span>newtype SessionPrefix = SessionPrefix { <span class="istickedoff"><span class="decl"><span class="istickedoff">unSessionPrefix</span></span></span> :: Text }
+<span class="lineno">   35 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Reasons a raw 'Text' cannot be promoted to a 'SessionPrefix'.
+<span class="lineno">   38 </span>data SessionPrefixError
+<span class="lineno">   39 </span>  = PrefixEmpty
+<span class="lineno">   40 </span>  | PrefixTooLong
+<span class="lineno">   41 </span>  | PrefixInvalidChars Text
+<span class="lineno">   42 </span>  | PrefixLeadingDot
+<span class="lineno">   43 </span>  | PrefixReserved Text
+<span class="lineno">   44 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>-- | Maximum allowed length for a session prefix.
+<span class="lineno">   47 </span>sessionPrefixMaxLength :: Int
+<span class="lineno">   48 </span><span class="decl"><span class="istickedoff">sessionPrefixMaxLength = 64</span></span>
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>-- | Valid character predicate: ASCII letters, digits, underscore, hyphen.
+<span class="lineno">   51 </span>-- Mirrors 'PureClaw.Agent.AgentDef.isValidAgentNameChar'.
+<span class="lineno">   52 </span>isValidPrefixChar :: Char -&gt; Bool
+<span class="lineno">   53 </span><span class="decl"><span class="istickedoff">isValidPrefixChar c =</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">Char.isAsciiUpper c</span>
+<span class="lineno">   55 </span><span class="spaces">    </span><span class="istickedoff">|| Char.isAsciiLower c</span>
+<span class="lineno">   56 </span><span class="spaces">    </span><span class="istickedoff">|| Char.isDigit c</span>
+<span class="lineno">   57 </span><span class="spaces">    </span><span class="istickedoff">|| c == '_'</span>
+<span class="lineno">   58 </span><span class="spaces">    </span><span class="istickedoff">|| c == '-'</span></span>
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Reserved tokens that look like prefixes but collide with CLI verbs.
+<span class="lineno">   61 </span>-- Currently just @&quot;new&quot;@, which is the literal argument to
+<span class="lineno">   62 </span>-- @\/session new@ and would create ambiguous resume targets if allowed
+<span class="lineno">   63 </span>-- as a prefix.
+<span class="lineno">   64 </span>reservedPrefixes :: [Text]
+<span class="lineno">   65 </span><span class="decl"><span class="istickedoff">reservedPrefixes = [&quot;new&quot;]</span></span>
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>-- | Smart constructor. Same validation as 'mkAgentName' (non-empty,
+<span class="lineno">   68 </span>-- max 64 chars, no leading dot, only @[a-zA-Z0-9_-]@), plus rejection
+<span class="lineno">   69 </span>-- of reserved tokens like @&quot;new&quot;@.
+<span class="lineno">   70 </span>mkSessionPrefix :: Text -&gt; Either SessionPrefixError SessionPrefix
+<span class="lineno">   71 </span><span class="decl"><span class="istickedoff">mkSessionPrefix raw</span>
+<span class="lineno">   72 </span><span class="spaces">  </span><span class="istickedoff">| T.null raw = Left PrefixEmpty</span>
+<span class="lineno">   73 </span><span class="spaces">  </span><span class="istickedoff">| T.length raw &gt; sessionPrefixMaxLength = Left PrefixTooLong</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="istickedoff">| T.head raw == '.' = Left PrefixLeadingDot</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">| not (T.all isValidPrefixChar raw) = Left (PrefixInvalidChars raw)</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="istickedoff">| raw `elem` reservedPrefixes = Left (PrefixReserved raw)</span>
+<span class="lineno">   77 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Right (SessionPrefix raw)</span></span>
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | Custom 'Aeson.FromJSON' routes through 'mkSessionPrefix' so corrupted
+<span class="lineno">   80 </span>-- on-disk JSON cannot bypass the smart constructor.
+<span class="lineno">   81 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON SessionPrefix</span></span></span></span> where
+<span class="lineno">   82 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;SessionPrefix&quot;</span> $ \t -&gt;</span>
+<span class="lineno">   83 </span><span class="spaces">    </span><span class="istickedoff">case mkSessionPrefix t of</span>
+<span class="lineno">   84 </span><span class="spaces">      </span><span class="istickedoff">Right p -&gt; pure p</span>
+<span class="lineno">   85 </span><span class="spaces">      </span><span class="istickedoff">Left e -&gt; fail <span class="nottickedoff">(&quot;invalid SessionPrefix: &quot; ++ show e)</span></span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>-- | Pure session ID generator. Encodes a 'UTCTime' as
+<span class="lineno">   88 </span>-- @YYYYMMDD-HHMMSS-mmm@ (milliseconds zero-padded to three digits)
+<span class="lineno">   89 </span>-- and prefixes it with the optional 'SessionPrefix' separated by a
+<span class="lineno">   90 </span>-- hyphen.
+<span class="lineno">   91 </span>newSessionId :: Maybe SessionPrefix -&gt; UTCTime -&gt; SessionId
+<span class="lineno">   92 </span><span class="decl"><span class="istickedoff">newSessionId mPrefix time =</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">let hms     = formatTime <span class="nottickedoff">defaultTimeLocale</span> &quot;%Y%m%d-%H%M%S&quot; time</span>
+<span class="lineno">   94 </span><span class="spaces">      </span><span class="istickedoff">-- Extract milliseconds from the fractional second.</span>
+<span class="lineno">   95 </span><span class="spaces">      </span><span class="istickedoff">picoDay = diffTimeToPicoseconds (utctDayTime time)</span>
+<span class="lineno">   96 </span><span class="spaces">      </span><span class="istickedoff">millis  = (picoDay `div` 1000000000) `mod` 1000</span>
+<span class="lineno">   97 </span><span class="spaces">      </span><span class="istickedoff">timeStr = T.pack hms &lt;&gt; &quot;-&quot; &lt;&gt; T.justifyRight 3 <span class="nottickedoff">'0'</span> (T.pack (show millis))</span>
+<span class="lineno">   98 </span><span class="spaces">      </span><span class="istickedoff">full    = case mPrefix of</span>
+<span class="lineno">   99 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt; timeStr</span>
+<span class="lineno">  100 </span><span class="spaces">        </span><span class="istickedoff">Just p  -&gt; unSessionPrefix p &lt;&gt; &quot;-&quot; &lt;&gt; timeStr</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">in SessionId full</span></span>
+<span class="lineno">  102 </span>
+<span class="lineno">  103 </span>-- | Whether a session targets the LLM provider directly or a named harness
+<span class="lineno">  104 </span>-- (e.g. an interactive @claude-code@ tmux session).
+<span class="lineno">  105 </span>data RuntimeType
+<span class="lineno">  106 </span>  = RTProvider
+<span class="lineno">  107 </span>  | RTHarness Text
+<span class="lineno">  108 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  109 </span>
+<span class="lineno">  110 </span>-- | JSON encoding: @&quot;provider&quot;@ or @&quot;harness:&lt;name&gt;&quot;@. Custom rather than
+<span class="lineno">  111 </span>-- generic so on-disk @session.json@ files stay human-readable and so we
+<span class="lineno">  112 </span>-- don't tie ourselves to aeson's tagged-sum format.
+<span class="lineno">  113 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON RuntimeType</span></span></span></span></span></span></span></span> where
+<span class="lineno">  114 </span>  <span class="decl"><span class="istickedoff">toJSON RTProvider       = Aeson.String &quot;provider&quot;</span>
+<span class="lineno">  115 </span><span class="spaces">  </span><span class="istickedoff">toJSON (RTHarness name) = Aeson.String (&quot;harness:&quot; &lt;&gt; name)</span></span>
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON RuntimeType</span></span></span></span> where
+<span class="lineno">  118 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;RuntimeType&quot;</span> $ \t -&gt;</span>
+<span class="lineno">  119 </span><span class="spaces">    </span><span class="istickedoff">case t of</span>
+<span class="lineno">  120 </span><span class="spaces">      </span><span class="istickedoff">&quot;provider&quot; -&gt; pure RTProvider</span>
+<span class="lineno">  121 </span><span class="spaces">      </span><span class="istickedoff">_ | Just name &lt;- T.stripPrefix &quot;harness:&quot; t -&gt; pure (RTHarness name)</span>
+<span class="lineno">  122 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; fail <span class="nottickedoff">(&quot;Unknown RuntimeType: &quot; &lt;&gt; T.unpack t)</span></span></span>
+<span class="lineno">  123 </span>
+<span class="lineno">  124 </span>-- | Map a 'RuntimeType' to its corresponding 'MessageTarget'. Pure helper
+<span class="lineno">  125 </span>-- so the session loader and CLI can share the same default-routing logic
+<span class="lineno">  126 </span>-- without duplicating the case match.
+<span class="lineno">  127 </span>defaultTarget :: RuntimeType -&gt; MessageTarget
+<span class="lineno">  128 </span><span class="decl"><span class="istickedoff">defaultTarget RTProvider       = TargetProvider</span>
+<span class="lineno">  129 </span><span class="spaces"></span><span class="istickedoff">defaultTarget (RTHarness name) = TargetHarness name</span></span>
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | Persistent metadata for a single session. Stored as @session.json@
+<span class="lineno">  132 </span>-- inside the session's on-disk directory.
+<span class="lineno">  133 </span>data SessionMeta = SessionMeta
+<span class="lineno">  134 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_id</span></span></span>                :: SessionId
+<span class="lineno">  135 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_agent</span></span></span>             :: Maybe AgentName
+<span class="lineno">  136 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_runtime</span></span></span>           :: RuntimeType
+<span class="lineno">  137 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_model</span></span></span>             :: Text
+<span class="lineno">  138 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_channel</span></span></span>           :: Text
+<span class="lineno">  139 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_createdAt</span></span></span>         :: UTCTime
+<span class="lineno">  140 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_lastActive</span></span></span>        :: UTCTime
+<span class="lineno">  141 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sm_bootstrapConsumed</span></span></span> :: Bool
+<span class="lineno">  142 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Generic</span></span></span></span>)
+<span class="lineno">  143 </span>
+<span class="lineno">  144 </span>-- Hand-written JSON so we don't depend on a 'ToJSON' instance for
+<span class="lineno">  145 </span>-- 'AgentName' (which 'PureClaw.Agent.AgentDef' deliberately does not
+<span class="lineno">  146 </span>-- export). The agent is serialized as its bare 'unAgentName' string and
+<span class="lineno">  147 </span>-- deserialized via the existing 'FromJSON AgentName' instance, which
+<span class="lineno">  148 </span>-- routes through 'mkAgentName'.
+<span class="lineno">  149 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON SessionMeta</span></span></span></span></span></span></span></span> where
+<span class="lineno">  150 </span>  <span class="decl"><span class="istickedoff">toJSON s = Aeson.object $</span>
+<span class="lineno">  151 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;id&quot;                 .= _sm_id s</span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="istickedoff">, &quot;runtime&quot;            .= _sm_runtime s</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="istickedoff">, &quot;model&quot;              .= _sm_model s</span>
+<span class="lineno">  154 </span><span class="spaces">    </span><span class="istickedoff">, &quot;channel&quot;            .= _sm_channel s</span>
+<span class="lineno">  155 </span><span class="spaces">    </span><span class="istickedoff">, &quot;created_at&quot;         .= _sm_createdAt s</span>
+<span class="lineno">  156 </span><span class="spaces">    </span><span class="istickedoff">, &quot;last_active&quot;        .= _sm_lastActive s</span>
+<span class="lineno">  157 </span><span class="spaces">    </span><span class="istickedoff">, &quot;bootstrap_consumed&quot; .= _sm_bootstrapConsumed s</span>
+<span class="lineno">  158 </span><span class="spaces">    </span><span class="istickedoff">] &lt;&gt; case _sm_agent s of</span>
+<span class="lineno">  159 </span><span class="spaces">      </span><span class="istickedoff">Just n  -&gt; [&quot;agent&quot; .= unAgentName n]</span>
+<span class="lineno">  160 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; []</span></span>
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON SessionMeta</span></span></span></span> where
+<span class="lineno">  163 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;SessionMeta&quot;</span> $ \o -&gt; SessionMeta</span>
+<span class="lineno">  164 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; o .:  &quot;id&quot;</span>
+<span class="lineno">  165 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;agent&quot;</span>
+<span class="lineno">  166 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:  &quot;runtime&quot;</span>
+<span class="lineno">  167 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:  &quot;model&quot;</span>
+<span class="lineno">  168 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:  &quot;channel&quot;</span>
+<span class="lineno">  169 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:  &quot;created_at&quot;</span>
+<span class="lineno">  170 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:  &quot;last_active&quot;</span>
+<span class="lineno">  171 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:  &quot;bootstrap_consumed&quot;</span></span>
+
+</pre>
+</body>
+</html>

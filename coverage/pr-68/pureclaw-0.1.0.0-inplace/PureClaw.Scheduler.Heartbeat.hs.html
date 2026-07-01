@@ -1,0 +1,123 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Scheduler.Heartbeat
+<span class="lineno">    2 </span>  ( -- * Heartbeat configuration
+<span class="lineno">    3 </span>    HeartbeatConfig (..)
+<span class="lineno">    4 </span>  , defaultHeartbeatConfig
+<span class="lineno">    5 </span>    -- * Heartbeat runner
+<span class="lineno">    6 </span>  , HeartbeatState (..)
+<span class="lineno">    7 </span>  , mkHeartbeatState
+<span class="lineno">    8 </span>  , runHeartbeat
+<span class="lineno">    9 </span>  , stopHeartbeat
+<span class="lineno">   10 </span>  , isHeartbeatRunning
+<span class="lineno">   11 </span>    -- * Single tick (for testing)
+<span class="lineno">   12 </span>  , heartbeatTick
+<span class="lineno">   13 </span>  ) where
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>import Control.Concurrent
+<span class="lineno">   16 </span>import Control.Concurrent.STM
+<span class="lineno">   17 </span>import Control.Exception
+<span class="lineno">   18 </span>import Data.Text (Text)
+<span class="lineno">   19 </span>import Data.Text qualified as T
+<span class="lineno">   20 </span>import Data.Time
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>import PureClaw.Handles.Log
+<span class="lineno">   23 </span>
+<span class="lineno">   24 </span>-- | Configuration for the heartbeat scheduler.
+<span class="lineno">   25 </span>data HeartbeatConfig = HeartbeatConfig
+<span class="lineno">   26 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_hb_intervalSeconds</span></span></span> :: Int
+<span class="lineno">   27 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hb_name</span></span></span>            :: Text
+<span class="lineno">   28 </span>  }
+<span class="lineno">   29 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>-- | Default heartbeat: every 60 seconds.
+<span class="lineno">   32 </span>defaultHeartbeatConfig :: HeartbeatConfig
+<span class="lineno">   33 </span><span class="decl"><span class="istickedoff">defaultHeartbeatConfig = HeartbeatConfig</span>
+<span class="lineno">   34 </span><span class="spaces">  </span><span class="istickedoff">{ _hb_intervalSeconds = 60</span>
+<span class="lineno">   35 </span><span class="spaces">  </span><span class="istickedoff">, _hb_name            = &quot;heartbeat&quot;</span>
+<span class="lineno">   36 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>-- | Mutable heartbeat state.
+<span class="lineno">   39 </span>data HeartbeatState = HeartbeatState
+<span class="lineno">   40 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_hbs_config</span></span></span>    :: HeartbeatConfig
+<span class="lineno">   41 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hbs_running</span></span></span>   :: TVar Bool
+<span class="lineno">   42 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hbs_lastTick</span></span></span>  :: TVar (Maybe UTCTime)
+<span class="lineno">   43 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hbs_tickCount</span></span></span> :: TVar Int
+<span class="lineno">   44 </span>  }
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>-- | Create a fresh heartbeat state.
+<span class="lineno">   47 </span>mkHeartbeatState :: HeartbeatConfig -&gt; IO HeartbeatState
+<span class="lineno">   48 </span><span class="decl"><span class="istickedoff">mkHeartbeatState config = HeartbeatState <span class="nottickedoff">config</span></span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; newTVarIO False</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; newTVarIO Nothing</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; newTVarIO 0</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Run the heartbeat loop in a new thread. The provided action is
+<span class="lineno">   54 </span>-- called on each tick. Returns the thread ID. Use 'stopHeartbeat' to
+<span class="lineno">   55 </span>-- stop the loop.
+<span class="lineno">   56 </span>runHeartbeat :: HeartbeatState -&gt; LogHandle -&gt; IO () -&gt; IO ThreadId
+<span class="lineno">   57 </span><span class="decl"><span class="nottickedoff">runHeartbeat hbs lh action = do</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="nottickedoff">atomically $ writeTVar (_hbs_running hbs) True</span>
+<span class="lineno">   59 </span><span class="spaces">  </span><span class="nottickedoff">_lh_logInfo lh $ &quot;Heartbeat started: &quot; &lt;&gt; _hb_name (_hbs_config hbs)</span>
+<span class="lineno">   60 </span><span class="spaces">  </span><span class="nottickedoff">forkIO $ heartbeatLoop hbs lh action</span></span>
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- | Stop the heartbeat loop.
+<span class="lineno">   63 </span>stopHeartbeat :: HeartbeatState -&gt; IO ()
+<span class="lineno">   64 </span><span class="decl"><span class="istickedoff">stopHeartbeat hbs = atomically $ writeTVar (_hbs_running hbs) False</span></span>
+<span class="lineno">   65 </span>
+<span class="lineno">   66 </span>-- | Check if the heartbeat is running.
+<span class="lineno">   67 </span>isHeartbeatRunning :: HeartbeatState -&gt; IO Bool
+<span class="lineno">   68 </span><span class="decl"><span class="istickedoff">isHeartbeatRunning hbs = readTVarIO (_hbs_running hbs)</span></span>
+<span class="lineno">   69 </span>
+<span class="lineno">   70 </span>-- | Execute a single heartbeat tick. Updates last tick time and count.
+<span class="lineno">   71 </span>-- Returns 'True' if the action completed successfully.
+<span class="lineno">   72 </span>heartbeatTick :: HeartbeatState -&gt; LogHandle -&gt; IO () -&gt; IO Bool
+<span class="lineno">   73 </span><span class="decl"><span class="istickedoff">heartbeatTick hbs lh action = do</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">   75 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try action</span>
+<span class="lineno">   76 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">   77 </span><span class="spaces">    </span><span class="istickedoff">Left (e :: SomeException) -&gt; do</span>
+<span class="lineno">   78 </span><span class="spaces">      </span><span class="istickedoff">_lh_logError lh $ <span class="nottickedoff">&quot;Heartbeat tick failed: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">   79 </span><span class="spaces">      </span><span class="istickedoff">pure False</span>
+<span class="lineno">   80 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">   81 </span><span class="spaces">      </span><span class="istickedoff">atomically $ do</span>
+<span class="lineno">   82 </span><span class="spaces">        </span><span class="istickedoff">writeTVar (_hbs_lastTick hbs) (Just <span class="nottickedoff">now</span>)</span>
+<span class="lineno">   83 </span><span class="spaces">        </span><span class="istickedoff">modifyTVar' (_hbs_tickCount hbs) (+ 1)</span>
+<span class="lineno">   84 </span><span class="spaces">      </span><span class="istickedoff">pure True</span></span>
+<span class="lineno">   85 </span>
+<span class="lineno">   86 </span>-- Internal: the heartbeat loop.
+<span class="lineno">   87 </span>heartbeatLoop :: HeartbeatState -&gt; LogHandle -&gt; IO () -&gt; IO ()
+<span class="lineno">   88 </span><span class="decl"><span class="nottickedoff">heartbeatLoop hbs lh action = do</span>
+<span class="lineno">   89 </span><span class="spaces">  </span><span class="nottickedoff">running &lt;- readTVarIO (_hbs_running hbs)</span>
+<span class="lineno">   90 </span><span class="spaces">  </span><span class="nottickedoff">if running</span>
+<span class="lineno">   91 </span><span class="spaces">    </span><span class="nottickedoff">then do</span>
+<span class="lineno">   92 </span><span class="spaces">      </span><span class="nottickedoff">_ &lt;- heartbeatTick hbs lh action</span>
+<span class="lineno">   93 </span><span class="spaces">      </span><span class="nottickedoff">threadDelay (intervalMicros hbs)</span>
+<span class="lineno">   94 </span><span class="spaces">      </span><span class="nottickedoff">heartbeatLoop hbs lh action</span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="nottickedoff">else</span>
+<span class="lineno">   96 </span><span class="spaces">      </span><span class="nottickedoff">_lh_logInfo lh $ &quot;Heartbeat stopped: &quot; &lt;&gt; _hb_name (_hbs_config hbs)</span></span>
+<span class="lineno">   97 </span>
+<span class="lineno">   98 </span>-- Internal: convert interval seconds to microseconds.
+<span class="lineno">   99 </span>intervalMicros :: HeartbeatState -&gt; Int
+<span class="lineno">  100 </span><span class="decl"><span class="nottickedoff">intervalMicros hbs = _hb_intervalSeconds (_hbs_config hbs) * 1000000</span></span>
+
+</pre>
+</body>
+</html>

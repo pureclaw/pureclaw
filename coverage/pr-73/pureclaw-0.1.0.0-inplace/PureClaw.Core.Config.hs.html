@@ -1,0 +1,85 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Core.Config
+<span class="lineno">    2 </span>  ( -- * Serializable config (safe to write to disk)
+<span class="lineno">    3 </span>    Config (..)
+<span class="lineno">    4 </span>    -- * Runtime config (constructor NOT exported — contains secrets)
+<span class="lineno">    5 </span>  , RuntimeConfig
+<span class="lineno">    6 </span>  , mkRuntimeConfig
+<span class="lineno">    7 </span>    -- * RuntimeConfig field accessors
+<span class="lineno">    8 </span>  , rtConfig
+<span class="lineno">    9 </span>  , rtApiKey
+<span class="lineno">   10 </span>  , rtSecretKey
+<span class="lineno">   11 </span>  ) where
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>import PureClaw.Core.Types
+<span class="lineno">   14 </span>import PureClaw.Security.Secrets
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>-- | Serializable configuration — safe to write to disk.
+<span class="lineno">   17 </span>-- Contains no secrets. All fields are safe to show, compare, and serialize.
+<span class="lineno">   18 </span>data Config = Config
+<span class="lineno">   19 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_provider</span></span></span>     :: ProviderId
+<span class="lineno">   20 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_model</span></span></span>        :: ModelId
+<span class="lineno">   21 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_gatewayPort</span></span></span>  :: Port
+<span class="lineno">   22 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_workspace</span></span></span>    :: FilePath
+<span class="lineno">   23 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_autonomy</span></span></span>     :: AutonomyLevel
+<span class="lineno">   24 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_allowedCmds</span></span></span>  :: AllowList CommandName
+<span class="lineno">   25 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_cfg_allowedUsers</span></span></span> :: AllowList UserId
+<span class="lineno">   26 </span>  }
+<span class="lineno">   27 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Runtime configuration — NOT serializable.
+<span class="lineno">   30 </span>-- Contains secrets that must never be written to disk.
+<span class="lineno">   31 </span>-- Constructor is intentionally NOT exported — use 'mkRuntimeConfig'.
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>-- No 'ToJSON', 'FromJSON', or 'ToTOML' instances exist. Attempting to
+<span class="lineno">   34 </span>-- derive them would be a compile error because 'ApiKey' and 'SecretKey'
+<span class="lineno">   35 </span>-- have no serialization instances.
+<span class="lineno">   36 </span>data RuntimeConfig = RuntimeConfig
+<span class="lineno">   37 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_config</span></span></span>    :: Config
+<span class="lineno">   38 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_apiKey</span></span></span>    :: ApiKey
+<span class="lineno">   39 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rc_secretKey</span></span></span> :: SecretKey
+<span class="lineno">   40 </span>  }
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show RuntimeConfig</span></span></span></span> where
+<span class="lineno">   43 </span>  <span class="decl"><span class="istickedoff">show rc = &quot;RuntimeConfig { config = &quot; ++ show (_rc_config rc)</span>
+<span class="lineno">   44 </span><span class="spaces">         </span><span class="istickedoff">++ &quot;, apiKey = &quot; ++ show <span class="nottickedoff">(_rc_apiKey rc)</span></span>
+<span class="lineno">   45 </span><span class="spaces">         </span><span class="istickedoff">++ &quot;, secretKey = &quot; ++ show <span class="nottickedoff">(_rc_secretKey rc)</span></span>
+<span class="lineno">   46 </span><span class="spaces">         </span><span class="istickedoff">++ &quot; }&quot;</span></span>
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Construct a 'RuntimeConfig' from a 'Config' and secrets.
+<span class="lineno">   49 </span>mkRuntimeConfig :: Config -&gt; ApiKey -&gt; SecretKey -&gt; RuntimeConfig
+<span class="lineno">   50 </span><span class="decl"><span class="istickedoff">mkRuntimeConfig = RuntimeConfig</span></span>
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>-- | Access the serializable config portion.
+<span class="lineno">   53 </span>rtConfig :: RuntimeConfig -&gt; Config
+<span class="lineno">   54 </span><span class="decl"><span class="istickedoff">rtConfig = _rc_config</span></span>
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>-- | Access the API key.
+<span class="lineno">   57 </span>rtApiKey :: RuntimeConfig -&gt; ApiKey
+<span class="lineno">   58 </span><span class="decl"><span class="istickedoff">rtApiKey = _rc_apiKey</span></span>
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Access the secret key.
+<span class="lineno">   61 </span>rtSecretKey :: RuntimeConfig -&gt; SecretKey
+<span class="lineno">   62 </span><span class="decl"><span class="istickedoff">rtSecretKey = _rc_secretKey</span></span>
+
+</pre>
+</body>
+</html>

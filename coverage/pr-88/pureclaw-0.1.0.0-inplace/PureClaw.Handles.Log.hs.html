@@ -1,0 +1,108 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Handles.Log
+<span class="lineno">    2 </span>  ( -- * Handle type
+<span class="lineno">    3 </span>    LogHandle (..)
+<span class="lineno">    4 </span>    -- * Log levels
+<span class="lineno">    5 </span>  , LogLevel (..)
+<span class="lineno">    6 </span>  , parseLogLevel
+<span class="lineno">    7 </span>  , shouldLog
+<span class="lineno">    8 </span>    -- * Implementations
+<span class="lineno">    9 </span>  , mkStderrLogHandle
+<span class="lineno">   10 </span>  , mkStderrLogHandleAt
+<span class="lineno">   11 </span>  , mkNoOpLogHandle
+<span class="lineno">   12 </span>  ) where
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import Control.Concurrent.MVar
+<span class="lineno">   15 </span>import Data.Char qualified as Char
+<span class="lineno">   16 </span>import Data.Text (Text)
+<span class="lineno">   17 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   18 </span>import Data.Text qualified as T
+<span class="lineno">   19 </span>import Data.Time
+<span class="lineno">   20 </span>import System.IO
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>-- | Logging capability. Functions that only receive a 'LogHandle' cannot
+<span class="lineno">   23 </span>-- shell out, read files, or access the network — they can only log.
+<span class="lineno">   24 </span>data LogHandle = LogHandle
+<span class="lineno">   25 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_lh_logInfo</span></span></span>  :: Text -&gt; IO ()
+<span class="lineno">   26 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_lh_logWarn</span></span></span>  :: Text -&gt; IO ()
+<span class="lineno">   27 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_lh_logError</span></span></span> :: Text -&gt; IO ()
+<span class="lineno">   28 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_lh_logDebug</span></span></span> :: Text -&gt; IO ()
+<span class="lineno">   29 </span>  }
+<span class="lineno">   30 </span>
+<span class="lineno">   31 </span>-- | Minimum severity threshold for logging. Constructor order encodes
+<span class="lineno">   32 </span>-- severity, so @LlDebug &lt; LlInfo &lt; LlWarn &lt; LlError@ and filtering is a
+<span class="lineno">   33 </span>-- comparison. Constructors are prefixed to avoid clashing with unqualified
+<span class="lineno">   34 </span>-- names like 'Data.Aeson.Error' at import sites.
+<span class="lineno">   35 </span>data LogLevel = LlDebug | LlInfo | LlWarn | LlError
+<span class="lineno">   36 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Bounded</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>-- | Parse a log level from a CLI string. Case-insensitive; 'Nothing' for
+<span class="lineno">   39 </span>-- anything that is not one of @debug@, @info@, @warn@, @error@.
+<span class="lineno">   40 </span>parseLogLevel :: String -&gt; Maybe LogLevel
+<span class="lineno">   41 </span><span class="decl"><span class="istickedoff">parseLogLevel s = case map Char.toLower s of</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">&quot;debug&quot; -&gt; Just LlDebug</span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="istickedoff">&quot;info&quot;  -&gt; Just LlInfo</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="istickedoff">&quot;warn&quot;  -&gt; Just LlWarn</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">&quot;error&quot; -&gt; Just LlError</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">_       -&gt; Nothing</span></span>
+<span class="lineno">   47 </span>
+<span class="lineno">   48 </span>-- | Should a message at the given level be emitted under the configured
+<span class="lineno">   49 </span>-- threshold? True when the message is at least as severe as the threshold.
+<span class="lineno">   50 </span>shouldLog :: LogLevel -&gt; LogLevel -&gt; Bool
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">shouldLog threshold msgLevel = msgLevel &gt;= threshold</span></span>
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>-- | Log to stderr with ISO 8601 timestamps and level prefixes, emitting every
+<span class="lineno">   54 </span>-- level. Equivalent to @'mkStderrLogHandleAt' 'LlInfo'@.
+<span class="lineno">   55 </span>mkStderrLogHandle :: IO LogHandle
+<span class="lineno">   56 </span><span class="decl"><span class="istickedoff">mkStderrLogHandle = mkStderrLogHandleAt LlInfo</span></span>
+<span class="lineno">   57 </span>
+<span class="lineno">   58 </span>-- | Like 'mkStderrLogHandle', but only emits messages at or above the given
+<span class="lineno">   59 </span>-- threshold. Below-threshold calls are silent no-ops. Uses an 'MVar' to
+<span class="lineno">   60 </span>-- serialize writes so concurrent threads don't interleave.
+<span class="lineno">   61 </span>mkStderrLogHandleAt :: LogLevel -&gt; IO LogHandle
+<span class="lineno">   62 </span><span class="decl"><span class="istickedoff">mkStderrLogHandleAt threshold = do</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">lock &lt;- newMVar ()</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">let logWithLevel :: LogLevel -&gt; Text -&gt; Text -&gt; IO ()</span>
+<span class="lineno">   65 </span><span class="spaces">      </span><span class="istickedoff">logWithLevel msgLevel label msg</span>
+<span class="lineno">   66 </span><span class="spaces">        </span><span class="istickedoff">| shouldLog threshold msgLevel = withMVar lock $ \() -&gt; do</span>
+<span class="lineno">   67 </span><span class="spaces">            </span><span class="istickedoff">now &lt;- getCurrentTime</span>
+<span class="lineno">   68 </span><span class="spaces">            </span><span class="istickedoff">let timestamp = T.pack (formatTime <span class="nottickedoff">defaultTimeLocale</span> &quot;%Y-%m-%dT%H:%M:%S&quot; now)</span>
+<span class="lineno">   69 </span><span class="spaces">            </span><span class="istickedoff">TIO.hPutStrLn stderr $ &quot;[&quot; &lt;&gt; timestamp &lt;&gt; &quot;] [&quot; &lt;&gt; label &lt;&gt; &quot;] &quot; &lt;&gt; msg</span>
+<span class="lineno">   70 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   71 </span><span class="spaces">  </span><span class="istickedoff">pure LogHandle</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">{ _lh_logInfo  = logWithLevel LlInfo  &quot;INFO&quot;</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">, _lh_logWarn  = logWithLevel LlWarn  &quot;WARN&quot;</span>
+<span class="lineno">   74 </span><span class="spaces">    </span><span class="istickedoff">, _lh_logError = logWithLevel LlError &quot;ERROR&quot;</span>
+<span class="lineno">   75 </span><span class="spaces">    </span><span class="istickedoff">, _lh_logDebug = logWithLevel LlDebug &quot;DEBUG&quot;</span>
+<span class="lineno">   76 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   77 </span>
+<span class="lineno">   78 </span>-- | No-op log handle. All operations silently succeed.
+<span class="lineno">   79 </span>mkNoOpLogHandle :: LogHandle
+<span class="lineno">   80 </span><span class="decl"><span class="istickedoff">mkNoOpLogHandle = LogHandle</span>
+<span class="lineno">   81 </span><span class="spaces">  </span><span class="istickedoff">{ _lh_logInfo  = \_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   82 </span><span class="spaces">  </span><span class="istickedoff">, _lh_logWarn  = \_ -&gt; pure ()</span>
+<span class="lineno">   83 </span><span class="spaces">  </span><span class="istickedoff">, _lh_logError = \_ -&gt; pure ()</span>
+<span class="lineno">   84 </span><span class="spaces">  </span><span class="istickedoff">, _lh_logDebug = \_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   85 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

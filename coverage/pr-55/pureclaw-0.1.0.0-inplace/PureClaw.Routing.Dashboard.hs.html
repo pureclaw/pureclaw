@@ -1,0 +1,195 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Routing.Dashboard
+<span class="lineno">    3 </span>-- Description : Tab dashboard rendering (Tabbed Chat WU9, B1\/B2\/B3).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- Renders the user-facing tab dashboard emitted by the @\/tabs@ (and
+<span class="lineno">    6 </span>-- equivalent @\/tab list@) command.
+<span class="lineno">    7 </span>--
+<span class="lineno">    8 </span>-- == Rendering rules
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- * Empty registry (B1) — emits a single helper line:
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>--   @
+<span class="lineno">   13 </span>--   No tabs open. Use \/tab new \&lt;kind\&gt; to create one.
+<span class="lineno">   14 </span>--   @
+<span class="lineno">   15 </span>--
+<span class="lineno">   16 </span>--   Under the tmux packing model, the user does not pick a slot — the
+<span class="lineno">   17 </span>--   factory allocates at the next free index. @\/N@ on a missing tab
+<span class="lineno">   18 </span>--   errors (no auto-spawn), so it is intentionally not advertised
+<span class="lineno">   19 </span>--   here as a way to create tabs.
+<span class="lineno">   20 </span>--
+<span class="lineno">   21 </span>-- * 1 ≤ N \&lt; 8 tabs (B2) — one line per tab, each carrying
+<span class="lineno">   22 </span>--   @index, kind, redacted name, status, asterisk if focused@. The
+<span class="lineno">   23 </span>--   layout uses a leading numeric prefix (@\/0@) followed by a
+<span class="lineno">   24 </span>--   single-space-separated field list so the output renders well in
+<span class="lineno">   25 </span>--   both fixed-width (CLI) and proportional (Telegram \/ Signal) fonts.
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- * ≥ 8 tabs (B3) — switches to a bullet-list rendering so the output
+<span class="lineno">   28 </span>--   wraps cleanly on small mobile screens (no fixed-width table).
+<span class="lineno">   29 </span>--
+<span class="lineno">   30 </span>-- == Producer side
+<span class="lineno">   31 </span>--
+<span class="lineno">   32 </span>-- The function returns the formatted body as a single 'Text'; the
+<span class="lineno">   33 </span>-- caller (typically the @\/tabs@ slash-command handler in the
+<span class="lineno">   34 </span>-- dispatcher) wraps the result in 'BannerLine' for emission on
+<span class="lineno">   35 </span>-- '_env_channelOutQ'. Dashboard rendering NEVER reaches the provider
+<span class="lineno">   36 </span>-- and NEVER mutates any tab state (P18 invariant preserved).
+<span class="lineno">   37 </span>--
+<span class="lineno">   38 </span>-- See @docs\/tabbed-chat.md@ §&quot;Dashboard (B-series)&quot; for the spec.
+<span class="lineno">   39 </span>module PureClaw.Routing.Dashboard
+<span class="lineno">   40 </span>  ( -- * Render
+<span class="lineno">   41 </span>    renderDashboard
+<span class="lineno">   42 </span>    -- * Exposed for testing
+<span class="lineno">   43 </span>  , bulletThreshold
+<span class="lineno">   44 </span>  , emptyDashboardText
+<span class="lineno">   45 </span>  ) where
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>import Control.Exception (SomeException, try)
+<span class="lineno">   48 </span>import Data.IORef (readIORef)
+<span class="lineno">   49 </span>import Data.IntMap.Strict qualified as IntMap
+<span class="lineno">   50 </span>import Data.Text (Text)
+<span class="lineno">   51 </span>import Data.Text qualified as T
+<span class="lineno">   52 </span>
+<span class="lineno">   53 </span>import PureClaw.Agent.Env (AgentEnv (..))
+<span class="lineno">   54 </span>import PureClaw.Handles.Tab
+<span class="lineno">   55 </span>  ( TabHandle (..)
+<span class="lineno">   56 </span>  , TabIndex
+<span class="lineno">   57 </span>  , TabKind (..)
+<span class="lineno">   58 </span>  , TabName (..)
+<span class="lineno">   59 </span>  , TabStatus (..)
+<span class="lineno">   60 </span>  , unTabName
+<span class="lineno">   61 </span>  , unPublicTabError
+<span class="lineno">   62 </span>  )
+<span class="lineno">   63 </span>import PureClaw.Session.Kind
+<span class="lineno">   64 </span>  ( HarnessFlavour (..)
+<span class="lineno">   65 </span>  , HarnessSpec (..)
+<span class="lineno">   66 </span>  , ProviderSpec (..)
+<span class="lineno">   67 </span>  , SessionKind (..)
+<span class="lineno">   68 </span>  , TerminalBackend (..)
+<span class="lineno">   69 </span>  )
+<span class="lineno">   70 </span>import PureClaw.Core.Types (unProviderId)
+<span class="lineno">   71 </span>
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>-- | Tab count at or above which the renderer switches from one-line-
+<span class="lineno">   74 </span>-- per-tab to a bullet-style rendering (B3). Exposed for tests so the
+<span class="lineno">   75 </span>-- threshold can be asserted without re-deriving it.
+<span class="lineno">   76 </span>bulletThreshold :: Int
+<span class="lineno">   77 </span><span class="decl"><span class="istickedoff">bulletThreshold = 8</span></span>
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | Helper text emitted by the empty-registry branch (B1). Exposed for
+<span class="lineno">   80 </span>-- tests so the exact wording can be pinned without re-deriving it.
+<span class="lineno">   81 </span>emptyDashboardText :: Text
+<span class="lineno">   82 </span><span class="decl"><span class="istickedoff">emptyDashboardText =</span>
+<span class="lineno">   83 </span><span class="spaces">  </span><span class="istickedoff">&quot;No tabs open. Use /tab new &lt;kind&gt; to create one.&quot;</span></span>
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>
+<span class="lineno">   86 </span>-- | Render the tab dashboard.
+<span class="lineno">   87 </span>--
+<span class="lineno">   88 </span>-- Reads '_env_tabs' and '_env_focus' atomically (single IORef each)
+<span class="lineno">   89 </span>-- and consults each tab's '_tabHandle_status' to render the status
+<span class="lineno">   90 </span>-- column. The status read is wrapped in a tolerant 'tryStatus' helper
+<span class="lineno">   91 </span>-- so a misbehaving factory cannot crash the dashboard.
+<span class="lineno">   92 </span>--
+<span class="lineno">   93 </span>-- Output is a single 'Text' with embedded @\\n@ separators between
+<span class="lineno">   94 </span>-- per-tab lines; the caller is responsible for emitting it as a
+<span class="lineno">   95 </span>-- single 'BannerLine'.
+<span class="lineno">   96 </span>renderDashboard :: AgentEnv -&gt; IO Text
+<span class="lineno">   97 </span><span class="decl"><span class="istickedoff">renderDashboard env = do</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">tabs   &lt;- readIORef (_env_tabs env)</span>
+<span class="lineno">   99 </span><span class="spaces">  </span><span class="istickedoff">mFocus &lt;- readIORef (_env_focus env)</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">if IntMap.null tabs</span>
+<span class="lineno">  101 </span><span class="spaces">    </span><span class="istickedoff">then pure emptyDashboardText</span>
+<span class="lineno">  102 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  103 </span><span class="spaces">      </span><span class="istickedoff">let entries = IntMap.toAscList tabs</span>
+<span class="lineno">  104 </span><span class="spaces">          </span><span class="istickedoff">useBullets = length entries &gt;= bulletThreshold</span>
+<span class="lineno">  105 </span><span class="spaces">      </span><span class="istickedoff">lined &lt;- mapM (renderEntry mFocus useBullets) entries</span>
+<span class="lineno">  106 </span><span class="spaces">      </span><span class="istickedoff">pure (T.intercalate &quot;\n&quot; lined)</span></span>
+<span class="lineno">  107 </span>
+<span class="lineno">  108 </span>-- | Render a single registry entry. The format mirrors the design
+<span class="lineno">  109 </span>-- doc's B2 example: @\/I [bullet] kind name status focus-marker@.
+<span class="lineno">  110 </span>renderEntry
+<span class="lineno">  111 </span>  :: Maybe TabIndex
+<span class="lineno">  112 </span>  -&gt; Bool          -- ^ True ⇒ bullet rendering (B3)
+<span class="lineno">  113 </span>  -&gt; (Int, TabHandle)
+<span class="lineno">  114 </span>  -&gt; IO Text
+<span class="lineno">  115 </span><span class="decl"><span class="istickedoff">renderEntry mFocus useBullets (key, h) = do</span>
+<span class="lineno">  116 </span><span class="spaces">  </span><span class="istickedoff">let idx        = _tabHandle_index h</span>
+<span class="lineno">  117 </span><span class="spaces">      </span><span class="istickedoff">kindTxt    = renderKind (_tabHandle_kind h)</span>
+<span class="lineno">  118 </span><span class="spaces">      </span><span class="istickedoff">nameTxt    = renderName (_tabHandle_name h)</span>
+<span class="lineno">  119 </span><span class="spaces">      </span><span class="istickedoff">idxTxt     = &quot;/&quot; &lt;&gt; T.pack (show key)</span>
+<span class="lineno">  120 </span><span class="spaces">      </span><span class="istickedoff">focusMark  = if mFocus == Just idx then &quot; *&quot; else &quot;&quot;</span>
+<span class="lineno">  121 </span><span class="spaces">      </span><span class="istickedoff">bulletTxt  = if useBullets then &quot; - &quot; else &quot; &quot;</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">statusTxt &lt;- tryStatus h</span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">pure (idxTxt &lt;&gt; bulletTxt &lt;&gt; kindTxt</span>
+<span class="lineno">  124 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; &quot; &quot; &lt;&gt; nameTxt</span>
+<span class="lineno">  125 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; &quot; &quot; &lt;&gt; statusTxt</span>
+<span class="lineno">  126 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; focusMark)</span></span>
+<span class="lineno">  127 </span>
+<span class="lineno">  128 </span>-- | Render a 'TabKind' as @\&lt;group\&gt;:\&lt;detail\&gt;@ (WU-11 C5).
+<span class="lineno">  129 </span>--
+<span class="lineno">  130 </span>-- Examples: @provider:anthropic@, @harness:claude-code@, @shell:local@,
+<span class="lineno">  131 </span>-- @shell:ssh@, @shell:tmux@, @shell:container@.
+<span class="lineno">  132 </span>renderKind :: TabKind -&gt; Text
+<span class="lineno">  133 </span><span class="decl"><span class="istickedoff">renderKind k = case k of</span>
+<span class="lineno">  134 </span><span class="spaces">  </span><span class="istickedoff">TkSession (SkProvider ps)  -&gt; &quot;provider:&quot; &lt;&gt; unProviderId (_ps_provider ps)</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">TkSession (SkHarness hs)   -&gt; &quot;harness:&quot;  &lt;&gt; renderFlavour (_h_flavour hs)</span>
+<span class="lineno">  136 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell TbLocal         -&gt; &quot;shell:local&quot;</span>
+<span class="lineno">  137 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell (TbSsh _)       -&gt; <span class="nottickedoff">&quot;shell:ssh&quot;</span></span>
+<span class="lineno">  138 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell (TbTmux _)      -&gt; <span class="nottickedoff">&quot;shell:tmux&quot;</span></span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">TkRawShell (TbContainer _) -&gt; <span class="nottickedoff">&quot;shell:container&quot;</span></span></span>
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>-- | Render a 'HarnessFlavour' as its user-facing label.
+<span class="lineno">  142 </span>renderFlavour :: HarnessFlavour -&gt; Text
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">renderFlavour f = case f of</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">HClaudeCode -&gt; &quot;claude-code&quot;</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">HCodex      -&gt; <span class="nottickedoff">&quot;codex&quot;</span></span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="istickedoff">HOpenCode   -&gt; <span class="nottickedoff">&quot;opencode&quot;</span></span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">HHermes     -&gt; <span class="nottickedoff">&quot;hermes&quot;</span></span>
+<span class="lineno">  148 </span><span class="spaces">  </span><span class="istickedoff">HPureClaw   -&gt; <span class="nottickedoff">&quot;pureclaw&quot;</span></span>
+<span class="lineno">  149 </span><span class="spaces">  </span><span class="istickedoff">HCustom n   -&gt; <span class="nottickedoff">n</span></span></span>
+<span class="lineno">  150 </span>
+<span class="lineno">  151 </span>-- | Project a 'TabName' to its render-safe text. The 'TabName' newtype
+<span class="lineno">  152 </span>-- guarantees H11 (sanitised), so this is just the unwrap.
+<span class="lineno">  153 </span>renderName :: TabName -&gt; Text
+<span class="lineno">  154 </span><span class="decl"><span class="istickedoff">renderName = unTabName</span></span>
+<span class="lineno">  155 </span>
+<span class="lineno">  156 </span>-- | Read '_tabHandle_status' tolerantly. The status field is in IO;
+<span class="lineno">  157 </span>-- a buggy factory could throw. The dashboard collapses any exception
+<span class="lineno">  158 </span>-- into the short label @\&quot;?\&quot;@ so the rendering never crashes the
+<span class="lineno">  159 </span>-- caller.
+<span class="lineno">  160 </span>tryStatus :: TabHandle -&gt; IO Text
+<span class="lineno">  161 </span><span class="decl"><span class="istickedoff">tryStatus h = do</span>
+<span class="lineno">  162 </span><span class="spaces">  </span><span class="istickedoff">r &lt;- try @SomeException (_tabHandle_status h)</span>
+<span class="lineno">  163 </span><span class="spaces">  </span><span class="istickedoff">pure $ case r of</span>
+<span class="lineno">  164 </span><span class="spaces">    </span><span class="istickedoff">Left  _ -&gt; &quot;?&quot;</span>
+<span class="lineno">  165 </span><span class="spaces">    </span><span class="istickedoff">Right s -&gt; renderStatus s</span></span>
+<span class="lineno">  166 </span>
+<span class="lineno">  167 </span>-- | Render a 'TabStatus' as its short user-visible label.
+<span class="lineno">  168 </span>renderStatus :: TabStatus -&gt; Text
+<span class="lineno">  169 </span><span class="decl"><span class="istickedoff">renderStatus s = case s of</span>
+<span class="lineno">  170 </span><span class="spaces">  </span><span class="istickedoff">Active      -&gt; &quot;active&quot;</span>
+<span class="lineno">  171 </span><span class="spaces">  </span><span class="istickedoff">Idle _      -&gt; &quot;idle&quot;</span>
+<span class="lineno">  172 </span><span class="spaces">  </span><span class="istickedoff">Crashed pe  -&gt; &quot;crashed (&quot; &lt;&gt; unPublicTabError pe &lt;&gt; &quot;)&quot;</span></span>
+
+</pre>
+</body>
+</html>

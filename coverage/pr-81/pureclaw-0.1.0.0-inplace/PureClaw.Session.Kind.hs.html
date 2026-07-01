@@ -1,0 +1,459 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Session.Kind
+<span class="lineno">    2 </span>  ( -- * Session kind
+<span class="lineno">    3 </span>    -- | 'SessionKind', 'ProviderSpec', and 'HarnessSpec' have hand-written
+<span class="lineno">    4 </span>    -- 'Aeson.ToJSON'/'Aeson.FromJSON' instances.
+<span class="lineno">    5 </span>    SessionKind (..)
+<span class="lineno">    6 </span>  , ProviderSpec (..)
+<span class="lineno">    7 </span>  , HarnessSpec (..)
+<span class="lineno">    8 </span>    -- * Harness flavour
+<span class="lineno">    9 </span>    -- | 'HarnessFlavour' serializes as a plain string.
+<span class="lineno">   10 </span>    -- 'Aeson.FromJSON' routes @custom:*@ through 'mkHCustom' (S12).
+<span class="lineno">   11 </span>  , HarnessFlavour (..)
+<span class="lineno">   12 </span>  , HCustomError (..)
+<span class="lineno">   13 </span>  , mkHCustom
+<span class="lineno">   14 </span>  , fixedFlavourLookup
+<span class="lineno">   15 </span>    -- * Terminal backend
+<span class="lineno">   16 </span>    -- | 'TerminalBackend' is tag-discriminated.
+<span class="lineno">   17 </span>  , TerminalBackend (..)
+<span class="lineno">   18 </span>  , TmuxConfig (..)
+<span class="lineno">   19 </span>  , SshConfig (..)
+<span class="lineno">   20 </span>    -- * Container
+<span class="lineno">   21 </span>    -- | 'ContainerTarget' 'Aeson.FromJSON' routes through 'mkContainerTarget'
+<span class="lineno">   22 </span>    -- (S1).
+<span class="lineno">   23 </span>  , ContainerSpec (..)
+<span class="lineno">   24 </span>  , ContainerEngine (..)
+<span class="lineno">   25 </span>  , ContainerTarget
+<span class="lineno">   26 </span>  , unContainerTarget
+<span class="lineno">   27 </span>  , mkContainerTarget
+<span class="lineno">   28 </span>  , ContainerTargetError (..)
+<span class="lineno">   29 </span>    -- * Provider helpers
+<span class="lineno">   30 </span>  , inferProviderId
+<span class="lineno">   31 </span>  ) where
+<span class="lineno">   32 </span>
+<span class="lineno">   33 </span>import Data.Aeson ((.=), (.:), (.:?), (.!=))
+<span class="lineno">   34 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   35 </span>import Data.Aeson.Key qualified as AesonKey
+<span class="lineno">   36 </span>import Data.Aeson.KeyMap qualified as KM
+<span class="lineno">   37 </span>import Data.Aeson.Types (Parser)
+<span class="lineno">   38 </span>import Data.Char qualified as Char
+<span class="lineno">   39 </span>import Data.Text (Text)
+<span class="lineno">   40 </span>import Data.Text qualified as T
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>import PureClaw.Agent.AgentDef (AgentName, unAgentName)
+<span class="lineno">   43 </span>import PureClaw.Core.Types (ModelId (..), ProviderId (..))
+<span class="lineno">   44 </span>import PureClaw.Harness.Registry (HarnessId)
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   47 </span>-- Session kind
+<span class="lineno">   48 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>-- | Top-level discriminator: is this session backed by an LLM provider or by
+<span class="lineno">   51 </span>-- an external harness process?
+<span class="lineno">   52 </span>data SessionKind
+<span class="lineno">   53 </span>  = SkProvider !ProviderSpec
+<span class="lineno">   54 </span>  | SkHarness  !HarnessSpec
+<span class="lineno">   55 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>-- | Configuration for an LLM-backed session.
+<span class="lineno">   58 </span>data ProviderSpec = ProviderSpec
+<span class="lineno">   59 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_provider</span></span></span> :: !ProviderId
+<span class="lineno">   60 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_model</span></span></span>    :: !ModelId
+<span class="lineno">   61 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ps_agent</span></span></span>    :: !(Maybe AgentName)
+<span class="lineno">   62 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   63 </span>
+<span class="lineno">   64 </span>-- | Configuration for a harness-backed session (an external CLI tool managed
+<span class="lineno">   65 </span>-- via a terminal backend).
+<span class="lineno">   66 </span>data HarnessSpec = HarnessSpec
+<span class="lineno">   67 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_flavour</span></span></span>   :: !HarnessFlavour
+<span class="lineno">   68 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_backend</span></span></span>   :: !TerminalBackend
+<span class="lineno">   69 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_cwd</span></span></span>       :: !(Maybe Text)
+<span class="lineno">   70 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_args</span></span></span>      :: ![Text]
+<span class="lineno">   71 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_harnessId</span></span></span> :: !(Maybe HarnessId)
+<span class="lineno">   72 </span>    -- ^ The durable, UUID-backed harness identity (Harness Registry Phase 1).
+<span class="lineno">   73 </span>    --
+<span class="lineno">   74 </span>    -- ADDITIVE and OPTIONAL (design @docs\/harness-registry.md@ K4): existing
+<span class="lineno">   75 </span>    -- @session.json@ files written before this field decode with
+<span class="lineno">   76 </span>    -- @_h_harnessId == Nothing@ (tolerant @.:? &quot;harnessId&quot;@), and the key is
+<span class="lineno">   77 </span>    -- emitted ONLY when 'Just' (emit-when-Just, like '_h_cwd'). The tmux
+<span class="lineno">   78 </span>    -- window name in '_h_backend' is /dual-written/ alongside it for one
+<span class="lineno">   79 </span>    -- release so a back-out path and the legacy name-keyed routing fallback
+<span class="lineno">   80 </span>    -- both keep working until the registry is the sole key.
+<span class="lineno">   81 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_claudeSessionUuid</span></span></span> :: !(Maybe Text)
+<span class="lineno">   82 </span>    -- ^ The canonical @claude-code@ session UUID minted at spawn time and
+<span class="lineno">   83 </span>    -- injected as @--session-id \&lt;uuid\&gt;@ into the spawned @claude@ argv
+<span class="lineno">   84 </span>    -- (Harness JSONL Capture, WU6 / @docs\/harness-jsonl-capture.md@). It
+<span class="lineno">   85 </span>    -- correlates this harness with its on-disk JSONL session log so a restart
+<span class="lineno">   86 </span>    -- can re-derive the log path (WU2).
+<span class="lineno">   87 </span>    --
+<span class="lineno">   88 </span>    -- NOTE — this is NOT the same identifier as @Registry._he_sessionId@:
+<span class="lineno">   89 </span>    -- @_he_sessionId@ is the PureClaw 'PureClaw.Session.Types.SessionId' (which
+<span class="lineno">   90 </span>    -- session this harness belongs to). '_h_claudeSessionUuid' is the
+<span class="lineno">   91 </span>    -- /claude-code/ tool's own session UUID, used purely for log-file path
+<span class="lineno">   92 </span>    -- derivation. The two are deliberately disambiguated.
+<span class="lineno">   93 </span>    --
+<span class="lineno">   94 </span>    -- ADDITIVE and OPTIONAL: minted ONLY for spawned @claude-code@ harnesses.
+<span class="lineno">   95 </span>    -- Adopted harnesses and non-@claude-code@ flavours carry 'Nothing'. Legacy
+<span class="lineno">   96 </span>    -- @session.json@ files written before this field decode with 'Nothing'
+<span class="lineno">   97 </span>    -- (tolerant @.:? &quot;claudeSessionUuid&quot;@); the key is emitted ONLY when 'Just'.
+<span class="lineno">   98 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_h_canonicalCwd</span></span></span> :: !(Maybe Text)
+<span class="lineno">   99 </span>    -- ^ The canonicalized spawn working directory used to derive the
+<span class="lineno">  100 </span>    -- @claude-code@ JSONL log path (WU2 cross-check\/fallback). This is the
+<span class="lineno">  101 </span>    -- @canonicalizePath@ of the resolved spawn cwd at spawn time, persisted so
+<span class="lineno">  102 </span>    -- a restart can re-derive the log directory without re-resolving symlinks.
+<span class="lineno">  103 </span>    --
+<span class="lineno">  104 </span>    -- ADDITIVE and OPTIONAL, mirroring '_h_claudeSessionUuid': set ONLY for
+<span class="lineno">  105 </span>    -- spawned @claude-code@ harnesses; 'Nothing' for adopted\/other flavours
+<span class="lineno">  106 </span>    -- and for legacy @session.json@ files (tolerant @.:? &quot;canonicalCwd&quot;@,
+<span class="lineno">  107 </span>    -- emit-when-'Just').
+<span class="lineno">  108 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  109 </span>
+<span class="lineno">  110 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  111 </span>-- Harness flavour
+<span class="lineno">  112 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  113 </span>
+<span class="lineno">  114 </span>-- | Known harness flavours. 'HCustom' is only constructible via 'mkHCustom'
+<span class="lineno">  115 </span>-- to reject path separators.
+<span class="lineno">  116 </span>data HarnessFlavour
+<span class="lineno">  117 </span>  = HClaudeCode
+<span class="lineno">  118 </span>  | HCodex
+<span class="lineno">  119 </span>  | HOpenCode
+<span class="lineno">  120 </span>  | HHermes
+<span class="lineno">  121 </span>  | HPureClaw
+<span class="lineno">  122 </span>  | HCustom !Text
+<span class="lineno">  123 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>-- | Reasons a raw 'Text' cannot become an 'HCustom' flavour.
+<span class="lineno">  126 </span>data HCustomError
+<span class="lineno">  127 </span>  = HCustomEmpty
+<span class="lineno">  128 </span>  | HCustomPathSeparator Text
+<span class="lineno">  129 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | Smart constructor for 'HCustom'. Accepts bare command names; rejects
+<span class="lineno">  132 </span>-- empty strings and strings containing path separators (@\/@ or @\\@).
+<span class="lineno">  133 </span>mkHCustom :: Text -&gt; Either HCustomError HarnessFlavour
+<span class="lineno">  134 </span><span class="decl"><span class="istickedoff">mkHCustom raw</span>
+<span class="lineno">  135 </span><span class="spaces">  </span><span class="istickedoff">| T.null raw = Left HCustomEmpty</span>
+<span class="lineno">  136 </span><span class="spaces">  </span><span class="istickedoff">| T.any (\c -&gt; c == '/' || c == '\\') raw = Left (HCustomPathSeparator <span class="nottickedoff">raw</span>)</span>
+<span class="lineno">  137 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Right (HCustom raw)</span></span>
+<span class="lineno">  138 </span>
+<span class="lineno">  139 </span>-- | Map a well-known harness name to its 'HarnessFlavour'. Unknown names
+<span class="lineno">  140 </span>-- fall through to 'HCustom' via 'mkHCustom' (which is infallible for
+<span class="lineno">  141 </span>-- non-empty, separator-free bare names).
+<span class="lineno">  142 </span>fixedFlavourLookup :: Text -&gt; HarnessFlavour
+<span class="lineno">  143 </span><span class="decl"><span class="istickedoff">fixedFlavourLookup t = case t of</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">&quot;claude-code&quot; -&gt; HClaudeCode</span>
+<span class="lineno">  145 </span><span class="spaces">  </span><span class="istickedoff">&quot;codex&quot;       -&gt; HCodex</span>
+<span class="lineno">  146 </span><span class="spaces">  </span><span class="istickedoff">&quot;opencode&quot;    -&gt; HOpenCode</span>
+<span class="lineno">  147 </span><span class="spaces">  </span><span class="istickedoff">&quot;hermes&quot;      -&gt; HHermes</span>
+<span class="lineno">  148 </span><span class="spaces">  </span><span class="istickedoff">&quot;pureclaw&quot;    -&gt; HPureClaw</span>
+<span class="lineno">  149 </span><span class="spaces">  </span><span class="istickedoff">other         -&gt; case mkHCustom other of</span>
+<span class="lineno">  150 </span><span class="spaces">    </span><span class="istickedoff">Right f -&gt; f</span>
+<span class="lineno">  151 </span><span class="spaces">    </span><span class="istickedoff">-- Should not happen for non-empty, separator-free names passed from</span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="istickedoff">-- config. Defensively fall back to HCustom with the raw text.</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="istickedoff">Left _  -&gt; <span class="nottickedoff">HCustom other</span></span></span>
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  156 </span>-- Terminal backend
+<span class="lineno">  157 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  158 </span>
+<span class="lineno">  159 </span>-- | How the harness process is connected to a terminal.
+<span class="lineno">  160 </span>data TerminalBackend
+<span class="lineno">  161 </span>  = TbLocal
+<span class="lineno">  162 </span>  | TbTmux      !TmuxConfig
+<span class="lineno">  163 </span>  | TbSsh       !SshConfig
+<span class="lineno">  164 </span>  | TbContainer !ContainerSpec
+<span class="lineno">  165 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  166 </span>
+<span class="lineno">  167 </span>-- | Tmux session/window/pane coordinates.
+<span class="lineno">  168 </span>data TmuxConfig = TmuxConfig
+<span class="lineno">  169 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tc_session</span></span></span> :: !Text
+<span class="lineno">  170 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tc_window</span></span></span>  :: !Text
+<span class="lineno">  171 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tc_pane</span></span></span>    :: !(Maybe Text)
+<span class="lineno">  172 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>-- | SSH connection coordinates.
+<span class="lineno">  175 </span>data SshConfig = SshConfig
+<span class="lineno">  176 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sc_user</span></span></span> :: !Text
+<span class="lineno">  177 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sc_host</span></span></span> :: !Text
+<span class="lineno">  178 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sc_port</span></span></span> :: !(Maybe Int)
+<span class="lineno">  179 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  182 </span>-- Container
+<span class="lineno">  183 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  184 </span>
+<span class="lineno">  185 </span>-- | Container runtime specification.
+<span class="lineno">  186 </span>data ContainerSpec = ContainerSpec
+<span class="lineno">  187 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_engine</span></span></span> :: !ContainerEngine
+<span class="lineno">  188 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_cs_target</span></span></span> :: !ContainerTarget
+<span class="lineno">  189 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  190 </span>
+<span class="lineno">  191 </span>-- | Supported container engines (closed set).
+<span class="lineno">  192 </span>data ContainerEngine = Docker | Podman | Kubectl
+<span class="lineno">  193 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Enum</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Bounded</span></span></span></span>)
+<span class="lineno">  194 </span>
+<span class="lineno">  195 </span>-- | A validated container target name. Only constructible via
+<span class="lineno">  196 </span>-- 'mkContainerTarget'.
+<span class="lineno">  197 </span>newtype ContainerTarget = ContainerTarget { <span class="istickedoff"><span class="decl"><span class="istickedoff">unContainerTarget</span></span></span> :: Text }
+<span class="lineno">  198 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  199 </span>
+<span class="lineno">  200 </span>-- | Reasons a raw 'Text' cannot become a 'ContainerTarget'.
+<span class="lineno">  201 </span>data ContainerTargetError
+<span class="lineno">  202 </span>  = TargetEmpty
+<span class="lineno">  203 </span>  | TargetInvalidChars Text
+<span class="lineno">  204 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  205 </span>
+<span class="lineno">  206 </span>-- | Accepts @[a-zA-Z0-9_\\-.\\/:]+@ (supports kubectl @pod\/name:container@
+<span class="lineno">  207 </span>-- format). Rejects empty strings and strings containing shell
+<span class="lineno">  208 </span>-- metacharacters: @; &amp; | \` $ ( ) { } &lt; &gt; ! \\ \&quot; \' @ space/tab/newline.
+<span class="lineno">  209 </span>mkContainerTarget :: Text -&gt; Either ContainerTargetError ContainerTarget
+<span class="lineno">  210 </span><span class="decl"><span class="istickedoff">mkContainerTarget raw</span>
+<span class="lineno">  211 </span><span class="spaces">  </span><span class="istickedoff">| T.null raw = Left TargetEmpty</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">| T.all isValidTargetChar raw = Right (ContainerTarget raw)</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Left (TargetInvalidChars <span class="nottickedoff">raw</span>)</span></span>
+<span class="lineno">  214 </span>
+<span class="lineno">  215 </span>-- | Character predicate for container target names. Allows alphanumerics,
+<span class="lineno">  216 </span>-- @_@, @-@, @.@, @/@, @:@ only.
+<span class="lineno">  217 </span>isValidTargetChar :: Char -&gt; Bool
+<span class="lineno">  218 </span><span class="decl"><span class="istickedoff">isValidTargetChar c =</span>
+<span class="lineno">  219 </span><span class="spaces">  </span><span class="istickedoff">Char.isAsciiUpper c</span>
+<span class="lineno">  220 </span><span class="spaces">    </span><span class="istickedoff">|| Char.isAsciiLower c</span>
+<span class="lineno">  221 </span><span class="spaces">    </span><span class="istickedoff">|| Char.isDigit c</span>
+<span class="lineno">  222 </span><span class="spaces">    </span><span class="istickedoff">|| c == '_'</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">|| c == '-'</span>
+<span class="lineno">  224 </span><span class="spaces">    </span><span class="istickedoff">|| c == '.'</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="istickedoff">|| c == '/'</span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="istickedoff">|| c == ':'</span></span>
+<span class="lineno">  227 </span>
+<span class="lineno">  228 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  229 </span>-- Aeson instances
+<span class="lineno">  230 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  231 </span>
+<span class="lineno">  232 </span>-- ContainerEngine — lowercase string: &quot;docker&quot;, &quot;podman&quot;, &quot;kubectl&quot;
+<span class="lineno">  233 </span>
+<span class="lineno">  234 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON ContainerEngine</span></span></span></span></span></span></span></span> where
+<span class="lineno">  235 </span>  <span class="decl"><span class="istickedoff">toJSON Docker  = Aeson.String &quot;docker&quot;</span>
+<span class="lineno">  236 </span><span class="spaces">  </span><span class="istickedoff">toJSON Podman  = Aeson.String &quot;podman&quot;</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">toJSON Kubectl = Aeson.String &quot;kubectl&quot;</span></span>
+<span class="lineno">  238 </span>
+<span class="lineno">  239 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON ContainerEngine</span></span></span></span> where
+<span class="lineno">  240 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;ContainerEngine&quot;</span> $ \case</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">&quot;docker&quot;  -&gt; pure Docker</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">&quot;podman&quot;  -&gt; pure Podman</span>
+<span class="lineno">  243 </span><span class="spaces">    </span><span class="istickedoff">&quot;kubectl&quot; -&gt; pure Kubectl</span>
+<span class="lineno">  244 </span><span class="spaces">    </span><span class="istickedoff">other     -&gt; <span class="nottickedoff">fail (&quot;unknown ContainerEngine: &quot; ++ show other)</span></span></span>
+<span class="lineno">  245 </span>
+<span class="lineno">  246 </span>-- ContainerTarget — plain string; FromJSON routes through mkContainerTarget (S1)
+<span class="lineno">  247 </span>
+<span class="lineno">  248 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON ContainerTarget</span></span></span></span></span></span></span></span> where
+<span class="lineno">  249 </span>  <span class="decl"><span class="istickedoff">toJSON = Aeson.String . unContainerTarget</span></span>
+<span class="lineno">  250 </span>
+<span class="lineno">  251 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON ContainerTarget</span></span></span></span> where
+<span class="lineno">  252 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;ContainerTarget&quot;</span> $ \t -&gt;</span>
+<span class="lineno">  253 </span><span class="spaces">    </span><span class="istickedoff">case mkContainerTarget t of</span>
+<span class="lineno">  254 </span><span class="spaces">      </span><span class="istickedoff">Right ct -&gt; pure ct</span>
+<span class="lineno">  255 </span><span class="spaces">      </span><span class="istickedoff">Left TargetEmpty -&gt; <span class="nottickedoff">fail &quot;ContainerTarget: empty string&quot;</span></span>
+<span class="lineno">  256 </span><span class="spaces">      </span><span class="istickedoff">Left (TargetInvalidChars raw) -&gt;</span>
+<span class="lineno">  257 </span><span class="spaces">        </span><span class="istickedoff">fail <span class="nottickedoff">(&quot;ContainerTarget: invalid characters in &quot; ++ show raw)</span></span></span>
+<span class="lineno">  258 </span>
+<span class="lineno">  259 </span>-- ContainerSpec — flat object: { &quot;engine&quot;: &quot;docker&quot;, &quot;target&quot;: &quot;myapp&quot; }
+<span class="lineno">  260 </span>
+<span class="lineno">  261 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON ContainerSpec</span></span></span></span></span></span></span></span> where
+<span class="lineno">  262 </span>  <span class="decl"><span class="istickedoff">toJSON cs = Aeson.object</span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;engine&quot; .= _cs_engine cs</span>
+<span class="lineno">  264 </span><span class="spaces">    </span><span class="istickedoff">, &quot;target&quot; .= _cs_target cs</span>
+<span class="lineno">  265 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  266 </span>
+<span class="lineno">  267 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON ContainerSpec</span></span></span></span> where
+<span class="lineno">  268 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;ContainerSpec&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  269 </span><span class="spaces">    </span><span class="istickedoff">ContainerSpec &lt;$&gt; o .: &quot;engine&quot; &lt;*&gt; o .: &quot;target&quot;</span></span>
+<span class="lineno">  270 </span>
+<span class="lineno">  271 </span>-- TmuxConfig — flat object; pane optional (omitted when Nothing)
+<span class="lineno">  272 </span>
+<span class="lineno">  273 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON TmuxConfig</span></span></span></span></span></span></span></span> where
+<span class="lineno">  274 </span>  <span class="decl"><span class="istickedoff">toJSON tc = Aeson.object $</span>
+<span class="lineno">  275 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;session&quot; .= _tc_session tc</span>
+<span class="lineno">  276 </span><span class="spaces">    </span><span class="istickedoff">, &quot;window&quot;  .= _tc_window tc</span>
+<span class="lineno">  277 </span><span class="spaces">    </span><span class="istickedoff">] ++ maybe [] (\p -&gt; [&quot;pane&quot; .= p]) (_tc_pane tc)</span></span>
+<span class="lineno">  278 </span>
+<span class="lineno">  279 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON TmuxConfig</span></span></span></span> where
+<span class="lineno">  280 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;TmuxConfig&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  281 </span><span class="spaces">    </span><span class="istickedoff">-- 'session' is OPTIONAL on decode (default &quot;&quot;): the New-Harness composer</span>
+<span class="lineno">  282 </span><span class="spaces">    </span><span class="istickedoff">-- omits it when the user leaves the tmux-session field blank, and an empty</span>
+<span class="lineno">  283 </span><span class="spaces">    </span><span class="istickedoff">-- session is resolved to the default (&quot;pureclaw&quot;) at spawn time</span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff">-- ('resolveHarnessSession'). Encoded values always carry it, so round-trips</span>
+<span class="lineno">  285 </span><span class="spaces">    </span><span class="istickedoff">-- are unaffected.</span>
+<span class="lineno">  286 </span><span class="spaces">    </span><span class="istickedoff">TmuxConfig &lt;$&gt; (o .:? &quot;session&quot; .!= &quot;&quot;) &lt;*&gt; o .: &quot;window&quot; &lt;*&gt; o .:? &quot;pane&quot;</span></span>
+<span class="lineno">  287 </span>
+<span class="lineno">  288 </span>-- SshConfig — flat object; port optional (omitted when Nothing)
+<span class="lineno">  289 </span>
+<span class="lineno">  290 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON SshConfig</span></span></span></span></span></span></span></span> where
+<span class="lineno">  291 </span>  <span class="decl"><span class="istickedoff">toJSON sc = Aeson.object $</span>
+<span class="lineno">  292 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;user&quot; .= _sc_user sc</span>
+<span class="lineno">  293 </span><span class="spaces">    </span><span class="istickedoff">, &quot;host&quot; .= _sc_host sc</span>
+<span class="lineno">  294 </span><span class="spaces">    </span><span class="istickedoff">] ++ maybe [] (\p -&gt; [&quot;port&quot; .= p]) (_sc_port sc)</span></span>
+<span class="lineno">  295 </span>
+<span class="lineno">  296 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON SshConfig</span></span></span></span> where
+<span class="lineno">  297 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;SshConfig&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  298 </span><span class="spaces">    </span><span class="istickedoff">SshConfig &lt;$&gt; o .: &quot;user&quot; &lt;*&gt; o .: &quot;host&quot; &lt;*&gt; o .:? &quot;port&quot;</span></span>
+<span class="lineno">  299 </span>
+<span class="lineno">  300 </span>-- TerminalBackend — tag-discriminated
+<span class="lineno">  301 </span>
+<span class="lineno">  302 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON TerminalBackend</span></span></span></span></span></span></span></span> where
+<span class="lineno">  303 </span>  <span class="decl"><span class="istickedoff">toJSON TbLocal = Aeson.object [&quot;tag&quot; .= (&quot;local&quot; :: Text)]</span>
+<span class="lineno">  304 </span><span class="spaces">  </span><span class="istickedoff">toJSON (TbTmux tc) = Aeson.object $</span>
+<span class="lineno">  305 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;tag&quot;     .= (&quot;tmux&quot; :: Text)</span>
+<span class="lineno">  306 </span><span class="spaces">    </span><span class="istickedoff">, &quot;session&quot; .= _tc_session tc</span>
+<span class="lineno">  307 </span><span class="spaces">    </span><span class="istickedoff">, &quot;window&quot;  .= _tc_window tc</span>
+<span class="lineno">  308 </span><span class="spaces">    </span><span class="istickedoff">] ++ maybe [] (\p -&gt; [&quot;pane&quot; .= p]) (_tc_pane tc)</span>
+<span class="lineno">  309 </span><span class="spaces">  </span><span class="istickedoff">toJSON (TbSsh sc) = Aeson.object $</span>
+<span class="lineno">  310 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;tag&quot;  .= (&quot;ssh&quot; :: Text)</span>
+<span class="lineno">  311 </span><span class="spaces">    </span><span class="istickedoff">, &quot;user&quot; .= _sc_user sc</span>
+<span class="lineno">  312 </span><span class="spaces">    </span><span class="istickedoff">, &quot;host&quot; .= _sc_host sc</span>
+<span class="lineno">  313 </span><span class="spaces">    </span><span class="istickedoff">] ++ maybe <span class="nottickedoff">[]</span> (\p -&gt; [&quot;port&quot; .= p]) (_sc_port sc)</span>
+<span class="lineno">  314 </span><span class="spaces">  </span><span class="istickedoff">toJSON (TbContainer cs) = Aeson.object</span>
+<span class="lineno">  315 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;tag&quot;    .= (&quot;container&quot; :: Text)</span>
+<span class="lineno">  316 </span><span class="spaces">    </span><span class="istickedoff">, &quot;engine&quot; .= _cs_engine cs</span>
+<span class="lineno">  317 </span><span class="spaces">    </span><span class="istickedoff">, &quot;target&quot; .= _cs_target cs</span>
+<span class="lineno">  318 </span><span class="spaces">    </span><span class="istickedoff">]</span></span>
+<span class="lineno">  319 </span>
+<span class="lineno">  320 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON TerminalBackend</span></span></span></span> where
+<span class="lineno">  321 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;TerminalBackend&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  322 </span><span class="spaces">    </span><span class="istickedoff">tag &lt;- o .: &quot;tag&quot; :: Parser Text</span>
+<span class="lineno">  323 </span><span class="spaces">    </span><span class="istickedoff">case tag of</span>
+<span class="lineno">  324 </span><span class="spaces">      </span><span class="istickedoff">&quot;local&quot;     -&gt; pure TbLocal</span>
+<span class="lineno">  325 </span><span class="spaces">      </span><span class="istickedoff">&quot;tmux&quot;      -&gt; TbTmux &lt;$&gt;</span>
+<span class="lineno">  326 </span><span class="spaces">        </span><span class="istickedoff">-- 'session' optional (default &quot;&quot;) — see the 'TmuxConfig' FromJSON note.</span>
+<span class="lineno">  327 </span><span class="spaces">        </span><span class="istickedoff">(TmuxConfig &lt;$&gt; (o .:? &quot;session&quot; .!= &quot;&quot;) &lt;*&gt; o .: &quot;window&quot; &lt;*&gt; o .:? &quot;pane&quot;)</span>
+<span class="lineno">  328 </span><span class="spaces">      </span><span class="istickedoff">&quot;ssh&quot;       -&gt; TbSsh &lt;$&gt;</span>
+<span class="lineno">  329 </span><span class="spaces">        </span><span class="istickedoff">(SshConfig &lt;$&gt; o .: &quot;user&quot; &lt;*&gt; o .: &quot;host&quot; &lt;*&gt; o .:? &quot;port&quot;)</span>
+<span class="lineno">  330 </span><span class="spaces">      </span><span class="istickedoff">&quot;container&quot; -&gt; TbContainer &lt;$&gt;</span>
+<span class="lineno">  331 </span><span class="spaces">        </span><span class="istickedoff">(ContainerSpec &lt;$&gt; o .: &quot;engine&quot; &lt;*&gt; o .: &quot;target&quot;)</span>
+<span class="lineno">  332 </span><span class="spaces">      </span><span class="istickedoff">other -&gt; <span class="nottickedoff">fail (&quot;unknown TerminalBackend tag: &quot; ++ show other)</span></span></span>
+<span class="lineno">  333 </span>
+<span class="lineno">  334 </span>-- HarnessFlavour — string; custom: prefix for HCustom
+<span class="lineno">  335 </span>-- FromJSON routes custom:* through mkHCustom to reject path separators (S12)
+<span class="lineno">  336 </span>
+<span class="lineno">  337 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON HarnessFlavour</span></span></span></span></span></span></span></span> where
+<span class="lineno">  338 </span>  <span class="decl"><span class="istickedoff">toJSON HClaudeCode = Aeson.String &quot;claude-code&quot;</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="istickedoff">toJSON HCodex      = Aeson.String &quot;codex&quot;</span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="istickedoff">toJSON HOpenCode   = Aeson.String &quot;opencode&quot;</span>
+<span class="lineno">  341 </span><span class="spaces">  </span><span class="istickedoff">toJSON HHermes     = Aeson.String &quot;hermes&quot;</span>
+<span class="lineno">  342 </span><span class="spaces">  </span><span class="istickedoff">toJSON HPureClaw   = Aeson.String &quot;pureclaw&quot;</span>
+<span class="lineno">  343 </span><span class="spaces">  </span><span class="istickedoff">toJSON (HCustom n) = Aeson.String (&quot;custom:&quot; &lt;&gt; n)</span></span>
+<span class="lineno">  344 </span>
+<span class="lineno">  345 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON HarnessFlavour</span></span></span></span> where
+<span class="lineno">  346 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;HarnessFlavour&quot;</span> $ \case</span>
+<span class="lineno">  347 </span><span class="spaces">    </span><span class="istickedoff">&quot;claude-code&quot; -&gt; pure HClaudeCode</span>
+<span class="lineno">  348 </span><span class="spaces">    </span><span class="istickedoff">&quot;codex&quot;       -&gt; pure HCodex</span>
+<span class="lineno">  349 </span><span class="spaces">    </span><span class="istickedoff">&quot;opencode&quot;    -&gt; pure HOpenCode</span>
+<span class="lineno">  350 </span><span class="spaces">    </span><span class="istickedoff">&quot;hermes&quot;      -&gt; pure HHermes</span>
+<span class="lineno">  351 </span><span class="spaces">    </span><span class="istickedoff">&quot;pureclaw&quot;    -&gt; pure HPureClaw</span>
+<span class="lineno">  352 </span><span class="spaces">    </span><span class="istickedoff">other</span>
+<span class="lineno">  353 </span><span class="spaces">      </span><span class="istickedoff">| Just rest &lt;- T.stripPrefix &quot;custom:&quot; other -&gt;</span>
+<span class="lineno">  354 </span><span class="spaces">          </span><span class="istickedoff">case mkHCustom rest of</span>
+<span class="lineno">  355 </span><span class="spaces">            </span><span class="istickedoff">Right hf -&gt; pure hf</span>
+<span class="lineno">  356 </span><span class="spaces">            </span><span class="istickedoff">Left HCustomEmpty -&gt; <span class="nottickedoff">fail &quot;HarnessFlavour: custom name is empty&quot;</span></span>
+<span class="lineno">  357 </span><span class="spaces">            </span><span class="istickedoff">Left (HCustomPathSeparator raw) -&gt;</span>
+<span class="lineno">  358 </span><span class="spaces">              </span><span class="istickedoff">fail <span class="nottickedoff">(&quot;HarnessFlavour: path separator in custom name: &quot; ++ show raw)</span></span>
+<span class="lineno">  359 </span><span class="spaces">      </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> -&gt; <span class="nottickedoff">fail (&quot;unknown HarnessFlavour: &quot; ++ show other)</span></span></span>
+<span class="lineno">  360 </span>
+<span class="lineno">  361 </span>-- ProviderSpec — flat object; agent omitted when Nothing
+<span class="lineno">  362 </span>
+<span class="lineno">  363 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON ProviderSpec</span></span></span></span></span></span></span></span> where
+<span class="lineno">  364 </span>  <span class="decl"><span class="istickedoff">toJSON ps = Aeson.object $</span>
+<span class="lineno">  365 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;provider&quot; .= unProviderId (_ps_provider ps)</span>
+<span class="lineno">  366 </span><span class="spaces">    </span><span class="istickedoff">, &quot;model&quot;    .= unModelId (_ps_model ps)</span>
+<span class="lineno">  367 </span><span class="spaces">    </span><span class="istickedoff">] ++ maybe [] (\a -&gt; [&quot;agent&quot; .= unAgentName a]) (_ps_agent ps)</span></span>
+<span class="lineno">  368 </span>
+<span class="lineno">  369 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON ProviderSpec</span></span></span></span> where
+<span class="lineno">  370 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;ProviderSpec&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  371 </span><span class="spaces">    </span><span class="istickedoff">ProviderSpec . ProviderId &lt;$&gt; o .: &quot;provider&quot;</span>
+<span class="lineno">  372 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; (ModelId &lt;$&gt; o .: &quot;model&quot;)</span>
+<span class="lineno">  373 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .:? &quot;agent&quot;</span></span>
+<span class="lineno">  374 </span>
+<span class="lineno">  375 </span>-- HarnessSpec — flat object; cwd optional (omitted when Nothing),
+<span class="lineno">  376 </span>-- args defaults to [], harnessId optional (emitted ONLY when Just; absent on
+<span class="lineno">  377 </span>-- decode -&gt; Nothing — the back-compat guarantee for legacy session.json, K4).
+<span class="lineno">  378 </span>
+<span class="lineno">  379 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON HarnessSpec</span></span></span></span></span></span></span></span> where
+<span class="lineno">  380 </span>  <span class="decl"><span class="istickedoff">toJSON hs = Aeson.object $</span>
+<span class="lineno">  381 </span><span class="spaces">    </span><span class="istickedoff">[ &quot;flavour&quot; .= _h_flavour hs</span>
+<span class="lineno">  382 </span><span class="spaces">    </span><span class="istickedoff">, &quot;backend&quot; .= _h_backend hs</span>
+<span class="lineno">  383 </span><span class="spaces">    </span><span class="istickedoff">] ++ maybe [] (\c -&gt; [&quot;cwd&quot; .= c]) (_h_cwd hs)</span>
+<span class="lineno">  384 </span><span class="spaces">      </span><span class="istickedoff">++ [&quot;args&quot; .= _h_args hs | not (null (_h_args hs))]</span>
+<span class="lineno">  385 </span><span class="spaces">      </span><span class="istickedoff">++ maybe [] (\hid -&gt; [&quot;harnessId&quot; .= hid]) (_h_harnessId hs)</span>
+<span class="lineno">  386 </span><span class="spaces">      </span><span class="istickedoff">++ maybe [] (\u -&gt; [&quot;claudeSessionUuid&quot; .= u]) (_h_claudeSessionUuid hs)</span>
+<span class="lineno">  387 </span><span class="spaces">      </span><span class="istickedoff">++ maybe [] (\c -&gt; [&quot;canonicalCwd&quot; .= c]) (_h_canonicalCwd hs)</span></span>
+<span class="lineno">  388 </span>
+<span class="lineno">  389 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON HarnessSpec</span></span></span></span> where
+<span class="lineno">  390 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;HarnessSpec&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  391 </span><span class="spaces">    </span><span class="istickedoff">HarnessSpec</span>
+<span class="lineno">  392 </span><span class="spaces">      </span><span class="istickedoff">&lt;$&gt; o .: &quot;flavour&quot;</span>
+<span class="lineno">  393 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .: &quot;backend&quot;</span>
+<span class="lineno">  394 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .:? &quot;cwd&quot;</span>
+<span class="lineno">  395 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .:? &quot;args&quot; .!= []</span>
+<span class="lineno">  396 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .:? &quot;harnessId&quot;</span>
+<span class="lineno">  397 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .:? &quot;claudeSessionUuid&quot;</span>
+<span class="lineno">  398 </span><span class="spaces">      </span><span class="istickedoff">&lt;*&gt; o .:? &quot;canonicalCwd&quot;</span></span>
+<span class="lineno">  399 </span>
+<span class="lineno">  400 </span>-- SessionKind — tag-discriminated: &quot;provider&quot; or &quot;harness&quot;
+<span class="lineno">  401 </span>
+<span class="lineno">  402 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.ToJSON SessionKind</span></span></span></span></span></span></span></span> where
+<span class="lineno">  403 </span>  <span class="decl"><span class="istickedoff">toJSON (SkProvider ps) = case Aeson.toJSON ps of</span>
+<span class="lineno">  404 </span><span class="spaces">    </span><span class="istickedoff">Aeson.Object o -&gt; Aeson.Object (KM.insert (AesonKey.fromText &quot;tag&quot;) (Aeson.String &quot;provider&quot;) o)</span>
+<span class="lineno">  405 </span><span class="spaces">    </span><span class="istickedoff">other -&gt; <span class="nottickedoff">other</span>  -- should not happen</span>
+<span class="lineno">  406 </span><span class="spaces">  </span><span class="istickedoff">toJSON (SkHarness hs) = case Aeson.toJSON hs of</span>
+<span class="lineno">  407 </span><span class="spaces">    </span><span class="istickedoff">Aeson.Object o -&gt; Aeson.Object (KM.insert (AesonKey.fromText &quot;tag&quot;) (Aeson.String &quot;harness&quot;) o)</span>
+<span class="lineno">  408 </span><span class="spaces">    </span><span class="istickedoff">other -&gt; <span class="nottickedoff">other</span></span></span>  -- should not happen
+<span class="lineno">  409 </span>
+<span class="lineno">  410 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON SessionKind</span></span></span></span> where
+<span class="lineno">  411 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withObject <span class="nottickedoff">&quot;SessionKind&quot;</span> $ \o -&gt; do</span>
+<span class="lineno">  412 </span><span class="spaces">    </span><span class="istickedoff">tag &lt;- o .: &quot;tag&quot; :: Parser Text</span>
+<span class="lineno">  413 </span><span class="spaces">    </span><span class="istickedoff">case tag of</span>
+<span class="lineno">  414 </span><span class="spaces">      </span><span class="istickedoff">&quot;provider&quot; -&gt; SkProvider &lt;$&gt; Aeson.parseJSON (Aeson.Object o)</span>
+<span class="lineno">  415 </span><span class="spaces">      </span><span class="istickedoff">&quot;harness&quot;  -&gt; SkHarness &lt;$&gt; Aeson.parseJSON (Aeson.Object o)</span>
+<span class="lineno">  416 </span><span class="spaces">      </span><span class="istickedoff">other -&gt; fail <span class="nottickedoff">(&quot;unknown SessionKind tag: &quot; ++ show other)</span></span></span>
+<span class="lineno">  417 </span>
+<span class="lineno">  418 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  419 </span>-- Provider helpers
+<span class="lineno">  420 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  421 </span>
+<span class="lineno">  422 </span>-- | Infer a 'ProviderId' from a model name prefix.
+<span class="lineno">  423 </span>--
+<span class="lineno">  424 </span>-- * @claude-*@, @opus-*@, @sonnet-*@, @haiku-*@ -&gt; @\&quot;anthropic\&quot;@
+<span class="lineno">  425 </span>-- * @gpt-*@, @o1-*@, @o3-*@, @o4-*@ -&gt; @\&quot;openai\&quot;@
+<span class="lineno">  426 </span>-- * @gemini-*@ -&gt; @\&quot;google\&quot;@
+<span class="lineno">  427 </span>-- * anything else -&gt; @\&quot;anthropic\&quot;@ (default)
+<span class="lineno">  428 </span>inferProviderId :: Text -&gt; ProviderId
+<span class="lineno">  429 </span><span class="decl"><span class="istickedoff">inferProviderId model</span>
+<span class="lineno">  430 </span><span class="spaces">  </span><span class="istickedoff">| matchesAny [&quot;claude-&quot;, &quot;opus-&quot;, &quot;sonnet-&quot;, &quot;haiku-&quot;] = ProviderId &quot;anthropic&quot;</span>
+<span class="lineno">  431 </span><span class="spaces">  </span><span class="istickedoff">| matchesAny [&quot;gpt-&quot;, &quot;o1-&quot;, &quot;o3-&quot;, &quot;o4-&quot;]            = ProviderId &quot;openai&quot;</span>
+<span class="lineno">  432 </span><span class="spaces">  </span><span class="istickedoff">| T.isPrefixOf &quot;gemini-&quot; model                         = ProviderId &quot;google&quot;</span>
+<span class="lineno">  433 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>                                            = ProviderId &quot;anthropic&quot;</span>
+<span class="lineno">  434 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  435 </span><span class="spaces">    </span><span class="istickedoff">matchesAny :: [Text] -&gt; Bool</span>
+<span class="lineno">  436 </span><span class="spaces">    </span><span class="istickedoff">matchesAny = any (`T.isPrefixOf` model)</span></span>
+
+</pre>
+</body>
+</html>

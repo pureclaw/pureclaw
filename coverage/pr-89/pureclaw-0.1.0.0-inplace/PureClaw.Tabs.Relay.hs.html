@@ -1,0 +1,256 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Tabs.Relay
+<span class="lineno">    3 </span>-- Description : Streaming-aware per-conversation output relay (Tabs-as-View, #79).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- When a tab (named by its 'TabRef') emits a 'ChannelEvent', 'relayEvent' fans
+<span class="lineno">    6 </span>-- that event out to every conversation according to /that conversation's/
+<span class="lineno">    7 </span>-- effective 'RelayMode' (its per-conversation override, else the global
+<span class="lineno">    8 </span>-- default). This replaces the single-focus @ChannelOut@ gate (@shouldEmit@): a
+<span class="lineno">    9 </span>-- tab can be foreground for conversation A and background for B at the same
+<span class="lineno">   10 </span>-- time, so the decision is taken per conversation rather than once for the
+<span class="lineno">   11 </span>-- whole output (design §9.3).
+<span class="lineno">   12 </span>--
+<span class="lineno">   13 </span>-- Unlike the earlier whole-@Text@ relay, this engine is __streaming-aware__:
+<span class="lineno">   14 </span>-- it sinks a 'ChannelEvent', so a focused conversation receives every
+<span class="lineno">   15 </span>-- @StreamStart@\/@ChunkOf@\/@StreamEnd@ verbatim (full provider streaming),
+<span class="lineno">   16 </span>-- while a background 'ActivityDigest' conversation gets __at most one__
+<span class="lineno">   17 </span>-- breadcrumb ping per /burst/ — one logical message. The burst is identified
+<span class="lineno">   18 </span>-- by a 'BurstKey': all framing events of one stream share @'BurstStream' sid@,
+<span class="lineno">   19 </span>-- and a one-shot @FullMsg@ is its own @'BurstFull'@ burst. The pinged-set is
+<span class="lineno">   20 </span>-- keyed on @('ConversationKey', 'BurstKey')@ so a 100-chunk stream pings once,
+<span class="lineno">   21 </span>-- not 100 times (§4).
+<span class="lineno">   22 </span>--
+<span class="lineno">   23 </span>-- The engine is a __single writer__: the dispatcher invokes it from one
+<span class="lineno">   24 </span>-- thread, and it iterates conversations in a deterministic (sorted-key) order,
+<span class="lineno">   25 </span>-- calling the injected sink in turn. There is no concurrency inside the
+<span class="lineno">   26 </span>-- engine — ordering across the per-conversation sinks is preserved exactly as
+<span class="lineno">   27 </span>-- @ChannelOut@ guaranteed.
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- == Per-conversation decision (effective mode @m@ for key @k@)
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- Let @focused@ mean the conversation's cursor names the source tab.
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>--   * __Focused__ (any mode) — forward the event, MERGING a one-shot
+<span class="lineno">   34 </span>--     @\&quot;\/N \&lt;model\&gt;: \&quot;@ speaker prefix into the burst-start when more than
+<span class="lineno">   35 </span>--     one tab exists (prepended to a @FullMsg@, injected as the first @ChunkOf@
+<span class="lineno">   36 </span>--     after a @StreamStart@; mid-burst\/banner events pass verbatim). Also clear
+<span class="lineno">   37 </span>--     /every/ @(k, _)@ entry from the pinged-set: the conversation is looking at
+<span class="lineno">   38 </span>--     the tab, so a future background burst should ping it again.
+<span class="lineno">   39 </span>--   * __FocusedOnly__ background — nothing.
+<span class="lineno">   40 </span>--   * __Firehose__ background — forward the event verbatim.
+<span class="lineno">   41 </span>--   * __ActivityDigest__ background — emit at most one ping per burst. A
+<span class="lineno">   42 </span>--     'BannerLine' source event is skipped entirely (banners are
+<span class="lineno">   43 </span>--     dispatcher-class, never relayed here): no ping, set untouched. For a
+<span class="lineno">   44 </span>--     stream\/full event, if @(k, burstKey)@ is not already pinged AND the
+<span class="lineno">   45 </span>--     source ref resolves in the 'TabList', deliver a 'BannerLine' ping
+<span class="lineno">   46 </span>--     (@\&quot;\&lt;name\&gt; (\/N) has new output\&quot;@, where @\&lt;name\&gt;@ is the source
+<span class="lineno">   47 </span>--     tab's friendly name and @N@ its /current/ display slot) and remember
+<span class="lineno">   48 </span>--     @(k, burstKey)@. A 'Dead' tombstone source still pings (§8) — only a
+<span class="lineno">   49 </span>--     source ref /absent/ from the list yields no ping (no name\/slot).
+<span class="lineno">   50 </span>--
+<span class="lineno">   51 </span>-- The set of conversations considered is every key present in the
+<span class="lineno">   52 </span>-- 'CursorState' — the union of the cursor-map keys and the relay-override-map
+<span class="lineno">   53 </span>-- keys — so a conversation that has only set a 'RelayMode' (no cursor yet) is
+<span class="lineno">   54 </span>-- still routed.
+<span class="lineno">   55 </span>module PureClaw.Tabs.Relay
+<span class="lineno">   56 </span>  ( BurstKey (..)
+<span class="lineno">   57 </span>  , RelayDeps (..)
+<span class="lineno">   58 </span>  , relayEvent
+<span class="lineno">   59 </span>  ) where
+<span class="lineno">   60 </span>
+<span class="lineno">   61 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   62 </span>import Data.Set (Set)
+<span class="lineno">   63 </span>import Data.Set qualified as Set
+<span class="lineno">   64 </span>import Data.Text (Text)
+<span class="lineno">   65 </span>import Data.Text qualified as T
+<span class="lineno">   66 </span>
+<span class="lineno">   67 </span>import PureClaw.Handles.Tab (unTabIndex)
+<span class="lineno">   68 </span>import PureClaw.Routing.Types (ChannelEvent (..), StreamId)
+<span class="lineno">   69 </span>import PureClaw.Tabs.Types
+<span class="lineno">   70 </span>  ( ConversationKey
+<span class="lineno">   71 </span>  , CursorState (..)
+<span class="lineno">   72 </span>  , RelayMode (..)
+<span class="lineno">   73 </span>  , TabList
+<span class="lineno">   74 </span>  , TabRef
+<span class="lineno">   75 </span>  , lookupRef
+<span class="lineno">   76 </span>  , relayModeFor
+<span class="lineno">   77 </span>  )
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>-- | The /burst/ a 'ChannelEvent' belongs to — one logical message. All framing
+<span class="lineno">   80 </span>-- events of a single provider stream (@StreamStart@\/@ChunkOf@\/@StreamEnd@)
+<span class="lineno">   81 </span>-- share the same @'BurstStream' sid@; a one-shot @FullMsg@ is its own
+<span class="lineno">   82 </span>-- @'BurstFull'@ burst. 'ActivityDigest' de-dups its background ping on
+<span class="lineno">   83 </span>-- @('ConversationKey', 'BurstKey')@, so a multi-chunk stream pings once.
+<span class="lineno">   84 </span>data BurstKey
+<span class="lineno">   85 </span>  = BurstStream !StreamId
+<span class="lineno">   86 </span>  | BurstFull
+<span class="lineno">   87 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>-- | The relay engine's only side-effect seam: a conversation-addressed output
+<span class="lineno">   90 </span>-- sink. @'_rl_sink' k e@ delivers event @e@ to conversation @k@. Injected so
+<span class="lineno">   91 </span>-- the engine can be unit-tested against a recording sink.
+<span class="lineno">   92 </span>newtype RelayDeps = RelayDeps
+<span class="lineno">   93 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_rl_sink</span></span></span> :: ConversationKey -&gt; ChannelEvent -&gt; IO ()
+<span class="lineno">   94 </span>  }
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- | The burst a 'ChannelEvent' belongs to, or 'Nothing' for a 'BannerLine'
+<span class="lineno">   97 </span>-- (banners are dispatcher-class and never relayed to background conversations).
+<span class="lineno">   98 </span>burstKeyOf :: ChannelEvent -&gt; Maybe BurstKey
+<span class="lineno">   99 </span><span class="decl"><span class="istickedoff">burstKeyOf = \case</span>
+<span class="lineno">  100 </span><span class="spaces">  </span><span class="istickedoff">StreamStart sid _ -&gt; Just (BurstStream sid)</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">ChunkOf sid _     -&gt; Just (BurstStream sid)</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">StreamEnd sid     -&gt; Just (BurstStream sid)</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">FullMsg _ _       -&gt; Just BurstFull</span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">BannerLine _      -&gt; Nothing</span></span>
+<span class="lineno">  105 </span>
+<span class="lineno">  106 </span>-- | Fan one tab's 'ChannelEvent' out to every conversation per its effective
+<span class="lineno">  107 </span>-- 'RelayMode'. See the module header for the full per-conversation decision.
+<span class="lineno">  108 </span>--
+<span class="lineno">  109 </span>-- @globalDefault@ is the fallback 'RelayMode' for conversations with no
+<span class="lineno">  110 </span>-- override. @pinged@ is the set of @('ConversationKey', 'BurstKey')@ pairs
+<span class="lineno">  111 </span>-- already activity-pinged (burst de-dup for 'ActivityDigest'); the updated set
+<span class="lineno">  112 </span>-- is returned.
+<span class="lineno">  113 </span>relayEvent
+<span class="lineno">  114 </span>  :: RelayDeps
+<span class="lineno">  115 </span>  -&gt; CursorState
+<span class="lineno">  116 </span>  -&gt; RelayMode
+<span class="lineno">  117 </span>  -&gt; TabList
+<span class="lineno">  118 </span>  -&gt; Maybe Text
+<span class="lineno">  119 </span>     -- ^ The source tab's model name, used to render the focused speaker prefix
+<span class="lineno">  120 </span>     --   (@\/N \&lt;model\&gt;: @). 'Nothing' when unknown (e.g. a harness tab), in
+<span class="lineno">  121 </span>     --   which case the prefix is slot-only (@\/N: @).
+<span class="lineno">  122 </span>  -&gt; Set (ConversationKey, BurstKey)
+<span class="lineno">  123 </span>  -&gt; TabRef
+<span class="lineno">  124 </span>  -&gt; ChannelEvent
+<span class="lineno">  125 </span>  -&gt; IO (Set (ConversationKey, BurstKey))
+<span class="lineno">  126 </span><span class="decl"><span class="istickedoff">relayEvent deps cs globalDefault tl srcModel pinged src event =</span>
+<span class="lineno">  127 </span><span class="spaces">    </span><span class="istickedoff">go pinged conversationKeys</span>
+<span class="lineno">  128 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  129 </span><span class="spaces">    </span><span class="istickedoff">-- Every conversation the dispatcher knows about: keys with a cursor or a</span>
+<span class="lineno">  130 </span><span class="spaces">    </span><span class="istickedoff">-- relay override. Sorted so the single-writer emission order is testable.</span>
+<span class="lineno">  131 </span><span class="spaces">    </span><span class="istickedoff">conversationKeys :: [ConversationKey]</span>
+<span class="lineno">  132 </span><span class="spaces">    </span><span class="istickedoff">conversationKeys =</span>
+<span class="lineno">  133 </span><span class="spaces">      </span><span class="istickedoff">Set.toAscList</span>
+<span class="lineno">  134 </span><span class="spaces">        </span><span class="istickedoff">(Set.fromList (Map.keys (_cs_cursors cs))</span>
+<span class="lineno">  135 </span><span class="spaces">           </span><span class="istickedoff">`Set.union` Set.fromList (Map.keys (_cs_relay cs)))</span>
+<span class="lineno">  136 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  137 </span><span class="spaces">    </span><span class="istickedoff">-- The source tab's current display slot (0-based), if it is in the list.</span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">srcSlot :: Maybe Int</span>
+<span class="lineno">  139 </span><span class="spaces">    </span><span class="istickedoff">srcSlot = unTabIndex &lt;$&gt; lookupRef src tl</span>
+<span class="lineno">  140 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  141 </span><span class="spaces">    </span><span class="istickedoff">-- A slot-keyed activity ping for the source tab, as a 'BannerLine'.</span>
+<span class="lineno">  142 </span><span class="spaces">    </span><span class="istickedoff">-- 'Nothing' when the source ref is absent (no slot). Tabs carry no label of</span>
+<span class="lineno">  143 </span><span class="spaces">    </span><span class="istickedoff">-- their own anymore, so the source is named by its current slot.</span>
+<span class="lineno">  144 </span><span class="spaces">    </span><span class="istickedoff">activityPing :: Maybe ChannelEvent</span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="istickedoff">activityPing = do</span>
+<span class="lineno">  146 </span><span class="spaces">      </span><span class="istickedoff">slot &lt;- srcSlot</span>
+<span class="lineno">  147 </span><span class="spaces">      </span><span class="istickedoff">pure (BannerLine (&quot;/&quot; &lt;&gt; T.pack (show slot) &lt;&gt; &quot; has new output&quot;))</span>
+<span class="lineno">  148 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  149 </span><span class="spaces">    </span><span class="istickedoff">-- The speaker prefix to MERGE into a focused burst-start, or 'Nothing' when</span>
+<span class="lineno">  150 </span><span class="spaces">    </span><span class="istickedoff">-- the source ref has no slot. Rendered as @\/N \&lt;model\&gt;: @: the slot the</span>
+<span class="lineno">  151 </span><span class="spaces">    </span><span class="istickedoff">-- source tab currently occupies, then the source model when known (omitted</span>
+<span class="lineno">  152 </span><span class="spaces">    </span><span class="istickedoff">-- for a harness tab / unresolved model), then a @&quot;: &quot;@ separator before the</span>
+<span class="lineno">  153 </span><span class="spaces">    </span><span class="istickedoff">-- content. Every focused burst is labelled — single-tab sessions included —</span>
+<span class="lineno">  154 </span><span class="spaces">    </span><span class="istickedoff">-- so the speaker is always identifiable (reverses the gb7 single-tab</span>
+<span class="lineno">  155 </span><span class="spaces">    </span><span class="istickedoff">-- exemption). Tabs carry no label of their own, so the source is named by</span>
+<span class="lineno">  156 </span><span class="spaces">    </span><span class="istickedoff">-- its current slot.</span>
+<span class="lineno">  157 </span><span class="spaces">    </span><span class="istickedoff">speakerPrefix :: Maybe Text</span>
+<span class="lineno">  158 </span><span class="spaces">    </span><span class="istickedoff">speakerPrefix = do</span>
+<span class="lineno">  159 </span><span class="spaces">      </span><span class="istickedoff">slot &lt;- srcSlot</span>
+<span class="lineno">  160 </span><span class="spaces">      </span><span class="istickedoff">pure (&quot;/&quot; &lt;&gt; T.pack (show slot) &lt;&gt; maybe &quot;&quot; (&quot; &quot; &lt;&gt;) srcModel &lt;&gt; &quot;: &quot;)</span>
+<span class="lineno">  161 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  162 </span><span class="spaces">    </span><span class="istickedoff">deliver :: ConversationKey -&gt; ChannelEvent -&gt; IO ()</span>
+<span class="lineno">  163 </span><span class="spaces">    </span><span class="istickedoff">deliver = _rl_sink deps</span>
+<span class="lineno">  164 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  165 </span><span class="spaces">    </span><span class="istickedoff">-- Forward the event to a focused conversation, MERGING a one-shot speaker</span>
+<span class="lineno">  166 </span><span class="spaces">    </span><span class="istickedoff">-- prefix into the START of every burst. The prefix is prepended to a</span>
+<span class="lineno">  167 </span><span class="spaces">    </span><span class="istickedoff">-- 'FullMsg' and injected as the first 'ChunkOf' right after a 'StreamStart'</span>
+<span class="lineno">  168 </span><span class="spaces">    </span><span class="istickedoff">-- — so a streamed reply renders the speaker inline, and a non-streaming</span>
+<span class="lineno">  169 </span><span class="spaces">    </span><span class="istickedoff">-- channel buffers it into the one flushed message. Mid-burst</span>
+<span class="lineno">  170 </span><span class="spaces">    </span><span class="istickedoff">-- 'ChunkOf'\/'StreamEnd' and 'BannerLine' events forward verbatim, so a</span>
+<span class="lineno">  171 </span><span class="spaces">    </span><span class="istickedoff">-- multi-chunk reply is prefixed exactly once. Single-tab sessions are</span>
+<span class="lineno">  172 </span><span class="spaces">    </span><span class="istickedoff">-- labelled too (the always-label decision, reversing the gb7 exemption).</span>
+<span class="lineno">  173 </span><span class="spaces">    </span><span class="istickedoff">deliverFocused :: ConversationKey -&gt; IO ()</span>
+<span class="lineno">  174 </span><span class="spaces">    </span><span class="istickedoff">deliverFocused k = mapM_ (deliver k) (focusedEvents event)</span>
+<span class="lineno">  175 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  176 </span><span class="spaces">    </span><span class="istickedoff">-- The event(s) to deliver to a focused conversation for @ev@: the</span>
+<span class="lineno">  177 </span><span class="spaces">    </span><span class="istickedoff">-- burst-start carrying the merged speaker prefix when 'speakerPrefix' is</span>
+<span class="lineno">  178 </span><span class="spaces">    </span><span class="istickedoff">-- 'Just', else the event verbatim. A 'StreamStart' becomes the start plus an</span>
+<span class="lineno">  179 </span><span class="spaces">    </span><span class="istickedoff">-- injected prefix chunk; a 'FullMsg' has the prefix prepended to its text.</span>
+<span class="lineno">  180 </span><span class="spaces">    </span><span class="istickedoff">-- 'ChunkOf'\/'StreamEnd'\/'BannerLine' are always forwarded verbatim.</span>
+<span class="lineno">  181 </span><span class="spaces">    </span><span class="istickedoff">focusedEvents :: ChannelEvent -&gt; [ChannelEvent]</span>
+<span class="lineno">  182 </span><span class="spaces">    </span><span class="istickedoff">focusedEvents ev = case ev of</span>
+<span class="lineno">  183 </span><span class="spaces">      </span><span class="istickedoff">StreamStart sid tix -&gt; case speakerPrefix of</span>
+<span class="lineno">  184 </span><span class="spaces">        </span><span class="istickedoff">Just pfx -&gt; [StreamStart sid tix, ChunkOf sid pfx]</span>
+<span class="lineno">  185 </span><span class="spaces">        </span><span class="istickedoff">Nothing  -&gt; [ev]</span>
+<span class="lineno">  186 </span><span class="spaces">      </span><span class="istickedoff">FullMsg tix t -&gt; case speakerPrefix of</span>
+<span class="lineno">  187 </span><span class="spaces">        </span><span class="istickedoff">Just pfx -&gt; [FullMsg tix (pfx &lt;&gt; t)]</span>
+<span class="lineno">  188 </span><span class="spaces">        </span><span class="istickedoff">Nothing  -&gt; [ev]</span>
+<span class="lineno">  189 </span><span class="spaces">      </span><span class="istickedoff">ChunkOf {}    -&gt; [ev]</span>
+<span class="lineno">  190 </span><span class="spaces">      </span><span class="istickedoff">StreamEnd {}  -&gt; [ev]</span>
+<span class="lineno">  191 </span><span class="spaces">      </span><span class="istickedoff">BannerLine {} -&gt; [ev]</span>
+<span class="lineno">  192 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  193 </span><span class="spaces">    </span><span class="istickedoff">go</span>
+<span class="lineno">  194 </span><span class="spaces">      </span><span class="istickedoff">:: Set (ConversationKey, BurstKey)</span>
+<span class="lineno">  195 </span><span class="spaces">      </span><span class="istickedoff">-&gt; [ConversationKey]</span>
+<span class="lineno">  196 </span><span class="spaces">      </span><span class="istickedoff">-&gt; IO (Set (ConversationKey, BurstKey))</span>
+<span class="lineno">  197 </span><span class="spaces">    </span><span class="istickedoff">go acc []       = pure acc</span>
+<span class="lineno">  198 </span><span class="spaces">    </span><span class="istickedoff">go acc (k : ks) = do</span>
+<span class="lineno">  199 </span><span class="spaces">      </span><span class="istickedoff">acc' &lt;-</span>
+<span class="lineno">  200 </span><span class="spaces">        </span><span class="istickedoff">if Map.lookup k (_cs_cursors cs) == Just src</span>
+<span class="lineno">  201 </span><span class="spaces">          </span><span class="istickedoff">-- Focused on the source tab: forward the event verbatim in every</span>
+<span class="lineno">  202 </span><span class="spaces">          </span><span class="istickedoff">-- mode, and clear ALL of this conversation's burst entries (it is</span>
+<span class="lineno">  203 </span><span class="spaces">          </span><span class="istickedoff">-- now looking at the tab, so a future background burst should ping).</span>
+<span class="lineno">  204 </span><span class="spaces">          </span><span class="istickedoff">then deliverFocused k &gt;&gt; pure (clearKey k acc)</span>
+<span class="lineno">  205 </span><span class="spaces">          </span><span class="istickedoff">-- Background: behaviour depends on the conversation's effective mode.</span>
+<span class="lineno">  206 </span><span class="spaces">          </span><span class="istickedoff">else case relayModeFor k globalDefault cs of</span>
+<span class="lineno">  207 </span><span class="spaces">            </span><span class="istickedoff">FocusedOnly    -&gt; pure acc</span>
+<span class="lineno">  208 </span><span class="spaces">            </span><span class="istickedoff">Firehose       -&gt; deliver k event &gt;&gt; pure acc</span>
+<span class="lineno">  209 </span><span class="spaces">            </span><span class="istickedoff">ActivityDigest -&gt; backgroundDigest acc k</span>
+<span class="lineno">  210 </span><span class="spaces">      </span><span class="istickedoff">go acc' ks</span>
+<span class="lineno">  211 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  212 </span><span class="spaces">    </span><span class="istickedoff">-- Drop every @(k, _)@ burst entry for conversation @k@.</span>
+<span class="lineno">  213 </span><span class="spaces">    </span><span class="istickedoff">clearKey</span>
+<span class="lineno">  214 </span><span class="spaces">      </span><span class="istickedoff">:: ConversationKey</span>
+<span class="lineno">  215 </span><span class="spaces">      </span><span class="istickedoff">-&gt; Set (ConversationKey, BurstKey)</span>
+<span class="lineno">  216 </span><span class="spaces">      </span><span class="istickedoff">-&gt; Set (ConversationKey, BurstKey)</span>
+<span class="lineno">  217 </span><span class="spaces">    </span><span class="istickedoff">clearKey k = Set.filter ((/= k) . fst)</span>
+<span class="lineno">  218 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="istickedoff">-- ActivityDigest for a background conversation: one name-first ping per</span>
+<span class="lineno">  220 </span><span class="spaces">    </span><span class="istickedoff">-- burst. A 'BannerLine' source is skipped (no burst, set untouched).</span>
+<span class="lineno">  221 </span><span class="spaces">    </span><span class="istickedoff">-- Otherwise suppressed when @(k, burstKey)@ was already pinged, or when the</span>
+<span class="lineno">  222 </span><span class="spaces">    </span><span class="istickedoff">-- source ref is absent from the list (no name/slot to render).</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">backgroundDigest</span>
+<span class="lineno">  224 </span><span class="spaces">      </span><span class="istickedoff">:: Set (ConversationKey, BurstKey)</span>
+<span class="lineno">  225 </span><span class="spaces">      </span><span class="istickedoff">-&gt; ConversationKey</span>
+<span class="lineno">  226 </span><span class="spaces">      </span><span class="istickedoff">-&gt; IO (Set (ConversationKey, BurstKey))</span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff">backgroundDigest acc k = case burstKeyOf event of</span>
+<span class="lineno">  228 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; pure acc</span>
+<span class="lineno">  229 </span><span class="spaces">      </span><span class="istickedoff">Just bk</span>
+<span class="lineno">  230 </span><span class="spaces">        </span><span class="istickedoff">| (k, bk) `Set.member` acc -&gt; pure acc</span>
+<span class="lineno">  231 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; case activityPing of</span>
+<span class="lineno">  232 </span><span class="spaces">            </span><span class="istickedoff">Just p  -&gt; deliver k p &gt;&gt; pure (Set.insert (k, bk) acc)</span>
+<span class="lineno">  233 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; pure acc</span></span>
+
+</pre>
+</body>
+</html>

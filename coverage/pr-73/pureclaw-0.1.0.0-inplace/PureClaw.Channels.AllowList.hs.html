@@ -1,0 +1,48 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Channels.AllowList
+<span class="lineno">    2 </span>  ( emitAllowListWarning
+<span class="lineno">    3 </span>  , warnIfOpenAllowList
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">    7 </span>import System.IO
+<span class="lineno">    8 </span>
+<span class="lineno">    9 </span>import PureClaw.Core.Types
+<span class="lineno">   10 </span>import PureClaw.Handles.Log
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>-- | When the list is open, write the banner lines to @h@ and emit the WARN
+<span class="lineno">   13 </span>--   log line via the LogHandle. No-op when senders are restricted. @h@ is
+<span class="lineno">   14 </span>--   injectable so tests can capture output to a temp-file Handle.
+<span class="lineno">   15 </span>emitAllowListWarning :: Handle -&gt; LogHandle -&gt; AllowListContext -&gt; AllowList a -&gt; IO ()
+<span class="lineno">   16 </span><span class="decl"><span class="istickedoff">emitAllowListWarning h lh ctx al = case allowListWarning ctx al of</span>
+<span class="lineno">   17 </span><span class="spaces">  </span><span class="istickedoff">Nothing -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   18 </span><span class="spaces">  </span><span class="istickedoff">Just (banner, logMsg) -&gt; do</span>
+<span class="lineno">   19 </span><span class="spaces">    </span><span class="istickedoff">mapM_ (TIO.hPutStrLn h) banner</span>
+<span class="lineno">   20 </span><span class="spaces">    </span><span class="istickedoff">_lh_logWarn lh logMsg</span></span>
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>-- | Convenience for live call sites: banner to stdout (matching the existing
+<span class="lineno">   23 </span>--   @PureClaw 0.1.0@ startup banner), log line to stderr via the LogHandle.
+<span class="lineno">   24 </span>warnIfOpenAllowList :: LogHandle -&gt; AllowListContext -&gt; AllowList a -&gt; IO ()
+<span class="lineno">   25 </span><span class="decl"><span class="istickedoff">warnIfOpenAllowList = emitAllowListWarning stdout</span></span>
+
+</pre>
+</body>
+</html>

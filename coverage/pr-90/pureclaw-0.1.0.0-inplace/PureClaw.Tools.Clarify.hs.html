@@ -1,0 +1,124 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Clarify
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    clarifyTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Control.Exception
+<span class="lineno">    7 </span>import Data.Aeson
+<span class="lineno">    8 </span>import Data.Aeson.Types
+<span class="lineno">    9 </span>import Data.ByteString qualified as BS
+<span class="lineno">   10 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   11 </span>import Data.Text (Text)
+<span class="lineno">   12 </span>import Data.Text qualified as T
+<span class="lineno">   13 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>import PureClaw.Handles.Channel
+<span class="lineno">   16 </span>import PureClaw.Providers.Class
+<span class="lineno">   17 </span>import PureClaw.Tools.Registry
+<span class="lineno">   18 </span>
+<span class="lineno">   19 </span>-- | Create a clarify tool that lets the agent ask the user structured questions.
+<span class="lineno">   20 </span>-- Supports open-ended questions and multiple choice (up to 4 options).
+<span class="lineno">   21 </span>clarifyTool :: ChannelHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   22 </span><span class="decl"><span class="istickedoff">clarifyTool ch = (def, handler)</span>
+<span class="lineno">   23 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   24 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   25 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;clarify&quot;</span>
+<span class="lineno">   26 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">   27 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Ask the user a clarifying question. Use when the request is ambiguous&quot;</span></span>
+<span class="lineno">   28 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;or you need more information before proceeding.&quot;</span></span>
+<span class="lineno">   29 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Supports open-ended questions (just question) or multiple choice&quot;</span></span>
+<span class="lineno">   30 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;(question + choices array, max 4 options).&quot;</span></span>
+<span class="lineno">   31 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   32 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   33 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   34 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   35 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;question&quot; .= object</span></span>
+<span class="lineno">   36 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   37 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The question to ask the user&quot; :: Text)</span></span>
+<span class="lineno">   38 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   39 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;choices&quot; .= object</span></span>
+<span class="lineno">   40 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;array&quot; :: Text)</span></span>
+<span class="lineno">   41 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;items&quot; .= object [ &quot;type&quot; .= (&quot;string&quot; :: Text) ]</span></span>
+<span class="lineno">   42 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;maxItems&quot; .= (4 :: Int)</span></span>
+<span class="lineno">   43 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Optional: up to 4 multiple-choice options&quot; :: Text)</span></span>
+<span class="lineno">   44 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   45 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   46 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;question&quot;] :: [Text])</span></span>
+<span class="lineno">   47 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   48 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   49 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   50 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   51 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseClarifyInput input of</span>
+<span class="lineno">   52 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; pure (<span class="nottickedoff">T.pack err</span>, True)</span>
+<span class="lineno">   53 </span><span class="spaces">        </span><span class="istickedoff">Right ci -&gt; askUser ci</span>
+<span class="lineno">   54 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   55 </span><span class="spaces">    </span><span class="istickedoff">askUser :: ClarifyInput -&gt; IO (Text, Bool)</span>
+<span class="lineno">   56 </span><span class="spaces">    </span><span class="istickedoff">askUser ci = do</span>
+<span class="lineno">   57 </span><span class="spaces">      </span><span class="istickedoff">let <span class="nottickedoff">prompt = formatPrompt (_ci_question ci) (_ci_choices ci)</span></span>
+<span class="lineno">   58 </span><span class="spaces">      </span><span class="istickedoff">result &lt;- try @SomeException (_ch_prompt ch <span class="nottickedoff">prompt</span>)</span>
+<span class="lineno">   59 </span><span class="spaces">      </span><span class="istickedoff">case result of</span>
+<span class="lineno">   60 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt; pure (&quot;Failed to get user response: &quot; &lt;&gt; T.pack (show e), True)</span>
+<span class="lineno">   61 </span><span class="spaces">        </span><span class="istickedoff">Right response -&gt; do</span>
+<span class="lineno">   62 </span><span class="spaces">          </span><span class="istickedoff">let resolved = resolveChoice response (_ci_choices ci)</span>
+<span class="lineno">   63 </span><span class="spaces">          </span><span class="istickedoff">pure (encodeResponse (_ci_question ci) (_ci_choices ci) resolved, False)</span>
+<span class="lineno">   64 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   65 </span><span class="spaces">    </span><span class="istickedoff">formatPrompt :: Text -&gt; Maybe [Text] -&gt; Text</span>
+<span class="lineno">   66 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">formatPrompt question Nothing = question &lt;&gt; &quot;\n&gt; &quot;</span></span>
+<span class="lineno">   67 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">formatPrompt question (Just choices) =</span></span>
+<span class="lineno">   68 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let numbered = zipWith (\i c -&gt; T.pack (show (i :: Int)) &lt;&gt; &quot;. &quot; &lt;&gt; c) [1..] choices</span></span>
+<span class="lineno">   69 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">in question &lt;&gt; &quot;\n&quot; &lt;&gt; T.unlines numbered &lt;&gt; T.pack (show (length choices + 1)) &lt;&gt; &quot;. Other\n&gt; &quot;</span></span>
+<span class="lineno">   70 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">resolveChoice :: Text -&gt; Maybe [Text] -&gt; Text</span>
+<span class="lineno">   72 </span><span class="spaces">    </span><span class="istickedoff">resolveChoice response Nothing = response</span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">resolveChoice response (Just choices) =</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">case reads (T.unpack (T.strip response)) :: [(Int, String)] of</span>
+<span class="lineno">   75 </span><span class="spaces">        </span><span class="istickedoff">[(n, &quot;&quot;)] | n &gt;= 1 &amp;&amp; n &lt;= length choices -&gt; choices !! (n - 1)</span>
+<span class="lineno">   76 </span><span class="spaces">                  </span><span class="istickedoff">| <span class="tickonlytrue">n == length choices + 1</span>        -&gt; response  -- &quot;Other&quot; selected</span>
+<span class="lineno">   77 </span><span class="spaces">                  </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span>                      -&gt; <span class="nottickedoff">response</span>  -- out of range, treat as freeform</span>
+<span class="lineno">   78 </span><span class="spaces">        </span><span class="istickedoff">_                                          -&gt; response  -- non-numeric, treat as freeform</span>
+<span class="lineno">   79 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   80 </span><span class="spaces">    </span><span class="istickedoff">encodeResponse :: Text -&gt; Maybe [Text] -&gt; Text -&gt; Text</span>
+<span class="lineno">   81 </span><span class="spaces">    </span><span class="istickedoff">encodeResponse question choices answer =</span>
+<span class="lineno">   82 </span><span class="spaces">      </span><span class="istickedoff">let result = object $</span>
+<span class="lineno">   83 </span><span class="spaces">            </span><span class="istickedoff">[ &quot;question&quot; .= question</span>
+<span class="lineno">   84 </span><span class="spaces">            </span><span class="istickedoff">, &quot;user_response&quot; .= answer</span>
+<span class="lineno">   85 </span><span class="spaces">            </span><span class="istickedoff">] &lt;&gt; maybe [] (\cs -&gt; [&quot;choices_offered&quot; .= cs]) choices</span>
+<span class="lineno">   86 </span><span class="spaces">      </span><span class="istickedoff">in case encode result of</span>
+<span class="lineno">   87 </span><span class="spaces">        </span><span class="istickedoff">bs -&gt; TE.decodeUtf8Lenient (toStrictBS bs)</span>
+<span class="lineno">   88 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="istickedoff">toStrictBS :: BL.ByteString -&gt; BS.ByteString</span>
+<span class="lineno">   90 </span><span class="spaces">    </span><span class="istickedoff">toStrictBS = BL.toStrict</span></span>
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>data ClarifyInput = ClarifyInput
+<span class="lineno">   93 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ci_question</span></span></span> :: Text
+<span class="lineno">   94 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ci_choices</span></span></span>  :: Maybe [Text]
+<span class="lineno">   95 </span>  }
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>parseClarifyInput :: Value -&gt; Parser ClarifyInput
+<span class="lineno">   98 </span><span class="decl"><span class="istickedoff">parseClarifyInput = withObject <span class="nottickedoff">&quot;ClarifyInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">   99 </span><span class="spaces">  </span><span class="istickedoff">ClarifyInput</span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; o .:  &quot;question&quot;</span>
+<span class="lineno">  101 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;choices&quot;</span></span>
+
+</pre>
+</body>
+</html>

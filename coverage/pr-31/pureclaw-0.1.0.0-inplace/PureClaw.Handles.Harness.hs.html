@@ -1,0 +1,71 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Handles.Harness
+<span class="lineno">    2 </span>  ( -- * Types
+<span class="lineno">    3 </span>    HarnessStatus (..)
+<span class="lineno">    4 </span>  , HarnessHandle (..)
+<span class="lineno">    5 </span>  , HarnessError (..)
+<span class="lineno">    6 </span>    -- * Implementations
+<span class="lineno">    7 </span>  , mkNoOpHarnessHandle
+<span class="lineno">    8 </span>  ) where
+<span class="lineno">    9 </span>
+<span class="lineno">   10 </span>import Data.ByteString (ByteString)
+<span class="lineno">   11 </span>import Data.Text (Text)
+<span class="lineno">   12 </span>import System.Exit
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import PureClaw.Security.Command
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>-- | Status of a harness process.
+<span class="lineno">   17 </span>data HarnessStatus
+<span class="lineno">   18 </span>  = HarnessRunning
+<span class="lineno">   19 </span>  | HarnessExited ExitCode
+<span class="lineno">   20 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>-- | Errors that can occur during harness operations.
+<span class="lineno">   23 </span>data HarnessError
+<span class="lineno">   24 </span>  = HarnessNotAuthorized CommandError
+<span class="lineno">   25 </span>  | HarnessBinaryNotFound Text
+<span class="lineno">   26 </span>  | HarnessTmuxNotAvailable Text  -- ^ detail message (stderr from tmux, or &quot;not found&quot;)
+<span class="lineno">   27 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | Capability handle for interacting with a harness (e.g. Claude Code in tmux).
+<span class="lineno">   30 </span>data HarnessHandle = HarnessHandle
+<span class="lineno">   31 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_send</span></span></span>    :: ByteString -&gt; IO ()   -- ^ Write to harness input
+<span class="lineno">   32 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_receive</span></span></span> :: IO ByteString         -- ^ Read harness output (scrollback capture)
+<span class="lineno">   33 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_name</span></span></span>    :: Text                  -- ^ Human-readable name
+<span class="lineno">   34 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_session</span></span></span> :: Text                  -- ^ tmux session name
+<span class="lineno">   35 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_status</span></span></span>  :: IO HarnessStatus      -- ^ Check if running
+<span class="lineno">   36 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_hh_stop</span></span></span>    :: IO ()                 -- ^ Kill and cleanup
+<span class="lineno">   37 </span>  }
+<span class="lineno">   38 </span>
+<span class="lineno">   39 </span>-- | No-op harness handle for testing.
+<span class="lineno">   40 </span>mkNoOpHarnessHandle :: HarnessHandle
+<span class="lineno">   41 </span><span class="decl"><span class="istickedoff">mkNoOpHarnessHandle = HarnessHandle</span>
+<span class="lineno">   42 </span><span class="spaces">  </span><span class="istickedoff">{ _hh_send    = \_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   43 </span><span class="spaces">  </span><span class="istickedoff">, _hh_receive = pure &quot;&quot;</span>
+<span class="lineno">   44 </span><span class="spaces">  </span><span class="istickedoff">, _hh_name    = &quot;&quot;</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">, _hh_session = &quot;&quot;</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">, _hh_status  = pure HarnessRunning</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">, _hh_stop    = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Channels.Signal
+<span class="lineno">    2 </span>  ( -- * Signal channel
+<span class="lineno">    3 </span>    SignalChannel (..)
+<span class="lineno">    4 </span>  , SignalConfig (..)
+<span class="lineno">    5 </span>  , mkSignalChannel
+<span class="lineno">    6 </span>    -- * Message parsing
+<span class="lineno">    7 </span>  , parseSignalEnvelope
+<span class="lineno">    8 </span>  , SignalEnvelope (..)
+<span class="lineno">    9 </span>  , SignalDataMessage (..)
+<span class="lineno">   10 </span>  ) where
+<span class="lineno">   11 </span>
+<span class="lineno">   12 </span>import Control.Concurrent.STM
+<span class="lineno">   13 </span>import Data.Aeson
+<span class="lineno">   14 </span>import Data.Text (Text)
+<span class="lineno">   15 </span>import Data.Text qualified as T
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import PureClaw.Channels.Class
+<span class="lineno">   18 </span>import PureClaw.Core.Errors
+<span class="lineno">   19 </span>import PureClaw.Core.Types
+<span class="lineno">   20 </span>import PureClaw.Handles.Channel
+<span class="lineno">   21 </span>import PureClaw.Handles.Log
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>-- | Configuration for Signal channel.
+<span class="lineno">   24 </span>newtype SignalConfig = SignalConfig
+<span class="lineno">   25 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_sc_account</span></span></span> :: Text
+<span class="lineno">   26 </span>  }
+<span class="lineno">   27 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   28 </span>
+<span class="lineno">   29 </span>-- | A Signal channel backed by a message queue. Messages from signal-cli
+<span class="lineno">   30 </span>-- are pushed into the queue and the agent loop pulls them out via 'receive'.
+<span class="lineno">   31 </span>data SignalChannel = SignalChannel
+<span class="lineno">   32 </span>  { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_sch_config</span></span></span> :: SignalConfig
+<span class="lineno">   33 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sch_inbox</span></span></span>  :: TQueue SignalEnvelope
+<span class="lineno">   34 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sch_log</span></span></span>    :: LogHandle
+<span class="lineno">   35 </span>  }
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Create a Signal channel with an empty inbox.
+<span class="lineno">   38 </span>mkSignalChannel :: SignalConfig -&gt; LogHandle -&gt; IO SignalChannel
+<span class="lineno">   39 </span><span class="decl"><span class="istickedoff">mkSignalChannel config lh = do</span>
+<span class="lineno">   40 </span><span class="spaces">  </span><span class="istickedoff">inbox &lt;- newTQueueIO</span>
+<span class="lineno">   41 </span><span class="spaces">  </span><span class="istickedoff">pure SignalChannel</span>
+<span class="lineno">   42 </span><span class="spaces">    </span><span class="istickedoff">{ _sch_config = <span class="nottickedoff">config</span></span>
+<span class="lineno">   43 </span><span class="spaces">    </span><span class="istickedoff">, _sch_inbox  = inbox</span>
+<span class="lineno">   44 </span><span class="spaces">    </span><span class="istickedoff">, _sch_log    = lh</span>
+<span class="lineno">   45 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>instance Channel SignalChannel where
+<span class="lineno">   48 </span>  <span class="decl"><span class="istickedoff">toHandle sc = ChannelHandle</span>
+<span class="lineno">   49 </span><span class="spaces">    </span><span class="istickedoff">{ _ch_receive   = receiveEnvelope sc</span>
+<span class="lineno">   50 </span><span class="spaces">    </span><span class="istickedoff">, _ch_send      = sendSignalMessage sc</span>
+<span class="lineno">   51 </span><span class="spaces">    </span><span class="istickedoff">, _ch_sendError = sendSignalError sc</span>
+<span class="lineno">   52 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>-- | Block until a Signal envelope arrives in the queue.
+<span class="lineno">   55 </span>receiveEnvelope :: SignalChannel -&gt; IO IncomingMessage
+<span class="lineno">   56 </span><span class="decl"><span class="istickedoff">receiveEnvelope sc = do</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">envelope &lt;- atomically $ readTQueue (_sch_inbox sc)</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">let sender = _se_source envelope</span>
+<span class="lineno">   59 </span><span class="spaces">      </span><span class="istickedoff">content = maybe &quot;&quot; _sdm_message (_se_dataMessage envelope)</span>
+<span class="lineno">   60 </span><span class="spaces">  </span><span class="istickedoff">pure IncomingMessage</span>
+<span class="lineno">   61 </span><span class="spaces">    </span><span class="istickedoff">{ _im_userId  = UserId sender</span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">, _im_content = content</span>
+<span class="lineno">   63 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">   64 </span>
+<span class="lineno">   65 </span>-- | Send a message via Signal. In a full implementation this would
+<span class="lineno">   66 </span>-- invoke signal-cli. For now, logs the outgoing message.
+<span class="lineno">   67 </span>sendSignalMessage :: SignalChannel -&gt; OutgoingMessage -&gt; IO ()
+<span class="lineno">   68 </span><span class="decl"><span class="istickedoff">sendSignalMessage sc msg =</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">_lh_logInfo (_sch_log sc) $ <span class="nottickedoff">&quot;Signal send: &quot; &lt;&gt; _om_content msg</span></span></span>
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>-- | Send an error via Signal.
+<span class="lineno">   72 </span>sendSignalError :: SignalChannel -&gt; PublicError -&gt; IO ()
+<span class="lineno">   73 </span><span class="decl"><span class="istickedoff">sendSignalError sc err =</span>
+<span class="lineno">   74 </span><span class="spaces">  </span><span class="istickedoff">_lh_logWarn (_sch_log sc) $ <span class="nottickedoff">&quot;Signal error: &quot; &lt;&gt; T.pack (show err)</span></span></span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | A Signal envelope (simplified JSON-RPC format from signal-cli).
+<span class="lineno">   77 </span>data SignalEnvelope = SignalEnvelope
+<span class="lineno">   78 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_se_source</span></span></span>      :: Text
+<span class="lineno">   79 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_se_timestamp</span></span></span>   :: Int
+<span class="lineno">   80 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_se_dataMessage</span></span></span> :: Maybe SignalDataMessage
+<span class="lineno">   81 </span>  }
+<span class="lineno">   82 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>-- | A Signal data message.
+<span class="lineno">   85 </span>data SignalDataMessage = SignalDataMessage
+<span class="lineno">   86 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sdm_message</span></span></span>   :: Text
+<span class="lineno">   87 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_sdm_timestamp</span></span></span> :: Int
+<span class="lineno">   88 </span>  }
+<span class="lineno">   89 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON SignalEnvelope</span></span></span></span> where
+<span class="lineno">   92 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;SignalEnvelope&quot;</span> $ \o -&gt;</span>
+<span class="lineno">   93 </span><span class="spaces">    </span><span class="istickedoff">SignalEnvelope &lt;$&gt; o .: &quot;source&quot; &lt;*&gt; o .: &quot;timestamp&quot; &lt;*&gt; o .:? &quot;dataMessage&quot;</span></span>
+<span class="lineno">   94 </span>
+<span class="lineno">   95 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">FromJSON SignalDataMessage</span></span></span></span> where
+<span class="lineno">   96 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;SignalDataMessage&quot;</span> $ \o -&gt;</span>
+<span class="lineno">   97 </span><span class="spaces">    </span><span class="istickedoff">SignalDataMessage &lt;$&gt; o .: &quot;message&quot; &lt;*&gt; o .: &quot;timestamp&quot;</span></span>
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>-- | Parse a JSON value as a Signal envelope.
+<span class="lineno">  100 </span>parseSignalEnvelope :: Value -&gt; Either String SignalEnvelope
+<span class="lineno">  101 </span><span class="decl"><span class="istickedoff">parseSignalEnvelope v = case fromJSON v of</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">Error err -&gt; Left <span class="nottickedoff">err</span></span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">Success e -&gt; Right e</span></span>
+
+</pre>
+</body>
+</html>

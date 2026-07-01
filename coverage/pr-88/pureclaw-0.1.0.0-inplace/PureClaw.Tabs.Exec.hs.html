@@ -1,0 +1,224 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE BangPatterns #-}
+<span class="lineno">    2 </span>
+<span class="lineno">    3 </span>-- |
+<span class="lineno">    4 </span>-- Module      : PureClaw.Tabs.Exec
+<span class="lineno">    5 </span>-- Description : Refcounted per-'TabRef' runtime registry (8b.3b).
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- The Tabs-as-View cutover (GitHub #79) moves the execution unit from
+<span class="lineno">    8 </span>-- /per-tab/ to /per-ground-truth-ref/ (spike §3): a single live 'Runtime'
+<span class="lineno">    9 </span>-- drives each bound 'TabRef', shared by every tab/conversation that resolves
+<span class="lineno">   10 </span>-- it. This module owns that mapping as a refcounted registry — the SAME
+<span class="lineno">   11 </span>-- refcount discipline as &quot;PureClaw.Tabs.SessionPool&quot;, only it holds started
+<span class="lineno">   12 </span>-- 'Runtime' values instead of @SessionHandle@s:
+<span class="lineno">   13 </span>--
+<span class="lineno">   14 </span>--   * 'ensure' starts a runtime (via the injected '_ex_startRuntime') on the
+<span class="lineno">   15 </span>--     FIRST bind of a ref and bumps the refcount on every subsequent bind.
+<span class="lineno">   16 </span>--   * 'release' decrements; on the LAST release it '_rt_stop's the runtime
+<span class="lineno">   17 </span>--     and removes the entry. Releasing an absent / already-zero ref is a safe
+<span class="lineno">   18 </span>--     no-op.
+<span class="lineno">   19 </span>--   * 'sendTo' routes one input to a ref's runtime via '_rt_send'; an absent
+<span class="lineno">   20 </span>--     ref returns @'Left' 'TabNotFound'@ (no such runtime) rather than
+<span class="lineno">   21 </span>--     throwing.
+<span class="lineno">   22 </span>--   * 'stopAll' stops every live runtime and clears the registry.
+<span class="lineno">   23 </span>--
+<span class="lineno">   24 </span>-- == Injected construction (8c wires the real bodies)
+<span class="lineno">   25 </span>--
+<span class="lineno">   26 </span>-- Runtime CONSTRUCTION is injected through 'ExecDeps' ('_ex_startRuntime'),
+<span class="lineno">   27 </span>-- so this module is fully unit-testable with a fake. The real provider /
+<span class="lineno">   28 </span>-- harness runtime bodies (enqueue-to-worker for providers, @_hh_send@ for
+<span class="lineno">   29 </span>-- harnesses) are built later in 8c against the live @AgentEnv@; this module
+<span class="lineno">   30 </span>-- only owns the refcount + lifecycle machinery and never performs real
+<span class="lineno">   31 </span>-- provider / tmux IO itself.
+<span class="lineno">   32 </span>--
+<span class="lineno">   33 </span>-- == Concurrency
+<span class="lineno">   34 </span>--
+<span class="lineno">   35 </span>-- The internal @'Data.Map.Strict.Map' 'TabRef' (Int, 'Runtime')@ (refcount +
+<span class="lineno">   36 </span>-- runtime) lives behind an 'IORef' mutated only with 'atomicModifyIORef''.
+<span class="lineno">   37 </span>-- Crucially, /no IO runs inside the atomic section/: starting and stopping a
+<span class="lineno">   38 </span>-- runtime are real side effects (forking workers / drainers, cancelling
+<span class="lineno">   39 </span>-- threads), so they are performed __outside__ 'atomicModifyIORef''. This
+<span class="lineno">   40 </span>-- mirrors 'PureClaw.Tabs.SessionPool' exactly:
+<span class="lineno">   41 </span>--
+<span class="lineno">   42 </span>--   * 'ensure' uses a bump-if-present, else start-outside-the-lock,
+<span class="lineno">   43 </span>--     then-commit-if-still-absent pattern. On a lost race it adopts the
+<span class="lineno">   44 </span>--     winner's runtime and stops its own redundant one.
+<span class="lineno">   45 </span>--   * 'release' atomically decrements; the orphaned runtime (at refcount 0)
+<span class="lineno">   46 </span>--     is captured and stopped outside the lock.
+<span class="lineno">   47 </span>--   * 'sendTo' atomically reads the runtime out (no IO in the atomic
+<span class="lineno">   48 </span>--     section), then calls '_rt_send' outside it.
+<span class="lineno">   49 </span>--   * 'stopAll' atomically swaps the map for empty and stops every captured
+<span class="lineno">   50 </span>--     runtime outside the lock.
+<span class="lineno">   51 </span>--
+<span class="lineno">   52 </span>-- See the Tabs-as-View execution-binding spike (§3/§6) for the design.
+<span class="lineno">   53 </span>module PureClaw.Tabs.Exec
+<span class="lineno">   54 </span>  ( -- * Started runtime
+<span class="lineno">   55 </span>    Runtime (..)
+<span class="lineno">   56 </span>    -- * Injected IO seam
+<span class="lineno">   57 </span>  , ExecDeps (..)
+<span class="lineno">   58 </span>    -- * The registry
+<span class="lineno">   59 </span>  , Exec (..)
+<span class="lineno">   60 </span>  , newExec
+<span class="lineno">   61 </span>    -- * Lifecycle / routing
+<span class="lineno">   62 </span>  , ensure
+<span class="lineno">   63 </span>  , release
+<span class="lineno">   64 </span>  , sendTo
+<span class="lineno">   65 </span>  , stopAll
+<span class="lineno">   66 </span>  ) where
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef)
+<span class="lineno">   69 </span>import Data.Map.Strict (Map)
+<span class="lineno">   70 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   71 </span>import Data.Text (Text)
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>import PureClaw.Handles.Tab (TabError (..))
+<span class="lineno">   74 </span>import PureClaw.Tabs.Types (TabRef)
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>-- | A started runtime: how to feed it input and how to stop it.
+<span class="lineno">   77 </span>--
+<span class="lineno">   78 </span>-- For a provider ref, '_rt_send' enqueues a user message onto the worker
+<span class="lineno">   79 </span>-- queue (the worker serializes turns); for a harness ref it forwards to
+<span class="lineno">   80 </span>-- @_hh_send@. '_rt_stop' is idempotent (cancels worker / drainer threads)
+<span class="lineno">   81 </span>-- and never throws. Both bodies are injected by '_ex_startRuntime' — this
+<span class="lineno">   82 </span>-- module never constructs them itself.
+<span class="lineno">   83 </span>data Runtime = Runtime
+<span class="lineno">   84 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_rt_send</span></span></span> :: Text -&gt; IO (Either TabError ())
+<span class="lineno">   85 </span>    -- ^ Route one input to this runtime.
+<span class="lineno">   86 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rt_stop</span></span></span> :: IO ()
+<span class="lineno">   87 </span>    -- ^ Idempotent stop; never throws.
+<span class="lineno">   88 </span>  }
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>-- | The injected runtime-construction seam. The real implementation builds +
+<span class="lineno">   91 </span>-- starts a provider or harness runtime for a ref against the live
+<span class="lineno">   92 </span>-- @AgentEnv@ (wired in 8c); tests supply a recording fake so the registry's
+<span class="lineno">   93 </span>-- refcount machinery can be driven without a live LLM or tmux.
+<span class="lineno">   94 </span>newtype ExecDeps = ExecDeps
+<span class="lineno">   95 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ex_startRuntime</span></span></span> :: TabRef -&gt; IO Runtime
+<span class="lineno">   96 </span>    -- ^ Build + start a runtime for a ref. Called at most once per live ref
+<span class="lineno">   97 </span>    -- — on the FIRST 'ensure' (and once more on the losing side of a start
+<span class="lineno">   98 </span>    -- race, whose redundant runtime is then stopped).
+<span class="lineno">   99 </span>  }
+<span class="lineno">  100 </span>
+<span class="lineno">  101 </span>-- | The refcounted registry: a map from each live 'TabRef' to its current
+<span class="lineno">  102 </span>-- refcount and the single shared 'Runtime'. A ref is present in the map iff
+<span class="lineno">  103 </span>-- its refcount is @&gt;= 1@; entries are removed when the count reaches zero, so
+<span class="lineno">  104 </span>-- absence is indistinguishable from &quot;never ensured&quot;.
+<span class="lineno">  105 </span>newtype Exec = Exec (IORef (Map TabRef (Int, Runtime)))
+<span class="lineno">  106 </span>
+<span class="lineno">  107 </span>-- | Create a fresh, empty registry.
+<span class="lineno">  108 </span>newExec :: IO Exec
+<span class="lineno">  109 </span><span class="decl"><span class="istickedoff">newExec = Exec &lt;$&gt; newIORef Map.empty</span></span>
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>-- | Ensure a runtime is live for a 'TabRef': start it on the first 'ensure'
+<span class="lineno">  112 </span>-- and bump the refcount on every subsequent one. Two ensures of the same ref
+<span class="lineno">  113 </span>-- always share the SAME runtime.
+<span class="lineno">  114 </span>--
+<span class="lineno">  115 </span>-- The start (a real side effect — forking workers / drainers) is performed
+<span class="lineno">  116 </span>-- outside the atomic section: we first try to bump an existing entry
+<span class="lineno">  117 </span>-- atomically; only if the ref is absent do we start a new runtime and then
+<span class="lineno">  118 </span>-- atomically commit it, stopping the redundant runtime if a concurrent
+<span class="lineno">  119 </span>-- ensure won the race.
+<span class="lineno">  120 </span>ensure :: ExecDeps -&gt; Exec -&gt; TabRef -&gt; IO ()
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">ensure deps (Exec ref) tref = do</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">-- Step 1: fast path — bump an existing entry's refcount atomically.</span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">present &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  124 </span><span class="spaces">    </span><span class="istickedoff">case Map.lookup tref m of</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">Just (n, rt) -&gt; (bump tref n rt m, True)</span>
+<span class="lineno">  126 </span><span class="spaces">      </span><span class="istickedoff">Nothing      -&gt; (m, False)</span>
+<span class="lineno">  127 </span><span class="spaces">  </span><span class="istickedoff">if present</span>
+<span class="lineno">  128 </span><span class="spaces">    </span><span class="istickedoff">then pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  129 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  130 </span><span class="spaces">      </span><span class="istickedoff">-- Step 2: ref absent — start OUTSIDE the atomic section.</span>
+<span class="lineno">  131 </span><span class="spaces">      </span><span class="istickedoff">fresh &lt;- _ex_startRuntime deps tref</span>
+<span class="lineno">  132 </span><span class="spaces">      </span><span class="istickedoff">-- Step 3: commit only if still absent; otherwise adopt the winner's</span>
+<span class="lineno">  133 </span><span class="spaces">      </span><span class="istickedoff">-- runtime (bumping it) and stop our now-redundant fresh one.</span>
+<span class="lineno">  134 </span><span class="spaces">      </span><span class="istickedoff">redundant &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  135 </span><span class="spaces">        </span><span class="istickedoff">case Map.lookup tref m of</span>
+<span class="lineno">  136 </span><span class="spaces">          </span><span class="istickedoff">Just (n, rt) -&gt; (bump tref n rt m, Just fresh)</span>
+<span class="lineno">  137 </span><span class="spaces">          </span><span class="istickedoff">Nothing      -&gt; (bump tref 0 fresh m, Nothing)</span>
+<span class="lineno">  138 </span><span class="spaces">      </span><span class="istickedoff">mapM_ _rt_stop redundant</span></span>
+<span class="lineno">  139 </span>
+<span class="lineno">  140 </span>-- | Strictly store @tref -&gt; (n + 1, rt)@. The refcount and runtime are forced
+<span class="lineno">  141 </span>-- (bang patterns) before insertion so the registry never accumulates a chain
+<span class="lineno">  142 </span>-- of refcount thunks and the stored runtime is always in WHNF. Used both to
+<span class="lineno">  143 </span>-- add a brand-new entry (@n = 0@) and to increment an existing one.
+<span class="lineno">  144 </span>bump
+<span class="lineno">  145 </span>  :: TabRef
+<span class="lineno">  146 </span>  -&gt; Int
+<span class="lineno">  147 </span>  -&gt; Runtime
+<span class="lineno">  148 </span>  -&gt; Map TabRef (Int, Runtime)
+<span class="lineno">  149 </span>  -&gt; Map TabRef (Int, Runtime)
+<span class="lineno">  150 </span><span class="decl"><span class="istickedoff">bump tref !n !rt = Map.insert tref (n + 1, rt)</span></span>
+<span class="lineno">  151 </span>
+<span class="lineno">  152 </span>-- | Release one hold on a 'TabRef'. Decrements its refcount; when the count
+<span class="lineno">  153 </span>-- reaches zero the entry is removed and its runtime stopped. Releasing a ref
+<span class="lineno">  154 </span>-- that is absent (never ensured, or already fully released) is a safe no-op:
+<span class="lineno">  155 </span>-- nothing is decremented and nothing is stopped.
+<span class="lineno">  156 </span>--
+<span class="lineno">  157 </span>-- The stop (a real side effect) is performed outside the atomic section.
+<span class="lineno">  158 </span>release :: Exec -&gt; TabRef -&gt; IO ()
+<span class="lineno">  159 </span><span class="decl"><span class="istickedoff">release (Exec ref) tref = do</span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">toStop &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  161 </span><span class="spaces">    </span><span class="istickedoff">case Map.lookup tref m of</span>
+<span class="lineno">  162 </span><span class="spaces">      </span><span class="istickedoff">Nothing -&gt; (m, Nothing)</span>
+<span class="lineno">  163 </span><span class="spaces">      </span><span class="istickedoff">Just (n, rt)</span>
+<span class="lineno">  164 </span><span class="spaces">        </span><span class="istickedoff">| n &lt;= 1    -&gt; (Map.delete tref m, Just rt)</span>
+<span class="lineno">  165 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; (unbump tref n rt m, Nothing)</span>
+<span class="lineno">  166 </span><span class="spaces">  </span><span class="istickedoff">mapM_ _rt_stop toStop</span></span>
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>-- | Strictly store @tref -&gt; (n - 1, rt)@ for the not-last release. The
+<span class="lineno">  169 </span>-- decremented refcount and runtime are forced before insertion (same
+<span class="lineno">  170 </span>-- rationale as 'bump'). Only called on the @n &gt; 1@ path, so the result is
+<span class="lineno">  171 </span>-- always @&gt;= 1@.
+<span class="lineno">  172 </span>unbump
+<span class="lineno">  173 </span>  :: TabRef
+<span class="lineno">  174 </span>  -&gt; Int
+<span class="lineno">  175 </span>  -&gt; Runtime
+<span class="lineno">  176 </span>  -&gt; Map TabRef (Int, Runtime)
+<span class="lineno">  177 </span>  -&gt; Map TabRef (Int, Runtime)
+<span class="lineno">  178 </span><span class="decl"><span class="istickedoff">unbump tref !n !rt = Map.insert tref (n - 1, rt)</span></span>
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>-- | Route one input to a ref's runtime. The runtime is read out of the map
+<span class="lineno">  181 </span>-- atomically (no IO in the atomic section); '_rt_send' is then called outside
+<span class="lineno">  182 </span>-- it. An absent ref (no live runtime) returns @'Left' ('TabNotFound' 0)@ —
+<span class="lineno">  183 </span>-- the &quot;no such runtime&quot; signal — rather than throwing, so the dispatcher can
+<span class="lineno">  184 </span>-- surface it as a user-visible error and keep routing.
+<span class="lineno">  185 </span>sendTo :: Exec -&gt; TabRef -&gt; Text -&gt; IO (Either TabError ())
+<span class="lineno">  186 </span><span class="decl"><span class="istickedoff">sendTo (Exec ref) tref t = do</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">mRt &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  188 </span><span class="spaces">    </span><span class="istickedoff">(m, fmap snd (Map.lookup tref m))</span>
+<span class="lineno">  189 </span><span class="spaces">  </span><span class="istickedoff">case mRt of</span>
+<span class="lineno">  190 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; pure (Left <span class="nottickedoff">(TabNotFound 0)</span>)</span>
+<span class="lineno">  191 </span><span class="spaces">    </span><span class="istickedoff">Just rt -&gt; _rt_send rt t</span></span>
+<span class="lineno">  192 </span>
+<span class="lineno">  193 </span>-- | Stop every live runtime and clear the registry. The map is atomically
+<span class="lineno">  194 </span>-- swapped for empty (capturing all runtimes); each captured runtime is then
+<span class="lineno">  195 </span>-- '_rt_stop'ped outside the atomic section. Idempotent: a second 'stopAll'
+<span class="lineno">  196 </span>-- on the now-empty registry stops nothing.
+<span class="lineno">  197 </span>stopAll :: Exec -&gt; IO ()
+<span class="lineno">  198 </span><span class="decl"><span class="istickedoff">stopAll (Exec ref) = do</span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">runtimes &lt;- atomicModifyIORef' ref $ \m -&gt;</span>
+<span class="lineno">  200 </span><span class="spaces">    </span><span class="istickedoff">(Map.empty, map snd (Map.elems m))</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">mapM_ _rt_stop runtimes</span></span>
+
+</pre>
+</body>
+</html>

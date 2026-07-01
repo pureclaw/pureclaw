@@ -1,0 +1,365 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Backend.Local
+<span class="lineno">    3 </span>-- Description : Local subprocess backend factories (WU8).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- == Overview
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- Two factories produce a real 'BackendHandle' over an actual local
+<span class="lineno">    8 </span>-- subprocess:
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- * 'mkLocalBackendHandle' — 'Pipe' kind. One-shot: stdin is written
+<span class="lineno">   11 </span>--   from '_po_stdinBytes' and then closed; stdout (with stderr merged
+<span class="lineno">   12 </span>--   into it) is read until EOF or until the recv-buffer cap is reached.
+<span class="lineno">   13 </span>-- * 'mkLocalPtyBackendHandle' — 'Pty' kind. Conversational: a real PTY
+<span class="lineno">   14 </span>--   is allocated via the supplied 'PtyIO'; the drainer + STM idle state
+<span class="lineno">   15 </span>--   machine from &quot;PureClaw.Backend.Pty&quot; runs the recv loop.
+<span class="lineno">   16 </span>--
+<span class="lineno">   17 </span>-- == Why 'PtyIO' is a separate parameter
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>-- WU1 deliberately omitted a @_pto_io :: PtyIO@ field from 'PtyOpts' to
+<span class="lineno">   20 </span>-- keep &quot;PureClaw.Handles.Backend&quot; free of any dependency on
+<span class="lineno">   21 </span>-- &quot;PureClaw.Backend.Pty&quot; (the @posix-pty@ firewall lives there). WU7
+<span class="lineno">   22 </span>-- chose not to retrofit, so 'mkLocalPtyBackendHandle' takes the
+<span class="lineno">   23 </span>-- 'PtyIO' as a separate parameter rather than as a field on
+<span class="lineno">   24 </span>-- 'PtyOpts'. Mirrors 'mkDrainerBackendHandle'\'s shape.
+<span class="lineno">   25 </span>module PureClaw.Backend.Local
+<span class="lineno">   26 </span>  ( mkLocalBackendHandle
+<span class="lineno">   27 </span>  , mkLocalPtyBackendHandle
+<span class="lineno">   28 </span>  ) where
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   31 </span>import Control.Concurrent.MVar (modifyMVar_, newMVar)
+<span class="lineno">   32 </span>import Control.Exception (SomeException, try)
+<span class="lineno">   33 </span>import Data.ByteString (ByteString)
+<span class="lineno">   34 </span>import Data.ByteString qualified as BS
+<span class="lineno">   35 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   36 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+<span class="lineno">   37 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   38 </span>import Data.Text qualified as T
+<span class="lineno">   39 </span>import System.IO (Handle, hClose)
+<span class="lineno">   40 </span>import System.Posix.IO qualified as PosixIO
+<span class="lineno">   41 </span>import System.Process.Typed qualified as P
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>import PureClaw.Backend.Pty
+<span class="lineno">   44 </span>  ( PtyIO (..)
+<span class="lineno">   45 </span>  , PtyOpenSpec (..)
+<span class="lineno">   46 </span>  , mkDrainerBackendHandle
+<span class="lineno">   47 </span>  )
+<span class="lineno">   48 </span>import PureClaw.Core.Types (CommandName (..))
+<span class="lineno">   49 </span>import PureClaw.Handles.Backend
+<span class="lineno">   50 </span>  ( BackendError (..)
+<span class="lineno">   51 </span>  , BackendHandle (..)
+<span class="lineno">   52 </span>  , BackendKind (..)
+<span class="lineno">   53 </span>  , EnvMap
+<span class="lineno">   54 </span>  , EnvValue (..)
+<span class="lineno">   55 </span>  , PipeOpts (..)
+<span class="lineno">   56 </span>  , PtyOpts (..)
+<span class="lineno">   57 </span>  , RecvResult (..)
+<span class="lineno">   58 </span>  , acquireBufferQuota
+<span class="lineno">   59 </span>  , globalBackendBufferQuota
+<span class="lineno">   60 </span>  , localIdle
+<span class="lineno">   61 </span>  , releaseBufferQuota
+<span class="lineno">   62 </span>  , withConcurrentUseGuard
+<span class="lineno">   63 </span>  )
+<span class="lineno">   64 </span>import PureClaw.Security.Command
+<span class="lineno">   65 </span>  ( AuthorizedCommand
+<span class="lineno">   66 </span>  , getCommandArgs
+<span class="lineno">   67 </span>  , getCommandProgram
+<span class="lineno">   68 </span>  )
+<span class="lineno">   69 </span>
+<span class="lineno">   70 </span>--------------------------------------------------------------------------------
+<span class="lineno">   71 </span>-- Pipe-kind factory
+<span class="lineno">   72 </span>--------------------------------------------------------------------------------
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>-- | Construct a 'Pipe'-kind local subprocess backend.
+<span class="lineno">   75 </span>--
+<span class="lineno">   76 </span>-- Semantics:
+<span class="lineno">   77 </span>--
+<span class="lineno">   78 </span>-- * stdin is fed @_po_stdinBytes@ and then closed (via
+<span class="lineno">   79 </span>--   'P.byteStringInput'); after construction, @_bh_send@ is a silent
+<span class="lineno">   80 </span>--   no-op because the OS-level stdin is already gone.
+<span class="lineno">   81 </span>-- * stdout AND stderr are wired to the SAME pipe write-end at the OS
+<span class="lineno">   82 </span>--   level via 'System.Posix.IO.createPipe' + 'P.useHandleOpen' on both
+<span class="lineno">   83 </span>--   stream slots. The child sees fd 1 and fd 2 pointing at the same
+<span class="lineno">   84 </span>--   pipe; byte order is preserved end-to-end (this is the OS-level
+<span class="lineno">   85 </span>--   @2&gt;&amp;1@ pattern; see design doc § &quot;stderr Handling&quot;).
+<span class="lineno">   86 </span>-- * @_bh_recv@ reads from the accumulator until EOF or until the
+<span class="lineno">   87 </span>--   per-backend cap @_po_recvBufferCap@ is reached. EOF within the
+<span class="lineno">   88 </span>--   cap yields 'RecvSettled'; cap reached first yields
+<span class="lineno">   89 </span>--   'RecvTruncated'.
+<span class="lineno">   90 </span>-- * @_bh_resize@ is a silent no-op (no PTY exists on a 'Pipe' backend).
+<span class="lineno">   91 </span>-- * @_bh_close@ waits for the subprocess to exit and releases the
+<span class="lineno">   92 </span>--   process-wide buffer quota; idempotent.
+<span class="lineno">   93 </span>--
+<span class="lineno">   94 </span>-- On construction failure (quota oversubscription, spawn exception)
+<span class="lineno">   95 </span>-- the quota is released and the error is propagated as a 'Left'.
+<span class="lineno">   96 </span>mkLocalBackendHandle
+<span class="lineno">   97 </span>  :: AuthorizedCommand
+<span class="lineno">   98 </span>  -&gt; PipeOpts
+<span class="lineno">   99 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  100 </span><span class="decl"><span class="istickedoff">mkLocalBackendHandle cmd opts = do</span>
+<span class="lineno">  101 </span><span class="spaces">  </span><span class="istickedoff">let capBytes = _po_recvBufferCap opts</span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">capMiB   = bytesToMiBCeil capBytes</span>
+<span class="lineno">  103 </span><span class="spaces">  </span><span class="istickedoff">quotaPtr &lt;- readIORef globalBackendBufferQuota</span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">acq &lt;- acquireBufferQuota quotaPtr capMiB</span>
+<span class="lineno">  105 </span><span class="spaces">  </span><span class="istickedoff">case acq of</span>
+<span class="lineno">  106 </span><span class="spaces">    </span><span class="istickedoff">Left e   -&gt; <span class="nottickedoff">pure (Left e)</span></span>
+<span class="lineno">  107 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  108 </span><span class="spaces">      </span><span class="istickedoff">releasedRef &lt;- newIORef False</span>
+<span class="lineno">  109 </span><span class="spaces">      </span><span class="istickedoff">let releaseQuotaOnce = do</span>
+<span class="lineno">  110 </span><span class="spaces">            </span><span class="istickedoff">already &lt;- atomicSwapTrue releasedRef</span>
+<span class="lineno">  111 </span><span class="spaces">            </span><span class="istickedoff">if <span class="tickonlyfalse">already</span></span>
+<span class="lineno">  112 </span><span class="spaces">              </span><span class="istickedoff">then <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  113 </span><span class="spaces">              </span><span class="istickedoff">else releaseBufferQuota quotaPtr capMiB</span>
+<span class="lineno">  114 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  115 </span><span class="spaces">      </span><span class="istickedoff">let prog = getCommandProgram cmd</span>
+<span class="lineno">  116 </span><span class="spaces">          </span><span class="istickedoff">args = map T.unpack (getCommandArgs cmd)</span>
+<span class="lineno">  117 </span><span class="spaces">          </span><span class="istickedoff">stdinLazy = byteStringToLazy (_po_stdinBytes opts)</span>
+<span class="lineno">  118 </span><span class="spaces">          </span><span class="istickedoff">envList   = envMapWithDefaults (_po_env opts)</span>
+<span class="lineno">  119 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  120 </span><span class="spaces">      </span><span class="istickedoff">-- Create a single shared pipe. Both stdout (fd 1) and stderr (fd 2)</span>
+<span class="lineno">  121 </span><span class="spaces">      </span><span class="istickedoff">-- in the child are dup'd from the same write-end; the parent reads</span>
+<span class="lineno">  122 </span><span class="spaces">      </span><span class="istickedoff">-- from the read-end. This is the OS-level @2&gt;&amp;1@ pattern — byte</span>
+<span class="lineno">  123 </span><span class="spaces">      </span><span class="istickedoff">-- order is preserved by the kernel.</span>
+<span class="lineno">  124 </span><span class="spaces">      </span><span class="istickedoff">pipeResult &lt;- try @SomeException PosixIO.createPipe</span>
+<span class="lineno">  125 </span><span class="spaces">      </span><span class="istickedoff">case pipeResult of</span>
+<span class="lineno">  126 </span><span class="spaces">        </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  127 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">releaseQuotaOnce</span></span>
+<span class="lineno">  128 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">pure (Left (BackendBinaryNotFound (toCommandName prog)))</span></span>
+<span class="lineno">  129 </span><span class="spaces">        </span><span class="istickedoff">Right (readFd, writeFd) -&gt; do</span>
+<span class="lineno">  130 </span><span class="spaces">          </span><span class="istickedoff">readH  &lt;- PosixIO.fdToHandle readFd</span>
+<span class="lineno">  131 </span><span class="spaces">          </span><span class="istickedoff">writeH &lt;- PosixIO.fdToHandle writeFd</span>
+<span class="lineno">  132 </span><span class="spaces">          </span><span class="istickedoff">let baseConfig =</span>
+<span class="lineno">  133 </span><span class="spaces">                  </span><span class="istickedoff">P.setStdin (P.byteStringInput stdinLazy)</span>
+<span class="lineno">  134 </span><span class="spaces">                </span><span class="istickedoff">$ P.setStdout (P.useHandleOpen writeH)</span>
+<span class="lineno">  135 </span><span class="spaces">                </span><span class="istickedoff">$ P.setStderr (P.useHandleOpen writeH)</span>
+<span class="lineno">  136 </span><span class="spaces">                </span><span class="istickedoff">$ P.setEnv envList</span>
+<span class="lineno">  137 </span><span class="spaces">                </span><span class="istickedoff">$ P.proc prog args</span>
+<span class="lineno">  138 </span><span class="spaces">              </span><span class="istickedoff">withCwd = maybe id <span class="nottickedoff">P.setWorkingDir</span> (_po_cwd opts)</span>
+<span class="lineno">  139 </span><span class="spaces">              </span><span class="istickedoff">config = withCwd baseConfig</span>
+<span class="lineno">  140 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  141 </span><span class="spaces">          </span><span class="istickedoff">spawnResult &lt;- try @SomeException (P.startProcess config)</span>
+<span class="lineno">  142 </span><span class="spaces">          </span><span class="istickedoff">case spawnResult of</span>
+<span class="lineno">  143 </span><span class="spaces">            </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  144 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">-- Close both ends of our pipe and release quota.</span></span>
+<span class="lineno">  145 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- try @SomeException (hClose writeH)</span></span>
+<span class="lineno">  146 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">_ &lt;- try @SomeException (hClose readH)</span></span>
+<span class="lineno">  147 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">releaseQuotaOnce</span></span>
+<span class="lineno">  148 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure (Left (BackendBinaryNotFound (toCommandName prog)))</span></span>
+<span class="lineno">  149 </span><span class="spaces">            </span><span class="istickedoff">Right proc -&gt; do</span>
+<span class="lineno">  150 </span><span class="spaces">              </span><span class="istickedoff">-- After spawn, the parent doesn't need its copy of the</span>
+<span class="lineno">  151 </span><span class="spaces">              </span><span class="istickedoff">-- write-end; close it so the reader sees EOF when the</span>
+<span class="lineno">  152 </span><span class="spaces">              </span><span class="istickedoff">-- child exits and closes its copies. Critical for EOF</span>
+<span class="lineno">  153 </span><span class="spaces">              </span><span class="istickedoff">-- detection.</span>
+<span class="lineno">  154 </span><span class="spaces">              </span><span class="istickedoff">_ &lt;- try @SomeException (hClose writeH)</span>
+<span class="lineno">  155 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  156 </span><span class="spaces">              </span><span class="istickedoff">accRef    &lt;- newIORef BS.empty</span>
+<span class="lineno">  157 </span><span class="spaces">              </span><span class="istickedoff">truncRef  &lt;- newIORef False</span>
+<span class="lineno">  158 </span><span class="spaces">              </span><span class="istickedoff">reader    &lt;- Async.async (drainHandleInto capBytes accRef <span class="nottickedoff">truncRef</span> readH)</span>
+<span class="lineno">  159 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  160 </span><span class="spaces">              </span><span class="istickedoff">closeLock     &lt;- newMVar ()</span>
+<span class="lineno">  161 </span><span class="spaces">              </span><span class="istickedoff">closedRef     &lt;- newIORef False</span>
+<span class="lineno">  162 </span><span class="spaces">              </span><span class="istickedoff">recvDoneRef   &lt;- newIORef False</span>
+<span class="lineno">  163 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  164 </span><span class="spaces">              </span><span class="istickedoff">let doSend _ = pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  165 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  166 </span><span class="spaces">                  </span><span class="istickedoff">doRecv _mIdle = do</span>
+<span class="lineno">  167 </span><span class="spaces">                    </span><span class="istickedoff">already &lt;- readIORef recvDoneRef</span>
+<span class="lineno">  168 </span><span class="spaces">                    </span><span class="istickedoff">if <span class="tickonlyfalse">already</span></span>
+<span class="lineno">  169 </span><span class="spaces">                      </span><span class="istickedoff">then <span class="nottickedoff">do</span></span>
+<span class="lineno">  170 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">bs &lt;- readIORef accRef</span></span>
+<span class="lineno">  171 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">isT &lt;- readIORef truncRef</span></span>
+<span class="lineno">  172 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">pure (if isT then RecvTruncated bs else RecvSettled bs)</span></span>
+<span class="lineno">  173 </span><span class="spaces">                      </span><span class="istickedoff">else do</span>
+<span class="lineno">  174 </span><span class="spaces">                        </span><span class="istickedoff">_ &lt;- Async.waitCatch reader</span>
+<span class="lineno">  175 </span><span class="spaces">                        </span><span class="istickedoff">writeIORef recvDoneRef <span class="nottickedoff">True</span></span>
+<span class="lineno">  176 </span><span class="spaces">                        </span><span class="istickedoff">bs  &lt;- readIORef accRef</span>
+<span class="lineno">  177 </span><span class="spaces">                        </span><span class="istickedoff">isT &lt;- readIORef truncRef</span>
+<span class="lineno">  178 </span><span class="spaces">                        </span><span class="istickedoff">pure (if <span class="tickonlyfalse">isT</span> then <span class="nottickedoff">RecvTruncated bs</span> else RecvSettled bs)</span>
+<span class="lineno">  179 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  180 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">doResize _ _ = pure ()</span></span>
+<span class="lineno">  181 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  182 </span><span class="spaces">                  </span><span class="istickedoff">doClose = modifyMVar_ closeLock $ \() -&gt; do</span>
+<span class="lineno">  183 </span><span class="spaces">                    </span><span class="istickedoff">wasClosed &lt;- readIORef closedRef</span>
+<span class="lineno">  184 </span><span class="spaces">                    </span><span class="istickedoff">if <span class="tickonlyfalse">wasClosed</span></span>
+<span class="lineno">  185 </span><span class="spaces">                      </span><span class="istickedoff">then <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  186 </span><span class="spaces">                      </span><span class="istickedoff">else do</span>
+<span class="lineno">  187 </span><span class="spaces">                        </span><span class="istickedoff">writeIORef closedRef <span class="nottickedoff">True</span></span>
+<span class="lineno">  188 </span><span class="spaces">                        </span><span class="istickedoff">Async.cancel reader</span>
+<span class="lineno">  189 </span><span class="spaces">                        </span><span class="istickedoff">_ &lt;- try @SomeException (P.stopProcess proc)</span>
+<span class="lineno">  190 </span><span class="spaces">                        </span><span class="istickedoff">_ &lt;- try @SomeException (hClose readH)</span>
+<span class="lineno">  191 </span><span class="spaces">                        </span><span class="istickedoff">releaseQuotaOnce</span>
+<span class="lineno">  192 </span><span class="spaces">                        </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  193 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  194 </span><span class="spaces">              </span><span class="istickedoff">guarded &lt;- withConcurrentUseGuard BackendHandle</span>
+<span class="lineno">  195 </span><span class="spaces">                </span><span class="istickedoff">{ _bh_name        = &quot;local-pipe&quot;</span>
+<span class="lineno">  196 </span><span class="spaces">                </span><span class="istickedoff">, _bh_kind        = Pipe</span>
+<span class="lineno">  197 </span><span class="spaces">                </span><span class="istickedoff">, _bh_defaultIdle = localIdle</span>
+<span class="lineno">  198 </span><span class="spaces">                </span><span class="istickedoff">, _bh_send        = doSend</span>
+<span class="lineno">  199 </span><span class="spaces">                </span><span class="istickedoff">, _bh_recv        = doRecv</span>
+<span class="lineno">  200 </span><span class="spaces">                </span><span class="istickedoff">, _bh_resize      = <span class="nottickedoff">doResize</span></span>
+<span class="lineno">  201 </span><span class="spaces">                </span><span class="istickedoff">, _bh_close       = doClose</span>
+<span class="lineno">  202 </span><span class="spaces">                </span><span class="istickedoff">}</span>
+<span class="lineno">  203 </span><span class="spaces">              </span><span class="istickedoff">pure (Right guarded)</span></span>
+<span class="lineno">  204 </span>
+<span class="lineno">  205 </span>-- | Drain a 'Handle' (stdout or stderr pipe) into the shared
+<span class="lineno">  206 </span>-- accumulator, latching @truncRef@ if the per-backend cap is exceeded.
+<span class="lineno">  207 </span>--
+<span class="lineno">  208 </span>-- Best-effort: read exceptions are treated as EOF. Once the cap is
+<span class="lineno">  209 </span>-- reached, the latch is flipped to 'True' and subsequent bytes are
+<span class="lineno">  210 </span>-- dropped (so the accumulator stops growing past the cap).
+<span class="lineno">  211 </span>drainHandleInto :: Int -&gt; IORef ByteString -&gt; IORef Bool -&gt; Handle -&gt; IO ()
+<span class="lineno">  212 </span><span class="decl"><span class="istickedoff">drainHandleInto cap accRef truncRef h = go</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  214 </span><span class="spaces">    </span><span class="istickedoff">go = do</span>
+<span class="lineno">  215 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- try @SomeException (BS.hGetSome h 4096)</span>
+<span class="lineno">  216 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  217 </span><span class="spaces">        </span><span class="istickedoff">Left _    -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  218 </span><span class="spaces">        </span><span class="istickedoff">Right bs</span>
+<span class="lineno">  219 </span><span class="spaces">          </span><span class="istickedoff">| BS.null bs -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  220 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; do</span>
+<span class="lineno">  221 </span><span class="spaces">              </span><span class="istickedoff">acc &lt;- readIORef accRef</span>
+<span class="lineno">  222 </span><span class="spaces">              </span><span class="istickedoff">let newSize = BS.length acc + BS.length bs</span>
+<span class="lineno">  223 </span><span class="spaces">              </span><span class="istickedoff">if <span class="tickonlyfalse">newSize &gt; cap</span></span>
+<span class="lineno">  224 </span><span class="spaces">                </span><span class="istickedoff">then <span class="nottickedoff">writeIORef truncRef True</span></span>
+<span class="lineno">  225 </span><span class="spaces">                </span><span class="istickedoff">else do</span>
+<span class="lineno">  226 </span><span class="spaces">                  </span><span class="istickedoff">atomicModifyIORef' accRef $ \old -&gt; (old &lt;&gt; bs, ())</span>
+<span class="lineno">  227 </span><span class="spaces">                  </span><span class="istickedoff">go</span></span>
+<span class="lineno">  228 </span>
+<span class="lineno">  229 </span>--------------------------------------------------------------------------------
+<span class="lineno">  230 </span>-- Pty-kind factory
+<span class="lineno">  231 </span>--------------------------------------------------------------------------------
+<span class="lineno">  232 </span>
+<span class="lineno">  233 </span>-- | Construct a 'Pty'-kind local subprocess backend.
+<span class="lineno">  234 </span>--
+<span class="lineno">  235 </span>-- Composes the 'AuthorizedCommand' + 'PtyOpts' into a 'PtyOpenSpec' and
+<span class="lineno">  236 </span>-- delegates to 'mkDrainerBackendHandle'. The drainer + STM idle state
+<span class="lineno">  237 </span>-- machine from &quot;PureClaw.Backend.Pty&quot; provides @_bh_recv@, @_bh_send@
+<span class="lineno">  238 </span>-- forwards to @_pio_write@, and @_bh_close@ is idempotent (cancels
+<span class="lineno">  239 </span>-- drainer, closes PTY, releases buffer quota).
+<span class="lineno">  240 </span>--
+<span class="lineno">  241 </span>-- The environment passed to the child is 'envMapWithDefaults' of
+<span class="lineno">  242 </span>-- @_pto_env@ — i.e. the caller-supplied map plus minimal defaults for
+<span class="lineno">  243 </span>-- 'TERM' (@xterm-256color@) and 'PATH' (@\/usr\/bin:\/bin:\/usr\/local\/bin@)
+<span class="lineno">  244 </span>-- only when those keys are absent. No inheritance from the parent
+<span class="lineno">  245 </span>-- process.
+<span class="lineno">  246 </span>mkLocalPtyBackendHandle
+<span class="lineno">  247 </span>  :: PtyIO
+<span class="lineno">  248 </span>  -&gt; AuthorizedCommand
+<span class="lineno">  249 </span>  -&gt; PtyOpts
+<span class="lineno">  250 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  251 </span><span class="decl"><span class="istickedoff">mkLocalPtyBackendHandle pio cmd opts = do</span>
+<span class="lineno">  252 </span><span class="spaces">  </span><span class="istickedoff">let spec = PtyOpenSpec</span>
+<span class="lineno">  253 </span><span class="spaces">        </span><span class="istickedoff">{ _pos_program = getCommandProgram cmd</span>
+<span class="lineno">  254 </span><span class="spaces">        </span><span class="istickedoff">, _pos_args    = getCommandArgs cmd</span>
+<span class="lineno">  255 </span><span class="spaces">        </span><span class="istickedoff">, _pos_env     = envMapWithBackendDefaults (_pto_env opts)</span>
+<span class="lineno">  256 </span><span class="spaces">        </span><span class="istickedoff">, _pos_cwd     = _pto_cwd opts</span>
+<span class="lineno">  257 </span><span class="spaces">        </span><span class="istickedoff">, _pos_cols    = _pto_cols opts</span>
+<span class="lineno">  258 </span><span class="spaces">        </span><span class="istickedoff">, _pos_rows    = _pto_rows opts</span>
+<span class="lineno">  259 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  260 </span><span class="spaces">  </span><span class="istickedoff">r &lt;- mkDrainerBackendHandle pio opts spec Pty</span>
+<span class="lineno">  261 </span><span class="spaces">  </span><span class="istickedoff">case r of</span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">Left  e  -&gt; <span class="nottickedoff">pure (Left e)</span></span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">Right bh -&gt; Right &lt;$&gt; withConcurrentUseGuard bh</span></span>
+<span class="lineno">  264 </span>
+<span class="lineno">  265 </span>--------------------------------------------------------------------------------
+<span class="lineno">  266 </span>-- Env helpers
+<span class="lineno">  267 </span>--------------------------------------------------------------------------------
+<span class="lineno">  268 </span>
+<span class="lineno">  269 </span>-- | Add minimal 'TERM' and 'PATH' defaults to a caller-supplied 'EnvMap'
+<span class="lineno">  270 </span>-- if either is absent. Returns the result in the @[(String, String)]@
+<span class="lineno">  271 </span>-- shape that @typed-process@\'s 'P.setEnv' expects.
+<span class="lineno">  272 </span>--
+<span class="lineno">  273 </span>-- Behaviour:
+<span class="lineno">  274 </span>--
+<span class="lineno">  275 </span>-- * If @TERM@ is missing, set it to @xterm-256color@.
+<span class="lineno">  276 </span>-- * If @PATH@ is missing, set it to @\/usr\/bin:\/bin:\/usr\/local\/bin@.
+<span class="lineno">  277 </span>-- * Caller-supplied entries always win — existing keys are not
+<span class="lineno">  278 </span>--   overwritten.
+<span class="lineno">  279 </span>envMapWithDefaults :: EnvMap -&gt; [(String, String)]
+<span class="lineno">  280 </span><span class="decl"><span class="istickedoff">envMapWithDefaults = envToTuples . envMapWithBackendDefaults</span></span>
+<span class="lineno">  281 </span>
+<span class="lineno">  282 </span>-- | The 'EnvMap'-side of 'envMapWithDefaults' — used by the PTY factory
+<span class="lineno">  283 </span>-- which feeds its 'EnvMap' through 'PtyOpenSpec' rather than the
+<span class="lineno">  284 </span>-- @typed-process@ tuple list.
+<span class="lineno">  285 </span>envMapWithBackendDefaults :: EnvMap -&gt; EnvMap
+<span class="lineno">  286 </span><span class="decl"><span class="istickedoff">envMapWithBackendDefaults =</span>
+<span class="lineno">  287 </span><span class="spaces">    </span><span class="istickedoff">insertIfAbsent &quot;TERM&quot; &quot;xterm-256color&quot;</span>
+<span class="lineno">  288 </span><span class="spaces">  </span><span class="istickedoff">. insertIfAbsent &quot;PATH&quot; &quot;/usr/bin:/bin:/usr/local/bin&quot;</span>
+<span class="lineno">  289 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  290 </span><span class="spaces">    </span><span class="istickedoff">insertIfAbsent k v m</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlyfalse">Map.member k m</span> = <span class="nottickedoff">m</span></span>
+<span class="lineno">  292 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>      = Map.insert k (EnvValue (stringToByteString v)) m</span></span>
+<span class="lineno">  293 </span>
+<span class="lineno">  294 </span>-- | Render an 'EnvMap' as the @[(String, String)]@ tuple list that
+<span class="lineno">  295 </span>-- @typed-process@\'s 'P.setEnv' expects. Values are decoded
+<span class="lineno">  296 </span>-- byte-for-byte from the underlying 'ByteString' so non-ASCII bytes
+<span class="lineno">  297 </span>-- round-trip 1:1.
+<span class="lineno">  298 </span>envToTuples :: EnvMap -&gt; [(String, String)]
+<span class="lineno">  299 </span><span class="decl"><span class="istickedoff">envToTuples = map render . Map.toAscList</span>
+<span class="lineno">  300 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  301 </span><span class="spaces">    </span><span class="istickedoff">render (k, EnvValue v) = (k, byteStringToString v)</span></span>
+<span class="lineno">  302 </span>
+<span class="lineno">  303 </span>-- | Latin-1 round-trip ('ByteString' → 'String'). The subprocess sees
+<span class="lineno">  304 </span>-- raw bytes; this is the same transform used in
+<span class="lineno">  305 </span>-- &quot;PureClaw.Backend.Pty&quot;.
+<span class="lineno">  306 </span>byteStringToString :: ByteString -&gt; String
+<span class="lineno">  307 </span><span class="decl"><span class="istickedoff">byteStringToString bs = map (toEnum . fromIntegral) (BS.unpack bs)</span></span>
+<span class="lineno">  308 </span>
+<span class="lineno">  309 </span>-- | Latin-1 round-trip ('String' → 'ByteString'). Inverse of
+<span class="lineno">  310 </span>-- 'byteStringToString'.
+<span class="lineno">  311 </span>stringToByteString :: String -&gt; ByteString
+<span class="lineno">  312 </span><span class="decl"><span class="istickedoff">stringToByteString = BS.pack . map (fromIntegral . fromEnum)</span></span>
+<span class="lineno">  313 </span>
+<span class="lineno">  314 </span>-- | Lift a strict 'ByteString' into the lazy 'ByteString' shape that
+<span class="lineno">  315 </span>-- 'P.byteStringInput' expects.
+<span class="lineno">  316 </span>byteStringToLazy :: ByteString -&gt; BL.ByteString
+<span class="lineno">  317 </span><span class="decl"><span class="istickedoff">byteStringToLazy = BL.fromStrict</span></span>
+<span class="lineno">  318 </span>
+<span class="lineno">  319 </span>--------------------------------------------------------------------------------
+<span class="lineno">  320 </span>-- Helpers
+<span class="lineno">  321 </span>--------------------------------------------------------------------------------
+<span class="lineno">  322 </span>
+<span class="lineno">  323 </span>-- | Round a byte count up to whole MiB (1 MiB == 1_048_576 bytes).
+<span class="lineno">  324 </span>-- Zero or negative byte counts produce @0@. Mirrors the helper in
+<span class="lineno">  325 </span>-- &quot;PureClaw.Backend.Pty&quot;; reimplemented locally to keep that module\'s
+<span class="lineno">  326 </span>-- export surface tight.
+<span class="lineno">  327 </span>bytesToMiBCeil :: Int -&gt; Int
+<span class="lineno">  328 </span><span class="decl"><span class="istickedoff">bytesToMiBCeil n</span>
+<span class="lineno">  329 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">n &lt;= 0</span>    = <span class="nottickedoff">0</span></span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = (n + mib - 1) `div` mib</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="istickedoff">where mib = 1024 * 1024</span></span>
+<span class="lineno">  332 </span>
+<span class="lineno">  333 </span>-- | Atomically set an 'IORef' 'Bool' to 'True', returning its previous
+<span class="lineno">  334 </span>-- value. Used to defend against double-release of the buffer quota.
+<span class="lineno">  335 </span>-- Mirrors the helper in &quot;PureClaw.Backend.Pty&quot;.
+<span class="lineno">  336 </span>atomicSwapTrue :: IORef Bool -&gt; IO Bool
+<span class="lineno">  337 </span><span class="decl"><span class="istickedoff">atomicSwapTrue ref = atomicModifyIORef' ref (True,)</span></span>
+<span class="lineno">  338 </span>
+<span class="lineno">  339 </span>-- | Project an 'AuthorizedCommand'\'s program path to a redaction-safe
+<span class="lineno">  340 </span>-- 'CommandName' for inclusion in 'BackendBinaryNotFound'.
+<span class="lineno">  341 </span>toCommandName :: FilePath -&gt; CommandName
+<span class="lineno">  342 </span><span class="decl"><span class="nottickedoff">toCommandName = CommandName . T.pack</span></span>
+
+</pre>
+</body>
+</html>

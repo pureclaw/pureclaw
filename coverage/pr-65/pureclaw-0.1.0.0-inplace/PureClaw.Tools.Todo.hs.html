@@ -1,0 +1,155 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Todo
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    todoTool
+<span class="lineno">    4 </span>  ) where
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>import Data.Aeson
+<span class="lineno">    7 </span>import Data.Aeson.Types
+<span class="lineno">    8 </span>import Data.IORef
+<span class="lineno">    9 </span>import Data.Map.Strict (Map)
+<span class="lineno">   10 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   11 </span>import Data.Text (Text)
+<span class="lineno">   12 </span>import Data.Text qualified as T
+<span class="lineno">   13 </span>
+<span class="lineno">   14 </span>import PureClaw.Providers.Class
+<span class="lineno">   15 </span>import PureClaw.Tools.Registry
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>-- | A single todo item.
+<span class="lineno">   18 </span>data TodoItem = TodoItem
+<span class="lineno">   19 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ti_id</span></span></span>      :: Text
+<span class="lineno">   20 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ti_content</span></span></span> :: Text
+<span class="lineno">   21 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ti_status</span></span></span>  :: Text  -- pending | in_progress | completed | cancelled
+<span class="lineno">   22 </span>  }
+<span class="lineno">   23 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">ToJSON TodoItem</span></span></span></span></span></span></span></span> where
+<span class="lineno">   26 </span>  <span class="decl"><span class="nottickedoff">toJSON ti = object</span>
+<span class="lineno">   27 </span><span class="spaces">    </span><span class="nottickedoff">[ &quot;id&quot;      .= _ti_id ti</span>
+<span class="lineno">   28 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;content&quot; .= _ti_content ti</span>
+<span class="lineno">   29 </span><span class="spaces">    </span><span class="nottickedoff">, &quot;status&quot;  .= _ti_status ti</span>
+<span class="lineno">   30 </span><span class="spaces">    </span><span class="nottickedoff">]</span></span>
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>instance <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">FromJSON TodoItem</span></span></span></span> where
+<span class="lineno">   33 </span>  <span class="decl"><span class="istickedoff">parseJSON = withObject <span class="nottickedoff">&quot;TodoItem&quot;</span> $ \o -&gt;</span>
+<span class="lineno">   34 </span><span class="spaces">    </span><span class="istickedoff">TodoItem &lt;$&gt; o .: &quot;id&quot; &lt;*&gt; o .: &quot;content&quot; &lt;*&gt; o .: &quot;status&quot;</span></span>
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>-- | Valid todo statuses.
+<span class="lineno">   37 </span>validStatuses :: [Text]
+<span class="lineno">   38 </span><span class="decl"><span class="istickedoff">validStatuses = [&quot;pending&quot;, &quot;in_progress&quot;, &quot;completed&quot;, &quot;cancelled&quot;]</span></span>
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | Create an in-memory todo tool for lightweight task tracking.
+<span class="lineno">   41 </span>-- State is per-session (not persisted across restarts).
+<span class="lineno">   42 </span>-- Omit the @todos@ field to read the current list; provide it to write.
+<span class="lineno">   43 </span>todoTool :: IO (ToolDefinition, ToolHandler)
+<span class="lineno">   44 </span><span class="decl"><span class="istickedoff">todoTool = do</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">stateRef &lt;- newIORef (Map.empty :: Map Text TodoItem)</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">let def = ToolDefinition</span>
+<span class="lineno">   47 </span><span class="spaces">        </span><span class="istickedoff">{ _td_name        = &quot;todo&quot;</span>
+<span class="lineno">   48 </span><span class="spaces">        </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">   49 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">[ &quot;In-memory task list for decomposing complex work.&quot;</span></span>
+<span class="lineno">   50 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, &quot;Omit 'todos' to read the current list.&quot;</span></span>
+<span class="lineno">   51 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, &quot;Provide 'todos' array to write/update items.&quot;</span></span>
+<span class="lineno">   52 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, &quot;Set merge=true to merge with existing items (default: replace all).&quot;</span></span>
+<span class="lineno">   53 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, &quot;Statuses: pending, in_progress, completed, cancelled.&quot;</span></span>
+<span class="lineno">   54 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   55 </span><span class="spaces">        </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   56 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   57 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   58 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">[ &quot;todos&quot; .= object</span></span>
+<span class="lineno">   59 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;array&quot; :: Text)</span></span>
+<span class="lineno">   60 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">, &quot;items&quot; .= object</span></span>
+<span class="lineno">   61 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   62 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   63 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">[ &quot;id&quot; .= object [&quot;type&quot; .= (&quot;string&quot; :: Text)]</span></span>
+<span class="lineno">   64 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">, &quot;content&quot; .= object [&quot;type&quot; .= (&quot;string&quot; :: Text)]</span></span>
+<span class="lineno">   65 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">, &quot;status&quot; .= object</span></span>
+<span class="lineno">   66 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   67 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">, &quot;enum&quot; .= validStatuses</span></span>
+<span class="lineno">   68 </span><span class="spaces">                                </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   69 </span><span class="spaces">                            </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   70 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;id&quot;, &quot;content&quot;, &quot;status&quot;] :: [Text])</span></span>
+<span class="lineno">   71 </span><span class="spaces">                        </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   72 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Todo items to set. Omit to read current list.&quot; :: Text)</span></span>
+<span class="lineno">   73 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   74 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">, &quot;merge&quot; .= object</span></span>
+<span class="lineno">   75 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;boolean&quot; :: Text)</span></span>
+<span class="lineno">   76 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Merge with existing items instead of replacing (default: false)&quot; :: Text)</span></span>
+<span class="lineno">   77 </span><span class="spaces">                    </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   78 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   79 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   80 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">   81 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   82 </span><span class="spaces">      </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   83 </span><span class="spaces">        </span><span class="istickedoff">case parseEither parseTodoInput input of</span>
+<span class="lineno">   84 </span><span class="spaces">          </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   85 </span><span class="spaces">          </span><span class="istickedoff">Right (Nothing, _) -&gt; do</span>
+<span class="lineno">   86 </span><span class="spaces">            </span><span class="istickedoff">-- Read mode</span>
+<span class="lineno">   87 </span><span class="spaces">            </span><span class="istickedoff">items &lt;- readIORef stateRef</span>
+<span class="lineno">   88 </span><span class="spaces">            </span><span class="istickedoff">pure (formatTodos (Map.elems items), False)</span>
+<span class="lineno">   89 </span><span class="spaces">          </span><span class="istickedoff">Right (Just todos, merge) -&gt; do</span>
+<span class="lineno">   90 </span><span class="spaces">            </span><span class="istickedoff">-- Validate statuses</span>
+<span class="lineno">   91 </span><span class="spaces">            </span><span class="istickedoff">let invalid = filter (\ti -&gt; _ti_status ti `notElem` validStatuses) todos</span>
+<span class="lineno">   92 </span><span class="spaces">            </span><span class="istickedoff">if not (null invalid)</span>
+<span class="lineno">   93 </span><span class="spaces">              </span><span class="istickedoff">then pure (&quot;Invalid status in: &quot; &lt;&gt; T.intercalate <span class="nottickedoff">&quot;, &quot;</span> (map _ti_id invalid)</span>
+<span class="lineno">   94 </span><span class="spaces">                        </span><span class="istickedoff">&lt;&gt; &quot;. Valid: &quot; &lt;&gt; T.intercalate &quot;, &quot; validStatuses, True)</span>
+<span class="lineno">   95 </span><span class="spaces">              </span><span class="istickedoff">else do</span>
+<span class="lineno">   96 </span><span class="spaces">                </span><span class="istickedoff">let newMap = Map.fromList [(_ti_id ti, ti) | ti &lt;- todos]</span>
+<span class="lineno">   97 </span><span class="spaces">                </span><span class="istickedoff">if merge</span>
+<span class="lineno">   98 </span><span class="spaces">                  </span><span class="istickedoff">then atomicModifyIORef' stateRef $ \old -&gt;</span>
+<span class="lineno">   99 </span><span class="spaces">                    </span><span class="istickedoff">(Map.union newMap old, ())</span>
+<span class="lineno">  100 </span><span class="spaces">                  </span><span class="istickedoff">else writeIORef stateRef newMap</span>
+<span class="lineno">  101 </span><span class="spaces">                </span><span class="istickedoff">items &lt;- readIORef stateRef</span>
+<span class="lineno">  102 </span><span class="spaces">                </span><span class="istickedoff">pure (formatTodos (Map.elems items), False)</span>
+<span class="lineno">  103 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  104 </span><span class="spaces">  </span><span class="istickedoff">pure (def, handler)</span></span>
+<span class="lineno">  105 </span>
+<span class="lineno">  106 </span>formatTodos :: [TodoItem] -&gt; Text
+<span class="lineno">  107 </span><span class="decl"><span class="istickedoff">formatTodos [] = &quot;No todos.&quot;</span>
+<span class="lineno">  108 </span><span class="spaces"></span><span class="istickedoff">formatTodos items =</span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff">let grouped = Map.fromListWith (++) [(statusOrder (_ti_status ti), [ti]) | ti &lt;- items]</span>
+<span class="lineno">  110 </span><span class="spaces">      </span><span class="istickedoff">sections = map formatSection (Map.toAscList grouped)</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff">in T.intercalate &quot;\n\n&quot; sections</span></span>
+<span class="lineno">  112 </span>
+<span class="lineno">  113 </span>statusOrder :: Text -&gt; Int
+<span class="lineno">  114 </span><span class="decl"><span class="istickedoff">statusOrder &quot;in_progress&quot; = 0</span>
+<span class="lineno">  115 </span><span class="spaces"></span><span class="istickedoff">statusOrder &quot;pending&quot;     = 1</span>
+<span class="lineno">  116 </span><span class="spaces"></span><span class="istickedoff">statusOrder &quot;completed&quot;   = 2</span>
+<span class="lineno">  117 </span><span class="spaces"></span><span class="istickedoff">statusOrder &quot;cancelled&quot;   = <span class="nottickedoff">3</span></span>
+<span class="lineno">  118 </span><span class="spaces"></span><span class="istickedoff">statusOrder _             = <span class="nottickedoff">4</span></span></span>
+<span class="lineno">  119 </span>
+<span class="lineno">  120 </span>formatSection :: (Int, [TodoItem]) -&gt; Text
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">formatSection (_, []) = <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  122 </span><span class="spaces"></span><span class="istickedoff">formatSection (_, items@(first:_)) =</span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">let header = T.toUpper (_ti_status first)</span>
+<span class="lineno">  124 </span><span class="spaces">      </span><span class="istickedoff">lines' = map formatItem items</span>
+<span class="lineno">  125 </span><span class="spaces">  </span><span class="istickedoff">in header &lt;&gt; &quot;:\n&quot; &lt;&gt; T.intercalate &quot;\n&quot; lines'</span></span>
+<span class="lineno">  126 </span>
+<span class="lineno">  127 </span>formatItem :: TodoItem -&gt; Text
+<span class="lineno">  128 </span><span class="decl"><span class="istickedoff">formatItem ti = &quot;  [&quot; &lt;&gt; _ti_id ti &lt;&gt; &quot;] &quot; &lt;&gt; _ti_content ti</span></span>
+<span class="lineno">  129 </span>
+<span class="lineno">  130 </span>parseTodoInput :: Value -&gt; Parser (Maybe [TodoItem], Bool)
+<span class="lineno">  131 </span><span class="decl"><span class="istickedoff">parseTodoInput = withObject <span class="nottickedoff">&quot;TodoInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  132 </span><span class="spaces">  </span><span class="istickedoff">(,) &lt;$&gt; o .:? &quot;todos&quot; &lt;*&gt; o .:? &quot;merge&quot; .!= False</span></span>
+
+</pre>
+</body>
+</html>

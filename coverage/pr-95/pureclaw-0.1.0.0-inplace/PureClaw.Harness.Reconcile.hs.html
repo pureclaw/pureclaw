@@ -1,0 +1,957 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | Registry-based reconcile loop (Harness Registry &amp; Lifecycle, Phase 1 — WU5).
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- This module is the registry's source of truth for harness /health/ and the
+<span class="lineno">    4 </span>-- single authoritative updater of each entry's coordinate + liveness. It
+<span class="lineno">    5 </span>-- replaces the legacy harness-map activity probe (&quot;PureClaw.Frontend.ActivityProbe&quot;)
+<span class="lineno">    6 </span>-- with a loop that reconciles the durable registry against tmux reality.
+<span class="lineno">    7 </span>--
+<span class="lineno">    8 </span>-- == What the loop does, each tick
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>--   1. ONE server sweep per session ('_rd_sweep') — never per-I\/O.
+<span class="lineno">   11 </span>--   2. /Ownership filter/ (§8 C4 \/ D5.5\/D5.7): retain only rows whose
+<span class="lineno">   12 </span>--      @\@pcl_id@ matches a registry entry AND is PID-corroborated against the
+<span class="lineno">   13 </span>--      entry's recorded shell\/harness PID. A spoofed marker (collision or PID
+<span class="lineno">   14 </span>--      mismatch) is logged and treated as &quot;not ours&quot; — never captured, never
+<span class="lineno">   15 </span>--      marked live. A row with no recorded shell PID falls back to a second
+<span class="lineno">   16 </span>--      signal (the window-name prefix) to defend against PID reuse.
+<span class="lineno">   17 </span>--   3. Liveness classification (ours only): @Exited@ on @pane_dead@ or a dead
+<span class="lineno">   18 </span>--      harness PID; @Idle@\/@Thinking@\/@AwaitingInput@ via a screen capture
+<span class="lineno">   19 </span>--      classified by the entry's per-flavour observer (with a stability gate); an
+<span class="lineno">   20 </span>--      entry whose corroborated window is absent from the sweep → @Orphaned@.
+<span class="lineno">   21 </span>--   4. 'Reg.mergeReconcile' the observed fields into the registry atomically.
+<span class="lineno">   22 </span>--   5. /Symmetric diff/ (D5.2): emit one 'ActivityChanged' per entry whose
+<span class="lineno">   23 </span>--      liveness changed since the previous tick — INCLUDING entries that
+<span class="lineno">   24 </span>--      disappeared (now @Orphaned@\/@Exited@), fixing the disappearance gap.
+<span class="lineno">   25 </span>--      The first tick establishes the baseline and emits nothing.
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- == Resilience (D5.3)
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- A transient sweep\/capture failure marks the affected entries '_he_stale'
+<span class="lineno">   30 </span>-- and the loop CONTINUES — it never dies except on 'AsyncCancelled', which is
+<span class="lineno">   31 </span>-- re-raised so 'Async.withAsync' cleanup runs (the project-wide invariant; cf.
+<span class="lineno">   32 </span>-- &quot;PureClaw.Frontend.ActivityProbe&quot;).
+<span class="lineno">   33 </span>--
+<span class="lineno">   34 </span>-- == Boot reconstruction (D5.6)
+<span class="lineno">   35 </span>--
+<span class="lineno">   36 </span>-- 'bootReconstruct' runs one sweep at startup and registers an entry for every
+<span class="lineno">   37 </span>-- window carrying our @\@pcl_id@ (the PCL-restart reconnect path), and lazily
+<span class="lineno">   38 </span>-- stamps a fresh 'Reg.HarnessId' onto legacy @claude-code-\&lt;idx\&gt;@ windows that
+<span class="lineno">   39 </span>-- carry no marker. The legacy harness map is still seeded in parallel by the
+<span class="lineno">   40 </span>-- unchanged @discoverHarnesses@; the registry is the new parallel path this
+<span class="lineno">   41 </span>-- loop owns.
+<span class="lineno">   42 </span>module PureClaw.Harness.Reconcile
+<span class="lineno">   43 </span>  ( -- * Dependencies (the IO seam)
+<span class="lineno">   44 </span>    ReconcileDeps (..)
+<span class="lineno">   45 </span>  , defaultReconcileDeps
+<span class="lineno">   46 </span>    -- * Orphan grace policy
+<span class="lineno">   47 </span>  , defaultOrphanGraceTicks
+<span class="lineno">   48 </span>    -- * Pure classification + corroboration
+<span class="lineno">   49 </span>  , CorroborationResult (..)
+<span class="lineno">   50 </span>  , corroborate
+<span class="lineno">   51 </span>  , classifyFromObserver
+<span class="lineno">   52 </span>  , livenessToActivity
+<span class="lineno">   53 </span>  , diffLiveness
+<span class="lineno">   54 </span>    -- * Turn entry construction
+<span class="lineno">   55 </span>  , mkTurnEntry
+<span class="lineno">   56 </span>    -- * Content-driven turn watcher
+<span class="lineno">   57 </span>  , TurnState (..)
+<span class="lineno">   58 </span>  , defaultSettleStableTicks
+<span class="lineno">   59 </span>    -- * Reconcile tick + loop
+<span class="lineno">   60 </span>  , TickObservation (..)
+<span class="lineno">   61 </span>  , reconcileTick
+<span class="lineno">   62 </span>  , runReconcileLoopWith
+<span class="lineno">   63 </span>  , runReconcileLoop
+<span class="lineno">   64 </span>  , defaultTickMicros
+<span class="lineno">   65 </span>    -- * Boot reconstruction
+<span class="lineno">   66 </span>  , bootReconstruct
+<span class="lineno">   67 </span>    -- * Legacy window-name recognition (exposed for unit coverage)
+<span class="lineno">   68 </span>  , isLegacyWindowName
+<span class="lineno">   69 </span>  ) where
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>import Control.Concurrent (threadDelay)
+<span class="lineno">   72 </span>import Control.Concurrent.Async (AsyncCancelled (..))
+<span class="lineno">   73 </span>import Control.Exception (SomeException, fromException, handle, throwIO, try)
+<span class="lineno">   74 </span>import Control.Monad (foldM, forM, forM_)
+<span class="lineno">   75 </span>import Data.Char (isDigit)
+<span class="lineno">   76 </span>import Data.Foldable (for_)
+<span class="lineno">   77 </span>import Data.Map.Strict (Map)
+<span class="lineno">   78 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   79 </span>import Data.Maybe (catMaybes, fromMaybe, isJust)
+<span class="lineno">   80 </span>import Data.Text (Text)
+<span class="lineno">   81 </span>import Data.Text qualified as T
+<span class="lineno">   82 </span>import Data.Text.Encoding qualified as TE
+<span class="lineno">   83 </span>import Data.Time (UTCTime, getCurrentTime)
+<span class="lineno">   84 </span>import Data.UUID qualified as UUID
+<span class="lineno">   85 </span>import Data.UUID.V4 qualified as UUID
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>import PureClaw.Core.Types (SessionId (..))
+<span class="lineno">   88 </span>import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+<span class="lineno">   89 </span>import PureClaw.Frontend.StreamBroker
+<span class="lineno">   90 </span>  ( BrokerEvent (..)
+<span class="lineno">   91 </span>  , SessionActivity (..)
+<span class="lineno">   92 </span>  , StreamBroker (..)
+<span class="lineno">   93 </span>  )
+<span class="lineno">   94 </span>import PureClaw.Transcript.Types
+<span class="lineno">   95 </span>  ( Direction (..)
+<span class="lineno">   96 </span>  , TranscriptEntry (..)
+<span class="lineno">   97 </span>  , encodePayload
+<span class="lineno">   98 </span>  )
+<span class="lineno">   99 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">  100 </span>import PureClaw.Harness.LogProvider
+<span class="lineno">  101 </span>  ( TurnProvider (..)
+<span class="lineno">  102 </span>  , nullProvider
+<span class="lineno">  103 </span>  , tmuxProvider
+<span class="lineno">  104 </span>  )
+<span class="lineno">  105 </span>import PureClaw.Harness.Observer qualified as Obs
+<span class="lineno">  106 </span>import PureClaw.Harness.Registry qualified as Reg
+<span class="lineno">  107 </span>import PureClaw.Session.Kind qualified as Kind
+<span class="lineno">  108 </span>import PureClaw.Harness.Tmux
+<span class="lineno">  109 </span>  ( TmuxWindowRow (..)
+<span class="lineno">  110 </span>  , captureWindowNamed
+<span class="lineno">  111 </span>  , harnessPidOf
+<span class="lineno">  112 </span>  , listTmuxSessions
+<span class="lineno">  113 </span>  , readMarkers
+<span class="lineno">  114 </span>  , setWindowMarker
+<span class="lineno">  115 </span>  )
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  118 </span>-- Dependencies (IO seam — tests inject deterministic fakes)
+<span class="lineno">  119 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- | The injectable tmux operations the reconcile loop needs. Tests supply
+<span class="lineno">  122 </span>-- fakes (a queue of sweeps, a capture recorder) so the loop is deterministic
+<span class="lineno">  123 </span>-- and never forks a real tmux server. The production set is
+<span class="lineno">  124 </span>-- 'defaultReconcileDeps'.
+<span class="lineno">  125 </span>data ReconcileDeps = ReconcileDeps
+<span class="lineno">  126 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_sessions</span></span></span> :: IO [Text]
+<span class="lineno">  127 </span>    -- ^ Enumerate the sessions to sweep (production: the @\&quot;pureclaw\&quot;@ session
+<span class="lineno">  128 </span>    --   plus any other session on the server, via 'listTmuxSessions').
+<span class="lineno">  129 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_sweep</span></span></span> :: Text -&gt; IO [TmuxWindowRow]
+<span class="lineno">  130 </span>    -- ^ One server sweep of a session (production: 'readMarkers'). May throw on
+<span class="lineno">  131 </span>    --   a transient tmux failure; the loop catches it and marks entries stale.
+<span class="lineno">  132 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_capture</span></span></span> :: Text -&gt; Text -&gt; IO (Maybe Text)
+<span class="lineno">  133 </span>    -- ^ Capture @session windowName@ and return the raw screen text, or
+<span class="lineno">  134 </span>    --   'Nothing' if the capture failed (production: 'captureWindowNamed'
+<span class="lineno">  135 </span>    --   decoded leniently, wrapped in 'try'). The classifier (per-flavour
+<span class="lineno">  136 </span>    --   observer) decides liveness from the raw text; @Nothing@ disables the
+<span class="lineno">  137 </span>    --   stability gate for the tick. Only called for corroborated, live (not
+<span class="lineno">  138 </span>    --   pane_dead) windows.
+<span class="lineno">  139 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_harnessAlive</span></span></span> :: Int -&gt; IO Bool
+<span class="lineno">  140 </span>    -- ^ Whether a recorded harness PID is still alive (production: a
+<span class="lineno">  141 </span>    --   'harnessPidOf'-style liveness probe). Distinguishes @Exited@
+<span class="lineno">  142 </span>    --   (harness gone, shell present) from @Idle@\/@Thinking@.
+<span class="lineno">  143 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_stampLegacy</span></span></span> :: Text -&gt; Text -&gt; IO (Maybe Reg.HarnessId)
+<span class="lineno">  144 </span>    -- ^ Lazily stamp a legacy @claude-code-\&lt;idx\&gt;@ window (no @\@pcl_id@) with
+<span class="lineno">  145 </span>    --   a fresh marker + id, returning the new id (production: generate an id,
+<span class="lineno">  146 </span>    --   'setWindowMarker'). 'Nothing' for a window we do not own.
+<span class="lineno">  147 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_evict</span></span></span> :: Reg.HarnessId -&gt; Text -&gt; IO ()
+<span class="lineno">  148 </span>    -- ^ Auto-eviction seam (design §5\/§10 Q2). Called with the
+<span class="lineno">  149 </span>    --   @(harnessId, label)@ of an entry that has been Orphaned for
+<span class="lineno">  150 </span>    --   'defaultOrphanGraceTicks' consecutive ticks. Production wires this to
+<span class="lineno">  151 </span>    --   drop the entry from the LEGACY @_env_harnesses@ map (the registry
+<span class="lineno">  152 </span>    --   delete is done by the loop itself, in 'reconcileTick'); it must NOT
+<span class="lineno">  153 </span>    --   touch @session.json@ so the session reappears in Recent Sessions.
+<span class="lineno">  154 </span>    --   Tests inject a recorder to assert the @(id, label)@ that was evicted.
+<span class="lineno">  155 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_recordResponse</span></span></span> :: SessionId -&gt; TranscriptEntry -&gt; IO ()
+<span class="lineno">  156 </span>    -- ^ Finalize a turn (Task 6). Records ONE harness @Response@ transcript
+<span class="lineno">  157 </span>    --   entry for a session on a working→settle transition. The entry carries
+<span class="lineno">  158 </span>    --   the SAME turn id + start timestamp that the live updates used and the
+<span class="lineno">  159 </span>    --   whole-turn text last pushed during the turn (a structural dedup: settle
+<span class="lineno">  160 </span>    --   fires once per Thinking→Idle edge and the turn id is retired at settle,
+<span class="lineno">  161 </span>    --   so no content-compare is needed). Production wires this to append a
+<span class="lineno">  162 </span>    --   @Response@ entry to the session transcript (via a broadcasting file
+<span class="lineno">  163 </span>    --   transcript handle); tests inject a recorder.
+<span class="lineno">  164 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_publishUpdate</span></span></span> :: SessionId -&gt; TranscriptEntry -&gt; IO ()
+<span class="lineno">  165 </span>    -- ^ Live in-place turn update (Task 6). Publishes an EPHEMERAL @Response@
+<span class="lineno">  166 </span>    --   entry (same stable turn id) each time the in-progress whole turn grows,
+<span class="lineno">  167 </span>    --   so subscribers can render the message growing in place before it
+<span class="lineno">  168 </span>    --   finalizes. Production wires this to an 'EntryUpdated' broker publish (not
+<span class="lineno">  169 </span>    --   persisted); tests inject a recorder. Default is a no-op.
+<span class="lineno">  170 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_mintTurn</span></span></span> :: IO (Text, UTCTime)
+<span class="lineno">  171 </span>    -- ^ Mint a fresh turn id + start timestamp for a new turn (Task 6).
+<span class="lineno">  172 </span>    --   Production: a random UUID + 'getCurrentTime'; tests inject fixed values.
+<span class="lineno">  173 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_rd_providerFor</span></span></span> :: Reg.HarnessEntry -&gt; IO TurnProvider
+<span class="lineno">  174 </span>    -- ^ Select the turn-content provider for an entry (Harness log content
+<span class="lineno">  175 </span>    --   source, Task 4). The content-driven turn watcher sources a turn's text,
+<span class="lineno">  176 </span>    --   finalize signal, and optional stable id from this provider instead of
+<span class="lineno">  177 </span>    --   always from tmux's '_hh_snapshotTurn'. Default:
+<span class="lineno">  178 </span>    --   @\\e -&gt; pure (maybe nullProvider tmuxProvider (Reg._he_handle e))@ —
+<span class="lineno">  179 </span>    --   a handle-attached entry gets the verbatim tmux provider; a handle-less
+<span class="lineno">  180 </span>    --   entry gets the null provider. The production log provider (the
+<span class="lineno">  181 </span>    --   spawned-claude-with-uuid path) is injected here in @CLI.Commands@. The
+<span class="lineno">  182 </span>    --   selection is a deterministic function of the entry, so re-selecting it
+<span class="lineno">  183 </span>    --   each tick latches the same provider for the duration of a turn.
+<span class="lineno">  184 </span>  }
+<span class="lineno">  185 </span>
+<span class="lineno">  186 </span>-- | Production dependency set. Sweeps the @\&quot;pureclaw\&quot;@ session plus any other
+<span class="lineno">  187 </span>-- session on the server; capture via 'captureWindowNamed' (classified by the
+<span class="lineno">  188 </span>-- per-flavour observer in 'classifyFromObserver');
+<span class="lineno">  189 </span>-- harness liveness via 'harnessPidOf'; legacy stamping via 'setWindowMarker'.
+<span class="lineno">  190 </span>defaultReconcileDeps :: ReconcileDeps
+<span class="lineno">  191 </span><span class="decl"><span class="nottickedoff">defaultReconcileDeps = ReconcileDeps</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="nottickedoff">{ _rd_sessions = do</span>
+<span class="lineno">  193 </span><span class="spaces">      </span><span class="nottickedoff">others &lt;- listTmuxSessions</span>
+<span class="lineno">  194 </span><span class="spaces">      </span><span class="nottickedoff">-- Always include the default session even if it has no windows yet.</span>
+<span class="lineno">  195 </span><span class="spaces">      </span><span class="nottickedoff">pure (dedup (&quot;pureclaw&quot; : others))</span>
+<span class="lineno">  196 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_sweep = readMarkers</span>
+<span class="lineno">  197 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_capture = \session windowName -&gt; do</span>
+<span class="lineno">  198 </span><span class="spaces">      </span><span class="nottickedoff">r &lt;- try @SomeException (captureWindowNamed session windowName 50)</span>
+<span class="lineno">  199 </span><span class="spaces">      </span><span class="nottickedoff">pure $ case r of</span>
+<span class="lineno">  200 </span><span class="spaces">        </span><span class="nottickedoff">Left _      -&gt; Nothing</span>
+<span class="lineno">  201 </span><span class="spaces">        </span><span class="nottickedoff">Right bytes -&gt; Just (TE.decodeUtf8Lenient bytes)</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_harnessAlive = \shellPid -&gt; do</span>
+<span class="lineno">  203 </span><span class="spaces">      </span><span class="nottickedoff">-- Re-derive the harness PID by descending from the recorded shell PID and</span>
+<span class="lineno">  204 </span><span class="spaces">      </span><span class="nottickedoff">-- matching the flavour comm. If the descent still finds the agent binary</span>
+<span class="lineno">  205 </span><span class="spaces">      </span><span class="nottickedoff">-- the harness is alive; if it has exited, the descent returns 'Nothing'</span>
+<span class="lineno">  206 </span><span class="spaces">      </span><span class="nottickedoff">-- (the shell may still be present — that is exactly the @Exited@ case the</span>
+<span class="lineno">  207 </span><span class="spaces">      </span><span class="nottickedoff">-- @pane_dead@ flag also covers under @remain-on-exit on@).</span>
+<span class="lineno">  208 </span><span class="spaces">      </span><span class="nottickedoff">mPid &lt;- harnessPidOf shellPid &quot;claude&quot;</span>
+<span class="lineno">  209 </span><span class="spaces">      </span><span class="nottickedoff">pure (isJust mPid)</span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_stampLegacy = \session windowName -&gt;</span>
+<span class="lineno">  211 </span><span class="spaces">      </span><span class="nottickedoff">if isLegacyWindowName windowName</span>
+<span class="lineno">  212 </span><span class="spaces">        </span><span class="nottickedoff">then do</span>
+<span class="lineno">  213 </span><span class="spaces">          </span><span class="nottickedoff">hid &lt;- Reg.newHarnessId</span>
+<span class="lineno">  214 </span><span class="spaces">          </span><span class="nottickedoff">setWindowMarker session windowName (Reg.harnessIdToText hid)</span>
+<span class="lineno">  215 </span><span class="spaces">          </span><span class="nottickedoff">pure (Just hid)</span>
+<span class="lineno">  216 </span><span class="spaces">        </span><span class="nottickedoff">else pure Nothing</span>
+<span class="lineno">  217 </span><span class="spaces">    </span><span class="nottickedoff">-- Default eviction is a no-op: the loop itself deletes the evicted entry</span>
+<span class="lineno">  218 </span><span class="spaces">    </span><span class="nottickedoff">-- from the registry; the legacy-map drop is wired in CLI.Commands (which</span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="nottickedoff">-- overrides this seam via 'runReconcileLoopWith'). Crucially this never</span>
+<span class="lineno">  220 </span><span class="spaces">    </span><span class="nottickedoff">-- deletes @session.json@.</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_evict = \_hid _label -&gt; pure ()</span>
+<span class="lineno">  222 </span><span class="spaces">    </span><span class="nottickedoff">-- Default recorder is a no-op: the production transcript wiring is injected</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="nottickedoff">-- in CLI.Commands (which has 'sessionsDir' + the broker in scope).</span>
+<span class="lineno">  224 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_recordResponse = \_sid _entry -&gt; pure ()</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="nottickedoff">-- Default publishUpdate is a no-op: the production broker publish is injected</span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="nottickedoff">-- in CLI.Commands (which has the broker in scope).</span>
+<span class="lineno">  227 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_publishUpdate = \_sid _entry -&gt; pure ()</span>
+<span class="lineno">  228 </span><span class="spaces">    </span><span class="nottickedoff">-- Default turn minting: a fresh random UUID + the current wall-clock time.</span>
+<span class="lineno">  229 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_mintTurn = (,) . UUID.toText &lt;$&gt; UUID.nextRandom &lt;*&gt; getCurrentTime</span>
+<span class="lineno">  230 </span><span class="spaces">    </span><span class="nottickedoff">-- Default provider selection: the verbatim tmux provider for a</span>
+<span class="lineno">  231 </span><span class="spaces">    </span><span class="nottickedoff">-- handle-attached entry, the null provider for a handle-less one.</span>
+<span class="lineno">  232 </span><span class="spaces">  </span><span class="nottickedoff">, _rd_providerFor = pure . maybe nullProvider tmuxProvider . Reg._he_handle</span>
+<span class="lineno">  233 </span><span class="spaces">  </span><span class="nottickedoff">}</span>
+<span class="lineno">  234 </span><span class="spaces">  </span><span class="nottickedoff">where</span>
+<span class="lineno">  235 </span><span class="spaces">    </span><span class="nottickedoff">dedup = go []</span>
+<span class="lineno">  236 </span><span class="spaces">      </span><span class="nottickedoff">where</span>
+<span class="lineno">  237 </span><span class="spaces">        </span><span class="nottickedoff">go seen [] = reverse seen</span>
+<span class="lineno">  238 </span><span class="spaces">        </span><span class="nottickedoff">go seen (x : xs)</span>
+<span class="lineno">  239 </span><span class="spaces">          </span><span class="nottickedoff">| x `elem` seen = go seen xs</span>
+<span class="lineno">  240 </span><span class="spaces">          </span><span class="nottickedoff">| otherwise     = go (x : seen) xs</span></span>
+<span class="lineno">  241 </span>
+<span class="lineno">  242 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  243 </span>-- Pure corroboration (§8 C4 / D5.7)
+<span class="lineno">  244 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  245 </span>
+<span class="lineno">  246 </span>-- | The result of corroborating a marker row against a registry entry.
+<span class="lineno">  247 </span>data CorroborationResult
+<span class="lineno">  248 </span>  = Corroborated
+<span class="lineno">  249 </span>    -- ^ The row is genuinely this entry's window: PID-provenance (or, for a
+<span class="lineno">  250 </span>    --   provenance-less entry, the window-name prefix) confirms it.
+<span class="lineno">  251 </span>  | PidMismatch
+<span class="lineno">  252 </span>    -- ^ The marker matches but the recorded shell PID does not (or the second
+<span class="lineno">  253 </span>    --   signal fails) — a spoof\/PID-reuse: treat as NOT ours, never trust.
+<span class="lineno">  254 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  255 </span>
+<span class="lineno">  256 </span>-- | Corroborate a marker row (already known to carry this entry's @\@pcl_id@)
+<span class="lineno">  257 </span>-- against the entry's recorded provenance (§8 C4):
+<span class="lineno">  258 </span>--
+<span class="lineno">  259 </span>--   * If we recorded a shell PID, the row's @#{pane_pid}@ MUST match it.
+<span class="lineno">  260 </span>--   * If we recorded NO shell PID (legacy\/adopted), require a SECOND signal —
+<span class="lineno">  261 </span>--     the @claude-code-\&lt;idx\&gt;@-style window-name prefix matching the entry's
+<span class="lineno">  262 </span>--     label — to defend against PID reuse.
+<span class="lineno">  263 </span>corroborate :: Reg.HarnessEntry -&gt; TmuxWindowRow -&gt; CorroborationResult
+<span class="lineno">  264 </span><span class="decl"><span class="istickedoff">corroborate e row =</span>
+<span class="lineno">  265 </span><span class="spaces">  </span><span class="istickedoff">case Reg._he_shellPid e of</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">Just recordedPid</span>
+<span class="lineno">  267 </span><span class="spaces">      </span><span class="istickedoff">| _twr_panePid row == Just recordedPid -&gt; Corroborated</span>
+<span class="lineno">  268 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>                            -&gt; PidMismatch</span>
+<span class="lineno">  269 </span><span class="spaces">    </span><span class="istickedoff">Nothing</span>
+<span class="lineno">  270 </span><span class="spaces">      </span><span class="istickedoff">-- No recorded provenance: fall back to the window-name prefix as the</span>
+<span class="lineno">  271 </span><span class="spaces">      </span><span class="istickedoff">-- second corroborating signal.</span>
+<span class="lineno">  272 </span><span class="spaces">      </span><span class="istickedoff">| _twr_windowName row == Reg._he_label e -&gt; Corroborated</span>
+<span class="lineno">  273 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>                              -&gt; PidMismatch</span></span>
+<span class="lineno">  274 </span>
+<span class="lineno">  275 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  276 </span>-- Pure liveness classification (D5.4)
+<span class="lineno">  277 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  278 </span>
+<span class="lineno">  279 </span>-- | Classify a corroborated window's liveness from @(paneDead, harnessAlive,
+<span class="lineno">  280 </span>-- stable, screen)@ via the entry's per-flavour 'Obs.HarnessObserver':
+<span class="lineno">  281 </span>--
+<span class="lineno">  282 </span>--   * @pane_dead@ OR a dead harness PID ⇒ 'Reg.LivenessExited' (the window is
+<span class="lineno">  283 </span>--     present but the agent is gone).
+<span class="lineno">  284 </span>--   * otherwise the observer's 3-state screen classifier decides:
+<span class="lineno">  285 </span>--     working ⇒ 'Reg.LivenessThinking', awaiting-input ⇒
+<span class="lineno">  286 </span>--     'Reg.LivenessAwaitingInput', idle ⇒ 'Reg.LivenessIdle' only once the
+<span class="lineno">  287 </span>--     capture is /stable/ across ticks (an unstable idle frame stays
+<span class="lineno">  288 </span>--     'Reg.LivenessThinking', defending against mid-spinner frames).
+<span class="lineno">  289 </span>--
+<span class="lineno">  290 </span>-- 'Reg.LivenessOrphaned' is NOT produced here — it is assigned to entries whose
+<span class="lineno">  291 </span>-- corroborated window is /absent/ from the sweep (see 'reconcileTick').
+<span class="lineno">  292 </span>classifyFromObserver
+<span class="lineno">  293 </span>  :: Obs.HarnessObserver
+<span class="lineno">  294 </span>  -&gt; Bool  -- ^ pane_dead
+<span class="lineno">  295 </span>  -&gt; Bool  -- ^ harness PID alive
+<span class="lineno">  296 </span>  -&gt; Bool  -- ^ the capture is stable (unchanged since the previous tick)
+<span class="lineno">  297 </span>  -&gt; Text  -- ^ raw screen capture
+<span class="lineno">  298 </span>  -&gt; Reg.Liveness
+<span class="lineno">  299 </span><span class="decl"><span class="istickedoff">classifyFromObserver obs paneDead harnessAlive stable screen</span>
+<span class="lineno">  300 </span><span class="spaces">  </span><span class="istickedoff">| paneDead || not harnessAlive = Reg.LivenessExited</span>
+<span class="lineno">  301 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = case Obs._ho_classify obs screen of</span>
+<span class="lineno">  302 </span><span class="spaces">      </span><span class="istickedoff">Obs.HasWorking       -&gt; Reg.LivenessThinking</span>
+<span class="lineno">  303 </span><span class="spaces">      </span><span class="istickedoff">Obs.HasAwaitingInput -&gt; Reg.LivenessAwaitingInput</span>
+<span class="lineno">  304 </span><span class="spaces">      </span><span class="istickedoff">-- An idle-looking screen is only trusted once it is STABLE across ticks:</span>
+<span class="lineno">  305 </span><span class="spaces">      </span><span class="istickedoff">-- a single idle-marker frame mid-stream is treated as still Thinking</span>
+<span class="lineno">  306 </span><span class="spaces">      </span><span class="istickedoff">-- (the spinner may simply be between frames).</span>
+<span class="lineno">  307 </span><span class="spaces">      </span><span class="istickedoff">Obs.HasIdle          -&gt; if stable then Reg.LivenessIdle else Reg.LivenessThinking</span></span>
+<span class="lineno">  308 </span>
+<span class="lineno">  309 </span>-- | Map a registry 'Reg.Liveness' to the broker's 'HarnessActivity' vocabulary.
+<span class="lineno">  310 </span>-- Both @Exited@ and @Orphaned@ collapse to 'HarnessStopped' (the frontend's
+<span class="lineno">  311 </span>-- richer state→glyph mapping is Phase 2).
+<span class="lineno">  312 </span>livenessToActivity :: Reg.Liveness -&gt; HarnessActivity
+<span class="lineno">  313 </span><span class="decl"><span class="istickedoff">livenessToActivity Reg.LivenessIdle          = HarnessIdle</span>
+<span class="lineno">  314 </span><span class="spaces"></span><span class="istickedoff">livenessToActivity Reg.LivenessThinking      = HarnessThinking</span>
+<span class="lineno">  315 </span><span class="spaces"></span><span class="istickedoff">livenessToActivity Reg.LivenessAwaitingInput = HarnessNeedsInput</span>
+<span class="lineno">  316 </span><span class="spaces"></span><span class="istickedoff">livenessToActivity Reg.LivenessExited        = HarnessStopped</span>
+<span class="lineno">  317 </span><span class="spaces"></span><span class="istickedoff">livenessToActivity Reg.LivenessOrphaned      = HarnessStopped</span></span>
+<span class="lineno">  318 </span>
+<span class="lineno">  319 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  320 </span>-- Turn entry construction (Task 6)
+<span class="lineno">  321 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  322 </span>
+<span class="lineno">  323 </span>-- | Build a harness @Response@ 'TranscriptEntry' for a turn. The same @turnId@
+<span class="lineno">  324 </span>-- and start timestamp are reused across every live update of a turn AND its
+<span class="lineno">  325 </span>-- final on settle, so the in-place update and the persisted final share one
+<span class="lineno">  326 </span>-- stable identity. The @turnId@ is also the correlation id (a harness turn is a
+<span class="lineno">  327 </span>-- self-contained response, not a request\/response pair).
+<span class="lineno">  328 </span>mkTurnEntry :: Text -&gt; UTCTime -&gt; Text -&gt; TranscriptEntry
+<span class="lineno">  329 </span><span class="decl"><span class="istickedoff">mkTurnEntry turnId ts payload = TranscriptEntry</span>
+<span class="lineno">  330 </span><span class="spaces">  </span><span class="istickedoff">{ _te_id            = turnId</span>
+<span class="lineno">  331 </span><span class="spaces">  </span><span class="istickedoff">, _te_timestamp     = ts</span>
+<span class="lineno">  332 </span><span class="spaces">  </span><span class="istickedoff">, _te_harness       = Just &quot;harness&quot;</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">, _te_model         = Nothing</span>
+<span class="lineno">  334 </span><span class="spaces">  </span><span class="istickedoff">, _te_direction     = Response</span>
+<span class="lineno">  335 </span><span class="spaces">  </span><span class="istickedoff">, _te_payload       = encodePayload (TE.encodeUtf8 payload)</span>
+<span class="lineno">  336 </span><span class="spaces">  </span><span class="istickedoff">, _te_durationMs    = Nothing</span>
+<span class="lineno">  337 </span><span class="spaces">  </span><span class="istickedoff">, _te_correlationId = turnId</span>
+<span class="lineno">  338 </span><span class="spaces">  </span><span class="istickedoff">, _te_metadata      = Map.empty</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  340 </span>
+<span class="lineno">  341 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  342 </span>-- Content-driven turn watcher state
+<span class="lineno">  343 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  344 </span>
+<span class="lineno">  345 </span>-- | Per-live-entry turn state threaded by the reconcile loop. The watcher is
+<span class="lineno">  346 </span>-- driven by turn-content change + stabilization (not the liveness edge), so each
+<span class="lineno">  347 </span>-- entry carries the stable minted id of the turn currently streaming, the last
+<span class="lineno">  348 </span>-- whole-turn text observed, how many consecutive ticks that text has been
+<span class="lineno">  349 </span>-- unchanged, and whether the turn is still active (streaming, not yet
+<span class="lineno">  350 </span>-- finalized). After finalize the state is RETAINED (inactive) so the same
+<span class="lineno">  351 </span>-- already-recorded content is neither re-streamed nor re-recorded; a later change
+<span class="lineno">  352 </span>-- to different non-empty content mints a NEW turn.
+<span class="lineno">  353 </span>data TurnState = TurnState
+<span class="lineno">  354 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_tsTurnId</span></span></span>   :: !Text     -- ^ stable id: same across every update + the final.
+<span class="lineno">  355 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tsStarted</span></span></span>  :: !UTCTime  -- ^ the turn's start timestamp (reused on finalize).
+<span class="lineno">  356 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tsLastText</span></span></span> :: !Text     -- ^ last whole-turn text streamed\/observed.
+<span class="lineno">  357 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tsStable</span></span></span>   :: !Int      -- ^ consecutive ticks '_tsLastText' was unchanged.
+<span class="lineno">  358 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_tsActive</span></span></span>   :: !Bool     -- ^ 'True' = streaming, not yet finalized.
+<span class="lineno">  359 </span>  }
+<span class="lineno">  360 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  361 </span>
+<span class="lineno">  362 </span>-- | Consecutive ticks a turn's whole-turn text must be unchanged (while the
+<span class="lineno">  363 </span>-- harness is Idle\/AwaitingInput) before the watcher finalizes it. At the
+<span class="lineno">  364 </span>-- production 2-second cadence this lands the final ~1 tick after the last content
+<span class="lineno">  365 </span>-- change; the two-capture stability gate in 'classifyRow' is a second guard.
+<span class="lineno">  366 </span>defaultSettleStableTicks :: Int
+<span class="lineno">  367 </span><span class="decl"><span class="istickedoff">defaultSettleStableTicks = 1</span></span>
+<span class="lineno">  368 </span>
+<span class="lineno">  369 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  370 </span>-- Pure symmetric diff (D5.2)
+<span class="lineno">  371 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  372 </span>
+<span class="lineno">  373 </span>-- | Compute the @(sessionId, liveness)@ transitions between two ticks' liveness
+<span class="lineno">  374 </span>-- snapshots, keyed by 'Reg.HarnessId' (rendered as 'Text' for test ergonomics).
+<span class="lineno">  375 </span>-- Each value carries the SessionId the event should be published under plus the
+<span class="lineno">  376 </span>-- current liveness.
+<span class="lineno">  377 </span>--
+<span class="lineno">  378 </span>-- An entry whose liveness CHANGED (or that is newly present) emits its new
+<span class="lineno">  379 </span>-- liveness. Crucially, an entry that went 'Reg.LivenessOrphaned'\/'Reg.LivenessExited'
+<span class="lineno">  380 </span>-- (because its window vanished from the sweep) is still present in @next@ — the
+<span class="lineno">  381 </span>-- registry retains it — so the transition surfaces, fixing the disappearance
+<span class="lineno">  382 </span>-- gap (@ActivityProbe.hs:117@). A dropped key (registry entry removed entirely)
+<span class="lineno">  383 </span>-- emits nothing; eviction is a Phase-2 concern.
+<span class="lineno">  384 </span>diffLiveness
+<span class="lineno">  385 </span>  :: Map Text (Text, Reg.Liveness)  -- ^ previous tick
+<span class="lineno">  386 </span>  -&gt; Map Text (Text, Reg.Liveness)  -- ^ current tick
+<span class="lineno">  387 </span>  -&gt; [(Text, Reg.Liveness)]         -- ^ @(sessionId, newLiveness)@ to publish
+<span class="lineno">  388 </span><span class="decl"><span class="istickedoff">diffLiveness prev next =</span>
+<span class="lineno">  389 </span><span class="spaces">  </span><span class="istickedoff">[ (sid, liveness)</span>
+<span class="lineno">  390 </span><span class="spaces">  </span><span class="istickedoff">| (key, (sid, liveness)) &lt;- Map.toList next</span>
+<span class="lineno">  391 </span><span class="spaces">  </span><span class="istickedoff">, case Map.lookup key prev of</span>
+<span class="lineno">  392 </span><span class="spaces">      </span><span class="istickedoff">Nothing            -&gt; True                  -- newly observed</span>
+<span class="lineno">  393 </span><span class="spaces">      </span><span class="istickedoff">Just (_, oldLive)  -&gt; oldLive /= liveness   -- transitioned</span>
+<span class="lineno">  394 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">  395 </span>
+<span class="lineno">  396 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  397 </span>-- Reconcile tick (IO)
+<span class="lineno">  398 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  399 </span>
+<span class="lineno">  400 </span>-- | The per-entry observation a single 'reconcileTick' produces, keyed by the
+<span class="lineno">  401 </span>-- entry's 'Reg.HarnessId' text in the returned map. It carries the SessionId the
+<span class="lineno">  402 </span>-- loop publishes under, the classified liveness for the diff, and the raw screen
+<span class="lineno">  403 </span>-- capture taken this tick (so the loop can feed it back as next tick's @prevCap@
+<span class="lineno">  404 </span>-- for the stability gate). The held\/orphaned paths set '_to_capture' to
+<span class="lineno">  405 </span>-- 'Nothing' (no fresh capture was taken).
+<span class="lineno">  406 </span>data TickObservation = TickObservation
+<span class="lineno">  407 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_to_sessionId</span></span></span> :: !Text            -- ^ @sidOf e@ (the recorded sessionId, or the label fallback).
+<span class="lineno">  408 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_to_liveness</span></span></span>  :: !Reg.Liveness    -- ^ classified liveness this tick.
+<span class="lineno">  409 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_to_capture</span></span></span>   :: !(Maybe Text)    -- ^ raw capture taken this tick, if any.
+<span class="lineno">  410 </span>  }
+<span class="lineno">  411 </span>
+<span class="lineno">  412 </span>-- | A single reconcile pass: sweep, corroborate, classify, merge, and return the
+<span class="lineno">  413 </span>-- per-entry observation map keyed by 'Reg.HarnessId' text (for the loop's diff
+<span class="lineno">  414 </span>-- + stability gate). Takes the previous tick's raw captures (id-text → last raw)
+<span class="lineno">  415 </span>-- so the per-flavour observer can apply its stability gate. On a transient sweep
+<span class="lineno">  416 </span>-- failure the registry's entries are marked '_he_stale' (holding last-known
+<span class="lineno">  417 </span>-- liveness) and the observation reflects the held state; the tick never throws
+<span class="lineno">  418 </span>-- on a sweep failure.
+<span class="lineno">  419 </span>reconcileTick
+<span class="lineno">  420 </span>  :: ReconcileDeps
+<span class="lineno">  421 </span>  -&gt; Reg.HarnessRegistry
+<span class="lineno">  422 </span>  -&gt; LogHandle
+<span class="lineno">  423 </span>  -&gt; Map Text Text                          -- ^ previous captures (id-text → last raw)
+<span class="lineno">  424 </span>  -&gt; IO (Map Text TickObservation, [Text])
+<span class="lineno">  425 </span>  -- ^ @(per-id observation, sessionIds of entries auto-evicted this tick)@.
+<span class="lineno">  426 </span>  --   Evicted entries are removed from the observation map (so the next diff
+<span class="lineno">  427 </span>  --   does not re-report them) and the loop emits one final disappearance event
+<span class="lineno">  428 </span>  --   per returned sessionId.
+<span class="lineno">  429 </span><span class="decl"><span class="istickedoff">reconcileTick deps reg logger prevCaps = do</span>
+<span class="lineno">  430 </span><span class="spaces">  </span><span class="istickedoff">sessions &lt;- _rd_sessions deps</span>
+<span class="lineno">  431 </span><span class="spaces">  </span><span class="istickedoff">-- Sweep every session; a failed sweep yields Nothing (we then hold stale).</span>
+<span class="lineno">  432 </span><span class="spaces">  </span><span class="istickedoff">sweepResults &lt;- forM sessions $ \session -&gt; do</span>
+<span class="lineno">  433 </span><span class="spaces">    </span><span class="istickedoff">r &lt;- try @SomeException (_rd_sweep deps <span class="nottickedoff">session</span>)</span>
+<span class="lineno">  434 </span><span class="spaces">    </span><span class="istickedoff">case r of</span>
+<span class="lineno">  435 </span><span class="spaces">      </span><span class="istickedoff">Left err -&gt; do</span>
+<span class="lineno">  436 </span><span class="spaces">        </span><span class="istickedoff">_lh_logWarn logger</span>
+<span class="lineno">  437 </span><span class="spaces">          </span><span class="istickedoff">(&quot;reconcile: sweep of session &quot; &lt;&gt; session &lt;&gt; &quot; failed: &quot; &lt;&gt; T.pack (show err))</span>
+<span class="lineno">  438 </span><span class="spaces">        </span><span class="istickedoff">pure Nothing</span>
+<span class="lineno">  439 </span><span class="spaces">      </span><span class="istickedoff">Right rows -&gt; pure (Just rows)</span>
+<span class="lineno">  440 </span><span class="spaces">  </span><span class="istickedoff">let sweepFailed = Nothing `elem` sweepResults</span>
+<span class="lineno">  441 </span><span class="spaces">      </span><span class="istickedoff">allRows     = concat (catMaybes sweepResults)</span>
+<span class="lineno">  442 </span><span class="spaces">  </span><span class="istickedoff">entries &lt;- Reg.snapshot reg</span>
+<span class="lineno">  443 </span><span class="spaces">  </span><span class="istickedoff">-- Build, per entry, its observed fields (or the stale/orphaned fallback).</span>
+<span class="lineno">  444 </span><span class="spaces">  </span><span class="istickedoff">observedPairs &lt;- forM entries $ \e -&gt; do</span>
+<span class="lineno">  445 </span><span class="spaces">    </span><span class="istickedoff">let idText  = Reg.harnessIdToText (Reg._he_id e)</span>
+<span class="lineno">  446 </span><span class="spaces">        </span><span class="istickedoff">matches = [ row | row &lt;- allRows, _twr_pclId row == idText ]</span>
+<span class="lineno">  447 </span><span class="spaces">    </span><span class="istickedoff">case matches of</span>
+<span class="lineno">  448 </span><span class="spaces">      </span><span class="istickedoff">[] | sweepFailed -&gt;</span>
+<span class="lineno">  449 </span><span class="spaces">            </span><span class="istickedoff">-- No row AND a sweep failed: we cannot conclude the window is gone.</span>
+<span class="lineno">  450 </span><span class="spaces">            </span><span class="istickedoff">-- Hold last-known liveness; mark stale.</span>
+<span class="lineno">  451 </span><span class="spaces">            </span><span class="istickedoff">pure (mkObservedHeld e)</span>
+<span class="lineno">  452 </span><span class="spaces">         </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt;</span>
+<span class="lineno">  453 </span><span class="spaces">            </span><span class="istickedoff">-- Sweep succeeded and our window is absent ⇒ Orphaned.</span>
+<span class="lineno">  454 </span><span class="spaces">            </span><span class="istickedoff">pure (mkObservedOrphaned e)</span>
+<span class="lineno">  455 </span><span class="spaces">      </span><span class="istickedoff">_ -&gt; do</span>
+<span class="lineno">  456 </span><span class="spaces">        </span><span class="istickedoff">-- Corroborate each candidate; trust only the first corroborated row.</span>
+<span class="lineno">  457 </span><span class="spaces">        </span><span class="istickedoff">let corroboratedRows =</span>
+<span class="lineno">  458 </span><span class="spaces">              </span><span class="istickedoff">[ row | row &lt;- matches, corroborate e row == Corroborated ]</span>
+<span class="lineno">  459 </span><span class="spaces">        </span><span class="istickedoff">case corroboratedRows of</span>
+<span class="lineno">  460 </span><span class="spaces">          </span><span class="istickedoff">[] -&gt; do</span>
+<span class="lineno">  461 </span><span class="spaces">            </span><span class="istickedoff">-- A marker matched but corroboration failed (spoof / PID mismatch):</span>
+<span class="lineno">  462 </span><span class="spaces">            </span><span class="istickedoff">-- log + treat as not ours; the entry is Orphaned, never captured.</span>
+<span class="lineno">  463 </span><span class="spaces">            </span><span class="istickedoff">_lh_logWarn logger</span>
+<span class="lineno">  464 </span><span class="spaces">              </span><span class="istickedoff">(&quot;reconcile: @pcl_id &quot; &lt;&gt; idText</span>
+<span class="lineno">  465 </span><span class="spaces">                 </span><span class="istickedoff">&lt;&gt; &quot; matched a window with no corroborating PID — treating as not ours (§8 C4)&quot;)</span>
+<span class="lineno">  466 </span><span class="spaces">            </span><span class="istickedoff">pure (mkObservedOrphaned e)</span>
+<span class="lineno">  467 </span><span class="spaces">          </span><span class="istickedoff">(row : _) -&gt; do</span>
+<span class="lineno">  468 </span><span class="spaces">            </span><span class="istickedoff">-- The per-window capture + harness-alive probe is the only other</span>
+<span class="lineno">  469 </span><span class="spaces">            </span><span class="istickedoff">-- tmux IO in the tick (besides the sweep, handled above). A</span>
+<span class="lineno">  470 </span><span class="spaces">            </span><span class="istickedoff">-- transient failure here must NOT kill the loop (D5.3): hold this</span>
+<span class="lineno">  471 </span><span class="spaces">            </span><span class="istickedoff">-- entry's last-known liveness and mark it stale, exactly as a sweep</span>
+<span class="lineno">  472 </span><span class="spaces">            </span><span class="istickedoff">-- failure does — never repaint it from a capture error, never let</span>
+<span class="lineno">  473 </span><span class="spaces">            </span><span class="istickedoff">-- the exception propagate to the loop's crash handler.</span>
+<span class="lineno">  474 </span><span class="spaces">            </span><span class="istickedoff">r &lt;- try @SomeException (classifyRow deps e row (Map.lookup idText prevCaps))</span>
+<span class="lineno">  475 </span><span class="spaces">            </span><span class="istickedoff">case r of</span>
+<span class="lineno">  476 </span><span class="spaces">              </span><span class="istickedoff">Left err -&gt; do</span>
+<span class="lineno">  477 </span><span class="spaces">                </span><span class="istickedoff">_lh_logWarn logger</span>
+<span class="lineno">  478 </span><span class="spaces">                  </span><span class="istickedoff">(&quot;reconcile: capture/liveness probe for @pcl_id &quot; &lt;&gt; idText</span>
+<span class="lineno">  479 </span><span class="spaces">                     </span><span class="istickedoff">&lt;&gt; &quot; failed: &quot; &lt;&gt; T.pack (show err) &lt;&gt; &quot; — holding last-known liveness&quot;)</span>
+<span class="lineno">  480 </span><span class="spaces">                </span><span class="istickedoff">pure (mkObservedHeld e)</span>
+<span class="lineno">  481 </span><span class="spaces">              </span><span class="istickedoff">Right (liveness, mCap) -&gt;</span>
+<span class="lineno">  482 </span><span class="spaces">                </span><span class="istickedoff">pure (mkObservedLive e row liveness mCap)</span>
+<span class="lineno">  483 </span><span class="spaces">  </span><span class="istickedoff">let observed = map snd observedPairs</span>
+<span class="lineno">  484 </span><span class="spaces">  </span><span class="istickedoff">Reg.mergeReconcile reg observed</span>
+<span class="lineno">  485 </span><span class="spaces">  </span><span class="istickedoff">let snapMap = Map.fromList [ (k, v) | (k, v) &lt;- map fst observedPairs ]</span>
+<span class="lineno">  486 </span><span class="spaces">  </span><span class="istickedoff">-- Orphan grace policy (design §5 / §10 Q2): after the merge, evict any entry</span>
+<span class="lineno">  487 </span><span class="spaces">  </span><span class="istickedoff">-- that has now been Orphaned for 'defaultOrphanGraceTicks' consecutive ticks.</span>
+<span class="lineno">  488 </span><span class="spaces">  </span><span class="istickedoff">-- Eviction drops the entry from the registry (here) and from the legacy map</span>
+<span class="lineno">  489 </span><span class="spaces">  </span><span class="istickedoff">-- (via the injectable '_rd_evict' seam, wired in CLI.Commands) — but never</span>
+<span class="lineno">  490 </span><span class="spaces">  </span><span class="istickedoff">-- touches @session.json@. The evicted ids are removed from the returned</span>
+<span class="lineno">  491 </span><span class="spaces">  </span><span class="istickedoff">-- snapshot so the next tick's diff does not re-report them; their sessionIds</span>
+<span class="lineno">  492 </span><span class="spaces">  </span><span class="istickedoff">-- are returned so the loop can emit one final disappearance event.</span>
+<span class="lineno">  493 </span><span class="spaces">  </span><span class="istickedoff">merged &lt;- Reg.snapshot reg</span>
+<span class="lineno">  494 </span><span class="spaces">  </span><span class="istickedoff">let toEvict =</span>
+<span class="lineno">  495 </span><span class="spaces">        </span><span class="istickedoff">[ e | e &lt;- merged, Reg._he_orphanedTicks e &gt;= defaultOrphanGraceTicks ]</span>
+<span class="lineno">  496 </span><span class="spaces">  </span><span class="istickedoff">evictedSids &lt;- forM toEvict $ \e -&gt; do</span>
+<span class="lineno">  497 </span><span class="spaces">    </span><span class="istickedoff">_lh_logInfo logger</span>
+<span class="lineno">  498 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">(&quot;reconcile: evicting harness &quot; &lt;&gt; Reg.harnessIdToText (Reg._he_id e)</span></span>
+<span class="lineno">  499 </span><span class="spaces">         </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; (label &quot; &lt;&gt; Reg._he_label e &lt;&gt; &quot;) after &quot;</span></span>
+<span class="lineno">  500 </span><span class="spaces">         </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; T.pack (show (Reg._he_orphanedTicks e))</span></span>
+<span class="lineno">  501 </span><span class="spaces">         </span><span class="istickedoff"><span class="nottickedoff">&lt;&gt; &quot; orphaned ticks; session.json retained&quot;)</span></span>
+<span class="lineno">  502 </span><span class="spaces">    </span><span class="istickedoff">_rd_evict deps (Reg._he_id e) (Reg._he_label e)</span>
+<span class="lineno">  503 </span><span class="spaces">    </span><span class="istickedoff">Reg.deleteEntry reg (Reg._he_id e)</span>
+<span class="lineno">  504 </span><span class="spaces">    </span><span class="istickedoff">pure (Reg.harnessIdToText (Reg._he_id e), sidOf e)</span>
+<span class="lineno">  505 </span><span class="spaces">  </span><span class="istickedoff">let evictedKeys = map fst evictedSids</span>
+<span class="lineno">  506 </span><span class="spaces">      </span><span class="istickedoff">snapMap'    = foldr Map.delete snapMap evictedKeys</span>
+<span class="lineno">  507 </span><span class="spaces">  </span><span class="istickedoff">pure (snapMap', map snd evictedSids)</span>
+<span class="lineno">  508 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  509 </span><span class="spaces">    </span><span class="istickedoff">-- Each result is ((keyText, TickObservation), ObservedHarness). The held and</span>
+<span class="lineno">  510 </span><span class="spaces">    </span><span class="istickedoff">-- orphaned paths take no fresh capture, so '_to_capture' is 'Nothing'.</span>
+<span class="lineno">  511 </span><span class="spaces">    </span><span class="istickedoff">mkObservedHeld :: Reg.HarnessEntry -&gt; ((Text, TickObservation), Reg.ObservedHarness)</span>
+<span class="lineno">  512 </span><span class="spaces">    </span><span class="istickedoff">mkObservedHeld e =</span>
+<span class="lineno">  513 </span><span class="spaces">      </span><span class="istickedoff">let live = Reg._he_liveness e</span>
+<span class="lineno">  514 </span><span class="spaces">      </span><span class="istickedoff">in ( (Reg.harnessIdToText (Reg._he_id e), tickObs e live Nothing)</span>
+<span class="lineno">  515 </span><span class="spaces">         </span><span class="istickedoff">, (baseObserved e live) { Reg._oh_stale = True } )</span>
+<span class="lineno">  516 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  517 </span><span class="spaces">    </span><span class="istickedoff">mkObservedOrphaned :: Reg.HarnessEntry -&gt; ((Text, TickObservation), Reg.ObservedHarness)</span>
+<span class="lineno">  518 </span><span class="spaces">    </span><span class="istickedoff">mkObservedOrphaned e =</span>
+<span class="lineno">  519 </span><span class="spaces">      </span><span class="istickedoff">( (Reg.harnessIdToText (Reg._he_id e), tickObs e Reg.LivenessOrphaned Nothing)</span>
+<span class="lineno">  520 </span><span class="spaces">      </span><span class="istickedoff">, (baseObserved e Reg.LivenessOrphaned)</span>
+<span class="lineno">  521 </span><span class="spaces">          </span><span class="istickedoff">{ Reg._oh_liveness = Reg.LivenessOrphaned</span>
+<span class="lineno">  522 </span><span class="spaces">            </span><span class="istickedoff">-- The corroborated window is absent this tick: advance the</span>
+<span class="lineno">  523 </span><span class="spaces">            </span><span class="istickedoff">-- consecutive-orphaned counter so the grace policy can fire.</span>
+<span class="lineno">  524 </span><span class="spaces">          </span><span class="istickedoff">, Reg._oh_orphanedTicks = Reg._he_orphanedTicks e + 1</span>
+<span class="lineno">  525 </span><span class="spaces">          </span><span class="istickedoff">} )</span>
+<span class="lineno">  526 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  527 </span><span class="spaces">    </span><span class="istickedoff">mkObservedLive</span>
+<span class="lineno">  528 </span><span class="spaces">      </span><span class="istickedoff">:: Reg.HarnessEntry -&gt; TmuxWindowRow -&gt; Reg.Liveness -&gt; Maybe Text</span>
+<span class="lineno">  529 </span><span class="spaces">      </span><span class="istickedoff">-&gt; ((Text, TickObservation), Reg.ObservedHarness)</span>
+<span class="lineno">  530 </span><span class="spaces">    </span><span class="istickedoff">mkObservedLive e row liveness mCap =</span>
+<span class="lineno">  531 </span><span class="spaces">      </span><span class="istickedoff">let extMod = _twr_windowName row /= Reg._he_windowName e</span>
+<span class="lineno">  532 </span><span class="spaces">      </span><span class="istickedoff">in ( (Reg.harnessIdToText (Reg._he_id e), tickObs e liveness mCap)</span>
+<span class="lineno">  533 </span><span class="spaces">         </span><span class="istickedoff">, Reg.ObservedHarness</span>
+<span class="lineno">  534 </span><span class="spaces">             </span><span class="istickedoff">{ Reg._oh_id          = Reg._he_id e</span>
+<span class="lineno">  535 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_session     = Reg._he_session e</span>
+<span class="lineno">  536 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_windowName  = _twr_windowName row</span>
+<span class="lineno">  537 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_shellPid    = _twr_panePid row</span>
+<span class="lineno">  538 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_harnessPid  = Reg._he_harnessPid e</span>
+<span class="lineno">  539 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_liveness    = liveness</span>
+<span class="lineno">  540 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_extModified = Reg._he_extModified e || extMod</span>
+<span class="lineno">  541 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_stale       = False</span>
+<span class="lineno">  542 </span><span class="spaces">               </span><span class="istickedoff">-- The window is present + corroborated this tick: the entry is</span>
+<span class="lineno">  543 </span><span class="spaces">               </span><span class="istickedoff">-- live again, so reset the consecutive-orphaned counter.</span>
+<span class="lineno">  544 </span><span class="spaces">             </span><span class="istickedoff">, Reg._oh_orphanedTicks = 0</span>
+<span class="lineno">  545 </span><span class="spaces">             </span><span class="istickedoff">} )</span>
+<span class="lineno">  546 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  547 </span><span class="spaces">    </span><span class="istickedoff">-- A held-state observed record reusing the entry's current coordinate.</span>
+<span class="lineno">  548 </span><span class="spaces">    </span><span class="istickedoff">baseObserved :: Reg.HarnessEntry -&gt; Reg.Liveness -&gt; Reg.ObservedHarness</span>
+<span class="lineno">  549 </span><span class="spaces">    </span><span class="istickedoff">baseObserved e liveness = Reg.ObservedHarness</span>
+<span class="lineno">  550 </span><span class="spaces">      </span><span class="istickedoff">{ Reg._oh_id          = Reg._he_id e</span>
+<span class="lineno">  551 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_session     = Reg._he_session e</span>
+<span class="lineno">  552 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_windowName  = Reg._he_windowName e</span>
+<span class="lineno">  553 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_shellPid    = Reg._he_shellPid e</span>
+<span class="lineno">  554 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_harnessPid  = Reg._he_harnessPid e</span>
+<span class="lineno">  555 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_liveness    = liveness</span>
+<span class="lineno">  556 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_extModified = Reg._he_extModified e</span>
+<span class="lineno">  557 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_stale       = False</span>
+<span class="lineno">  558 </span><span class="spaces">        </span><span class="istickedoff">-- Hold the current counter: a held (stale) observation neither advances</span>
+<span class="lineno">  559 </span><span class="spaces">        </span><span class="istickedoff">-- nor resets the grace clock; only a definite Orphaned/live tick does.</span>
+<span class="lineno">  560 </span><span class="spaces">      </span><span class="istickedoff">, Reg._oh_orphanedTicks = Reg._he_orphanedTicks e</span>
+<span class="lineno">  561 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">  562 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  563 </span><span class="spaces">    </span><span class="istickedoff">tickObs :: Reg.HarnessEntry -&gt; Reg.Liveness -&gt; Maybe Text -&gt; TickObservation</span>
+<span class="lineno">  564 </span><span class="spaces">    </span><span class="istickedoff">tickObs e live mCap = TickObservation</span>
+<span class="lineno">  565 </span><span class="spaces">      </span><span class="istickedoff">{ _to_sessionId = sidOf e</span>
+<span class="lineno">  566 </span><span class="spaces">      </span><span class="istickedoff">, _to_liveness  = live</span>
+<span class="lineno">  567 </span><span class="spaces">      </span><span class="istickedoff">, _to_capture   = mCap</span>
+<span class="lineno">  568 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">  569 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  570 </span><span class="spaces">    </span><span class="istickedoff">sidOf :: Reg.HarnessEntry -&gt; Text</span>
+<span class="lineno">  571 </span><span class="spaces">    </span><span class="istickedoff">sidOf e = fromMaybe (Reg._he_label e) (Reg._he_sessionId e)</span></span>
+<span class="lineno">  572 </span>
+<span class="lineno">  573 </span>-- | Classify a corroborated window's liveness, capturing the screen only when
+<span class="lineno">  574 </span>-- the window is alive (not pane_dead and the harness PID is present). A
+<span class="lineno">  575 </span>-- @pane_dead@ window is NEVER captured (D5.4\/D5.5).
+<span class="lineno">  576 </span>--
+<span class="lineno">  577 </span>-- Takes the entry's PREVIOUS raw capture (the stability gate input) and returns
+<span class="lineno">  578 </span>-- @(liveness, capture-taken-this-tick)@ so the loop can carry the capture
+<span class="lineno">  579 </span>-- forward as the next tick's @prevCap@. A failed/skipped capture returns
+<span class="lineno">  580 </span>-- 'Nothing', which disables the stability gate for that tick.
+<span class="lineno">  581 </span>classifyRow
+<span class="lineno">  582 </span>  :: ReconcileDeps
+<span class="lineno">  583 </span>  -&gt; Reg.HarnessEntry
+<span class="lineno">  584 </span>  -&gt; TmuxWindowRow
+<span class="lineno">  585 </span>  -&gt; Maybe Text                    -- ^ previous capture for this entry
+<span class="lineno">  586 </span>  -&gt; IO (Reg.Liveness, Maybe Text)
+<span class="lineno">  587 </span><span class="decl"><span class="istickedoff">classifyRow deps e row prevCap</span>
+<span class="lineno">  588 </span><span class="spaces">  </span><span class="istickedoff">| _twr_paneDead row = pure (Reg.LivenessExited, <span class="nottickedoff">Nothing</span>)</span>
+<span class="lineno">  589 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">  590 </span><span class="spaces">      </span><span class="istickedoff">-- Liveness of the agent process: re-derive it by descending from the live</span>
+<span class="lineno">  591 </span><span class="spaces">      </span><span class="istickedoff">-- shell PID (the row's @#{pane_pid}@). We only bother when we recorded a</span>
+<span class="lineno">  592 </span><span class="spaces">      </span><span class="istickedoff">-- harness PID at spawn (a provenance-less/legacy entry has none, so we</span>
+<span class="lineno">  593 </span><span class="spaces">      </span><span class="istickedoff">-- assume alive and rely on @pane_dead@ for Exited).</span>
+<span class="lineno">  594 </span><span class="spaces">      </span><span class="istickedoff">alive &lt;- case (Reg._he_harnessPid e, _twr_panePid row) of</span>
+<span class="lineno">  595 </span><span class="spaces">        </span><span class="istickedoff">(Just _, Just shellPid) -&gt; _rd_harnessAlive deps shellPid</span>
+<span class="lineno">  596 </span><span class="spaces">        </span><span class="istickedoff">_                       -&gt; pure True</span>
+<span class="lineno">  597 </span><span class="spaces">      </span><span class="istickedoff">if not alive</span>
+<span class="lineno">  598 </span><span class="spaces">        </span><span class="istickedoff">then pure (Reg.LivenessExited, Nothing)</span>
+<span class="lineno">  599 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  600 </span><span class="spaces">          </span><span class="istickedoff">mCap &lt;- _rd_capture deps <span class="nottickedoff">(Reg._he_session e)</span> (_twr_windowName row)</span>
+<span class="lineno">  601 </span><span class="spaces">          </span><span class="istickedoff">let cap    = fromMaybe <span class="nottickedoff">&quot;&quot;</span> mCap</span>
+<span class="lineno">  602 </span><span class="spaces">              </span><span class="istickedoff">-- The screen is &quot;stable&quot; only when we got a capture this tick AND</span>
+<span class="lineno">  603 </span><span class="spaces">              </span><span class="istickedoff">-- it is byte-identical to the previous tick's capture.</span>
+<span class="lineno">  604 </span><span class="spaces">              </span><span class="istickedoff">stable = isJust mCap &amp;&amp; mCap == prevCap</span>
+<span class="lineno">  605 </span><span class="spaces">              </span><span class="istickedoff">obs    = Obs.observerFor (Reg._he_flavour e)</span>
+<span class="lineno">  606 </span><span class="spaces">          </span><span class="istickedoff">pure (classifyFromObserver obs False True stable cap, mCap)</span></span>
+<span class="lineno">  607 </span>
+<span class="lineno">  608 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  609 </span>-- The loop
+<span class="lineno">  610 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  611 </span>
+<span class="lineno">  612 </span>-- | Production reconcile loop: 2-second cadence, real tmux deps.
+<span class="lineno">  613 </span>runReconcileLoop :: StreamBroker -&gt; Reg.HarnessRegistry -&gt; LogHandle -&gt; IO ()
+<span class="lineno">  614 </span><span class="decl"><span class="istickedoff">runReconcileLoop broker reg =</span>
+<span class="lineno">  615 </span><span class="spaces">  </span><span class="istickedoff">runReconcileLoopWith defaultTickMicros <span class="nottickedoff">defaultReconcileDeps</span> <span class="nottickedoff">reg</span> <span class="nottickedoff">broker</span></span></span>
+<span class="lineno">  616 </span>
+<span class="lineno">  617 </span>-- | Production tick interval: 2 seconds (matches the legacy probe cadence).
+<span class="lineno">  618 </span>defaultTickMicros :: Int
+<span class="lineno">  619 </span><span class="decl"><span class="istickedoff">defaultTickMicros = 2_000_000</span></span>
+<span class="lineno">  620 </span>
+<span class="lineno">  621 </span>-- | The orphan grace window, in consecutive reconcile ticks (design §5\/§10
+<span class="lineno">  622 </span>-- Q2). Once an entry has been classified 'Reg.LivenessOrphaned' for this many
+<span class="lineno">  623 </span>-- ticks in a row (i.e. '_he_orphanedTicks' reaches this value) the reconcile
+<span class="lineno">  624 </span>-- loop auto-evicts it from the registry and the legacy harness map and emits a
+<span class="lineno">  625 </span>-- final disappearance event — but never deletes @session.json@.
+<span class="lineno">  626 </span>--
+<span class="lineno">  627 </span>-- We count ticks rather than wall-clock so the policy is deterministic and
+<span class="lineno">  628 </span>-- test-injectable. At the production 2-second 'defaultTickMicros' cadence, 15
+<span class="lineno">  629 </span>-- ticks ≈ 30 seconds of continuous orphaning before eviction — long enough to
+<span class="lineno">  630 </span>-- ride out a transient tmux-server blip (which is held '_he_stale' and does
+<span class="lineno">  631 </span>-- NOT advance the counter), short enough that a genuinely gone harness clears
+<span class="lineno">  632 </span>-- from Active Tabs promptly.
+<span class="lineno">  633 </span>defaultOrphanGraceTicks :: Int
+<span class="lineno">  634 </span><span class="decl"><span class="istickedoff">defaultOrphanGraceTicks = 15</span></span>
+<span class="lineno">  635 </span>
+<span class="lineno">  636 </span>-- | The reconcile loop with an explicit tick interval + injected deps. The
+<span class="lineno">  637 </span>-- first tick establishes the baseline (emits nothing); from the second tick on,
+<span class="lineno">  638 </span>-- one 'ActivityChanged' is published per entry whose liveness changed
+<span class="lineno">  639 </span>-- (including disappearances). Resilient: a transient sweep failure is absorbed
+<span class="lineno">  640 </span>-- by 'reconcileTick' (entries held stale); the loop only exits on
+<span class="lineno">  641 </span>-- 'AsyncCancelled', which it re-raises.
+<span class="lineno">  642 </span>runReconcileLoopWith
+<span class="lineno">  643 </span>  :: Int
+<span class="lineno">  644 </span>  -&gt; ReconcileDeps
+<span class="lineno">  645 </span>  -&gt; Reg.HarnessRegistry
+<span class="lineno">  646 </span>  -&gt; StreamBroker
+<span class="lineno">  647 </span>  -&gt; LogHandle
+<span class="lineno">  648 </span>  -&gt; IO ()
+<span class="lineno">  649 </span><span class="decl"><span class="istickedoff">runReconcileLoopWith tickMicros deps reg broker logger = handle outer $ do</span>
+<span class="lineno">  650 </span><span class="spaces">  </span><span class="istickedoff">threadDelay tickMicros</span>
+<span class="lineno">  651 </span><span class="spaces">  </span><span class="istickedoff">-- Baseline tick: emits no transitions. Any eviction on this first tick still</span>
+<span class="lineno">  652 </span><span class="spaces">  </span><span class="istickedoff">-- emits its final disappearance event (an eviction is not a diff transition).</span>
+<span class="lineno">  653 </span><span class="spaces">  </span><span class="istickedoff">-- The first tick has no previous captures, so the stability gate sees nothing</span>
+<span class="lineno">  654 </span><span class="spaces">  </span><span class="istickedoff">-- stable (a fresh idle frame reads Thinking until a second identical capture).</span>
+<span class="lineno">  655 </span><span class="spaces">  </span><span class="istickedoff">(initial, evicted0) &lt;- reconcileTick deps reg logger Map.empty</span>
+<span class="lineno">  656 </span><span class="spaces">  </span><span class="istickedoff">publishEvictions evicted0</span>
+<span class="lineno">  657 </span><span class="spaces">  </span><span class="istickedoff">-- The baseline tick has no previous liveness, so it is not a &quot;transition&quot;</span>
+<span class="lineno">  658 </span><span class="spaces">  </span><span class="istickedoff">-- and never records a Response; turn tracking begins on the second tick.</span>
+<span class="lineno">  659 </span><span class="spaces">  </span><span class="istickedoff">loop (livenessSnap initial) (capSnap initial) Map.empty</span>
+<span class="lineno">  660 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  661 </span><span class="spaces">    </span><span class="istickedoff">loop prev prevCaps turnMap = do</span>
+<span class="lineno">  662 </span><span class="spaces">      </span><span class="istickedoff">threadDelay tickMicros</span>
+<span class="lineno">  663 </span><span class="spaces">      </span><span class="istickedoff">(obs, evicted) &lt;- reconcileTick deps reg logger prevCaps</span>
+<span class="lineno">  664 </span><span class="spaces">      </span><span class="istickedoff">let next = livenessSnap obs</span>
+<span class="lineno">  665 </span><span class="spaces">      </span><span class="istickedoff">forM_ (diffLiveness prev next) $ \(sid, liveness) -&gt;</span>
+<span class="lineno">  666 </span><span class="spaces">        </span><span class="istickedoff">_streamBroker_publish broker</span>
+<span class="lineno">  667 </span><span class="spaces">          </span><span class="istickedoff">(ActivityChanged (SessionId sid) (SaHarnessStatus (livenessToActivity liveness)))</span>
+<span class="lineno">  668 </span><span class="spaces">      </span><span class="istickedoff">-- One final disappearance event per auto-evicted entry. The entry was</span>
+<span class="lineno">  669 </span><span class="spaces">      </span><span class="istickedoff">-- already Orphaned, so the diff above does NOT re-emit it; this guarantees</span>
+<span class="lineno">  670 </span><span class="spaces">      </span><span class="istickedoff">-- the frontend sees it leave even though no liveness transition occurred.</span>
+<span class="lineno">  671 </span><span class="spaces">      </span><span class="istickedoff">publishEvictions evicted</span>
+<span class="lineno">  672 </span><span class="spaces">      </span><span class="istickedoff">-- Output watcher (WU1): a SINGLE content-driven pass over each entry's</span>
+<span class="lineno">  673 </span><span class="spaces">      </span><span class="istickedoff">-- whole-turn snapshot streams 'EntryUpdated's as the turn grows and</span>
+<span class="lineno">  674 </span><span class="spaces">      </span><span class="istickedoff">-- finalizes (records ONE Response) on content stabilization or a terminal</span>
+<span class="lineno">  675 </span><span class="spaces">      </span><span class="istickedoff">-- transition — independent of whether a Thinking frame was ever sampled.</span>
+<span class="lineno">  676 </span><span class="spaces">      </span><span class="istickedoff">turnMap' &lt;- stepTurns obs turnMap</span>
+<span class="lineno">  677 </span><span class="spaces">      </span><span class="istickedoff">loop next (capSnap obs) turnMap'</span>
+<span class="lineno">  678 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  679 </span><span class="spaces">    </span><span class="istickedoff">-- One content-driven turn-watcher pass. For every live entry (a bound id</span>
+<span class="lineno">  680 </span><span class="spaces">    </span><span class="istickedoff">-- whose liveness this tick is Thinking\/Idle\/AwaitingInput) we snapshot the</span>
+<span class="lineno">  681 </span><span class="spaces">    </span><span class="istickedoff">-- whole turn and drive streaming + finalize off the CONTENT changing and</span>
+<span class="lineno">  682 </span><span class="spaces">    </span><span class="istickedoff">-- stabilizing, using liveness only as a guard against premature finalize.</span>
+<span class="lineno">  683 </span><span class="spaces">    </span><span class="istickedoff">-- Then, for any id with an ACTIVE turn that has gone terminal</span>
+<span class="lineno">  684 </span><span class="spaces">    </span><span class="istickedoff">-- (Exited\/Orphaned) or vanished from this tick's observation, we finalize</span>
+<span class="lineno">  685 </span><span class="spaces">    </span><span class="istickedoff">-- from the last streamed text. Each id's step is wrapped in</span>
+<span class="lineno">  686 </span><span class="spaces">    </span><span class="istickedoff">-- 'try @SomeException' (D5.3 resilience): 'AsyncCancelled' is re-raised; any</span>
+<span class="lineno">  687 </span><span class="spaces">    </span><span class="istickedoff">-- other failure is logged + skipped so siblings proceed and the loop lives.</span>
+<span class="lineno">  688 </span><span class="spaces">    </span><span class="istickedoff">stepTurns obs turnMap = do</span>
+<span class="lineno">  689 </span><span class="spaces">      </span><span class="istickedoff">tm1 &lt;- foldM stepLive turnMap (streamableIds obs)</span>
+<span class="lineno">  690 </span><span class="spaces">      </span><span class="istickedoff">foldM stepTerminal tm1 (terminalIds obs tm1)</span>
+<span class="lineno">  691 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  692 </span><span class="spaces">        </span><span class="istickedoff">stepLive tm (idText, liveness) =</span>
+<span class="lineno">  693 </span><span class="spaces">          </span><span class="istickedoff">withBoundEntry tm idText $ \e realSid _hh -&gt; do</span>
+<span class="lineno">  694 </span><span class="spaces">            </span><span class="istickedoff">-- Latch: select the content provider for this entry. The selection</span>
+<span class="lineno">  695 </span><span class="spaces">            </span><span class="istickedoff">-- is a deterministic function of the entry, so it is the same</span>
+<span class="lineno">  696 </span><span class="spaces">            </span><span class="istickedoff">-- provider for every tick of the active turn (no mid-turn switch).</span>
+<span class="lineno">  697 </span><span class="spaces">            </span><span class="istickedoff">provider &lt;- _rd_providerFor deps e</span>
+<span class="lineno">  698 </span><span class="spaces">            </span><span class="istickedoff">r &lt;- try @SomeException (stepLiveEntry tm idText realSid provider liveness)</span>
+<span class="lineno">  699 </span><span class="spaces">            </span><span class="istickedoff">resolveTry &quot;update&quot; idText tm r</span>
+<span class="lineno">  700 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  701 </span><span class="spaces">        </span><span class="istickedoff">stepTerminal tm (idText, st) =</span>
+<span class="lineno">  702 </span><span class="spaces">          </span><span class="istickedoff">withBoundEntry tm idText $ \_e realSid _hh -&gt;</span>
+<span class="lineno">  703 </span><span class="spaces">            </span><span class="istickedoff">stepTerminalEntry tm idText realSid st</span>
+<span class="lineno">  704 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  705 </span><span class="spaces">    </span><span class="istickedoff">-- The content step for one live, bound entry. Snapshot the whole turn from</span>
+<span class="lineno">  706 </span><span class="spaces">    </span><span class="istickedoff">-- the selected provider — @(turnText, finalized)@ — then:</span>
+<span class="lineno">  707 </span><span class="spaces">    </span><span class="istickedoff">--   * empty\/whitespace → no-op (between turns);</span>
+<span class="lineno">  708 </span><span class="spaces">    </span><span class="istickedoff">--   * new content (no state) → start turn (provider id or mint), publish, active;</span>
+<span class="lineno">  709 </span><span class="spaces">    </span><span class="istickedoff">--   * changed + active → publish under the SAME id, stable 0 (then, if the</span>
+<span class="lineno">  710 </span><span class="spaces">    </span><span class="istickedoff">--     provider authoritatively finalized this snapshot, record + retire);</span>
+<span class="lineno">  711 </span><span class="spaces">    </span><span class="istickedoff">--   * changed + inactive (previous turn done) → start a NEW turn;</span>
+<span class="lineno">  712 </span><span class="spaces">    </span><span class="istickedoff">--   * unchanged → stable+1; finalize the active turn when the provider says</span>
+<span class="lineno">  713 </span><span class="spaces">    </span><span class="istickedoff">--     @finalized@ (AUTHORITATIVE — bypasses the idle-stability guard) OR when</span>
+<span class="lineno">  714 </span><span class="spaces">    </span><span class="istickedoff">--     it is idle-stable (liveness ∈ {Idle,AwaitingInput} &amp;&amp; stable ≥ N). The</span>
+<span class="lineno">  715 </span><span class="spaces">    </span><span class="istickedoff">--     tmux provider never finalizes, so its idle-stability behavior is</span>
+<span class="lineno">  716 </span><span class="spaces">    </span><span class="istickedoff">--     unchanged.</span>
+<span class="lineno">  717 </span><span class="spaces">    </span><span class="istickedoff">stepLiveEntry tm idText realSid provider liveness = do</span>
+<span class="lineno">  718 </span><span class="spaces">      </span><span class="istickedoff">(turn, finalized) &lt;- _tp_snapshot provider</span>
+<span class="lineno">  719 </span><span class="spaces">      </span><span class="istickedoff">if T.null (T.strip turn)</span>
+<span class="lineno">  720 </span><span class="spaces">        </span><span class="istickedoff">then pure tm</span>
+<span class="lineno">  721 </span><span class="spaces">        </span><span class="istickedoff">else case Map.lookup idText tm of</span>
+<span class="lineno">  722 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; startTurn tm idText realSid provider turn finalized</span>
+<span class="lineno">  723 </span><span class="spaces">          </span><span class="istickedoff">Just st</span>
+<span class="lineno">  724 </span><span class="spaces">            </span><span class="istickedoff">| turn /= _tsLastText st -&gt;</span>
+<span class="lineno">  725 </span><span class="spaces">                </span><span class="istickedoff">if _tsActive st</span>
+<span class="lineno">  726 </span><span class="spaces">                  </span><span class="istickedoff">then do</span>
+<span class="lineno">  727 </span><span class="spaces">                    </span><span class="istickedoff">-- Changed mid-turn: stream under the same stable id.</span>
+<span class="lineno">  728 </span><span class="spaces">                    </span><span class="istickedoff">_rd_publishUpdate deps (SessionId realSid)</span>
+<span class="lineno">  729 </span><span class="spaces">                      </span><span class="istickedoff">(mkTurnEntry (_tsTurnId st) (_tsStarted st) turn)</span>
+<span class="lineno">  730 </span><span class="spaces">                    </span><span class="istickedoff">let st' = st { _tsLastText = turn, _tsStable = 0 }</span>
+<span class="lineno">  731 </span><span class="spaces">                    </span><span class="istickedoff">if <span class="tickonlyfalse">finalized</span></span>
+<span class="lineno">  732 </span><span class="spaces">                      </span><span class="istickedoff">then <span class="nottickedoff">finalizeRecord realSid idText</span></span>
+<span class="lineno">  733 </span><span class="spaces">                             </span><span class="istickedoff"><span class="nottickedoff">(Map.insert idText st' { _tsActive = False } tm)</span></span>
+<span class="lineno">  734 </span><span class="spaces">                             </span><span class="istickedoff"><span class="nottickedoff">(mkTurnEntry (_tsTurnId st) (_tsStarted st) turn)</span></span>
+<span class="lineno">  735 </span><span class="spaces">                      </span><span class="istickedoff">else pure (Map.insert idText st' tm)</span>
+<span class="lineno">  736 </span><span class="spaces">                  </span><span class="istickedoff">-- A previous turn finalized; different content is a NEW turn.</span>
+<span class="lineno">  737 </span><span class="spaces">                  </span><span class="istickedoff">else startTurn tm idText <span class="nottickedoff">realSid</span> provider turn finalized</span>
+<span class="lineno">  738 </span><span class="spaces">            </span><span class="istickedoff">| _tsActive st</span>
+<span class="lineno">  739 </span><span class="spaces">            </span><span class="istickedoff">, finalized</span>
+<span class="lineno">  740 </span><span class="spaces">              </span><span class="istickedoff">|| ( liveness `elem` [Reg.LivenessIdle, Reg.LivenessAwaitingInput]</span>
+<span class="lineno">  741 </span><span class="spaces">                   </span><span class="istickedoff">&amp;&amp; _tsStable st + 1 &gt;= defaultSettleStableTicks ) -&gt;</span>
+<span class="lineno">  742 </span><span class="spaces">                </span><span class="istickedoff">-- Authoritative finalize (provider @finalized@, any liveness) OR</span>
+<span class="lineno">  743 </span><span class="spaces">                </span><span class="istickedoff">-- unchanged + idle-stable: finalize the active turn exactly once.</span>
+<span class="lineno">  744 </span><span class="spaces">                </span><span class="istickedoff">-- Always mark inactive (success OR record-failure) so we never</span>
+<span class="lineno">  745 </span><span class="spaces">                </span><span class="istickedoff">-- re-record / log-spam on the next tick.</span>
+<span class="lineno">  746 </span><span class="spaces">                </span><span class="istickedoff">finalizeRecord realSid idText</span>
+<span class="lineno">  747 </span><span class="spaces">                  </span><span class="istickedoff">(Map.insert idText st { _tsStable = _tsStable st + 1, _tsActive = False } tm)</span>
+<span class="lineno">  748 </span><span class="spaces">                  </span><span class="istickedoff">(mkTurnEntry (_tsTurnId st) (_tsStarted st) turn)</span>
+<span class="lineno">  749 </span><span class="spaces">            </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt;</span>
+<span class="lineno">  750 </span><span class="spaces">                </span><span class="istickedoff">-- Unchanged but not yet finalizable (still Thinking, or not yet</span>
+<span class="lineno">  751 </span><span class="spaces">                </span><span class="istickedoff">-- stable enough, or already retired): just advance the counter.</span>
+<span class="lineno">  752 </span><span class="spaces">                </span><span class="istickedoff">pure (Map.insert idText st { _tsStable = _tsStable st + 1 } tm)</span>
+<span class="lineno">  753 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  754 </span><span class="spaces">    </span><span class="istickedoff">-- Record a turn's final 'Response', wrapped in 'try @SomeException'</span>
+<span class="lineno">  755 </span><span class="spaces">    </span><span class="istickedoff">-- (D5.3 resilience). The caller passes the ALREADY-retired (inactive) turn</span>
+<span class="lineno">  756 </span><span class="spaces">    </span><span class="istickedoff">-- map so that, whether the record succeeds or throws a non-async error, the</span>
+<span class="lineno">  757 </span><span class="spaces">    </span><span class="istickedoff">-- turn is not retried on the next tick (no log spam). 'AsyncCancelled' is</span>
+<span class="lineno">  758 </span><span class="spaces">    </span><span class="istickedoff">-- always re-raised; any other failure is logged under the</span>
+<span class="lineno">  759 </span><span class="spaces">    </span><span class="istickedoff">-- &quot;settle snapshot\/record&quot; label and the inactive map is returned.</span>
+<span class="lineno">  760 </span><span class="spaces">    </span><span class="istickedoff">finalizeRecord realSid idText retiredTm entry = do</span>
+<span class="lineno">  761 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- try @SomeException (_rd_recordResponse deps (SessionId realSid) entry)</span>
+<span class="lineno">  762 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  763 </span><span class="spaces">        </span><span class="istickedoff">Left err</span>
+<span class="lineno">  764 </span><span class="spaces">          </span><span class="istickedoff">| Just AsyncCancelled &lt;- fromException err -&gt; throwIO err</span>
+<span class="lineno">  765 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; do</span>
+<span class="lineno">  766 </span><span class="spaces">              </span><span class="istickedoff">_lh_logWarn logger</span>
+<span class="lineno">  767 </span><span class="spaces">                </span><span class="istickedoff">(&quot;reconcile: settle snapshot/record for &quot; &lt;&gt; idText</span>
+<span class="lineno">  768 </span><span class="spaces">                   </span><span class="istickedoff">&lt;&gt; &quot; failed: &quot; &lt;&gt; T.pack (show err) &lt;&gt; &quot; — skipping&quot;)</span>
+<span class="lineno">  769 </span><span class="spaces">              </span><span class="istickedoff">pure retiredTm</span>
+<span class="lineno">  770 </span><span class="spaces">        </span><span class="istickedoff">Right () -&gt; pure retiredTm</span>
+<span class="lineno">  771 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  772 </span><span class="spaces">    </span><span class="istickedoff">-- Start a turn: take the stable id+timestamp from the provider's</span>
+<span class="lineno">  773 </span><span class="spaces">    </span><span class="istickedoff">-- '_tp_turnId' if it supplies one (the log provider derives both from the</span>
+<span class="lineno">  774 </span><span class="spaces">    </span><span class="istickedoff">-- JSONL event), else mint via '_rd_mintTurn' (the tmux path, unchanged).</span>
+<span class="lineno">  775 </span><span class="spaces">    </span><span class="istickedoff">-- Publish the first update. If the provider already finalized this first</span>
+<span class="lineno">  776 </span><span class="spaces">    </span><span class="istickedoff">-- snapshot, record it once and retire; otherwise insert it active.</span>
+<span class="lineno">  777 </span><span class="spaces">    </span><span class="istickedoff">startTurn tm idText realSid provider turn finalized = do</span>
+<span class="lineno">  778 </span><span class="spaces">      </span><span class="istickedoff">mDerived &lt;- _tp_turnId provider</span>
+<span class="lineno">  779 </span><span class="spaces">      </span><span class="istickedoff">(turnId, ts) &lt;- maybe (_rd_mintTurn deps) pure mDerived</span>
+<span class="lineno">  780 </span><span class="spaces">      </span><span class="istickedoff">_rd_publishUpdate deps (SessionId realSid) (mkTurnEntry turnId ts turn)</span>
+<span class="lineno">  781 </span><span class="spaces">      </span><span class="istickedoff">if finalized</span>
+<span class="lineno">  782 </span><span class="spaces">        </span><span class="istickedoff">then finalizeRecord realSid <span class="nottickedoff">idText</span></span>
+<span class="lineno">  783 </span><span class="spaces">               </span><span class="istickedoff">(Map.insert idText (TurnState turnId ts turn 0 False) tm)</span>
+<span class="lineno">  784 </span><span class="spaces">               </span><span class="istickedoff">(mkTurnEntry turnId ts turn)</span>
+<span class="lineno">  785 </span><span class="spaces">        </span><span class="istickedoff">else pure (Map.insert idText (TurnState turnId ts turn 0 True) tm)</span>
+<span class="lineno">  786 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  787 </span><span class="spaces">    </span><span class="istickedoff">-- Terminal finalize for one bound entry whose ACTIVE turn went terminal or</span>
+<span class="lineno">  788 </span><span class="spaces">    </span><span class="istickedoff">-- vanished. 'terminalIds' only selects active turns, and a turn is only ever</span>
+<span class="lineno">  789 </span><span class="spaces">    </span><span class="istickedoff">-- made active via 'startTurn' (which requires non-empty content), so an</span>
+<span class="lineno">  790 </span><span class="spaces">    </span><span class="istickedoff">-- active turn always has a non-empty '_tsLastText' to finalize from. Record</span>
+<span class="lineno">  791 </span><span class="spaces">    </span><span class="istickedoff">-- from that last streamed text and retire. (A harness that exits having</span>
+<span class="lineno">  792 </span><span class="spaces">    </span><span class="istickedoff">-- streamed nothing has NO active turn state at all, so it is not selected by</span>
+<span class="lineno">  793 </span><span class="spaces">    </span><span class="istickedoff">-- 'terminalIds' and records nothing — see DoD #6.)</span>
+<span class="lineno">  794 </span><span class="spaces">    </span><span class="istickedoff">stepTerminalEntry tm idText realSid st =</span>
+<span class="lineno">  795 </span><span class="spaces">      </span><span class="istickedoff">finalizeRecord realSid <span class="nottickedoff">idText</span></span>
+<span class="lineno">  796 </span><span class="spaces">        </span><span class="istickedoff">(Map.insert idText st { _tsActive = False } tm)</span>
+<span class="lineno">  797 </span><span class="spaces">        </span><span class="istickedoff">(mkTurnEntry (_tsTurnId st) (_tsStarted st) (_tsLastText st))</span>
+<span class="lineno">  798 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  799 </span><span class="spaces">    </span><span class="istickedoff">-- Look up a bound entry (a real sessionId + an attached handle) and run the</span>
+<span class="lineno">  800 </span><span class="spaces">    </span><span class="istickedoff">-- step; an unbound\/handle-less\/unparseable id is skipped (returns @tm@).</span>
+<span class="lineno">  801 </span><span class="spaces">    </span><span class="istickedoff">withBoundEntry tm idText k =</span>
+<span class="lineno">  802 </span><span class="spaces">      </span><span class="istickedoff">case Reg.parseHarnessId idText of</span>
+<span class="lineno">  803 </span><span class="spaces">        </span><span class="istickedoff">Nothing  -&gt; <span class="nottickedoff">pure tm</span></span>
+<span class="lineno">  804 </span><span class="spaces">        </span><span class="istickedoff">Just hid -&gt; do</span>
+<span class="lineno">  805 </span><span class="spaces">          </span><span class="istickedoff">mEntry &lt;- Reg.lookupById reg hid</span>
+<span class="lineno">  806 </span><span class="spaces">          </span><span class="istickedoff">case mEntry of</span>
+<span class="lineno">  807 </span><span class="spaces">            </span><span class="istickedoff">Just e</span>
+<span class="lineno">  808 </span><span class="spaces">              </span><span class="istickedoff">| Just realSid &lt;- Reg._he_sessionId e</span>
+<span class="lineno">  809 </span><span class="spaces">              </span><span class="istickedoff">, Just hh      &lt;- Reg._he_handle e -&gt; k e realSid <span class="nottickedoff">hh</span></span>
+<span class="lineno">  810 </span><span class="spaces">            </span><span class="istickedoff">_ -&gt; pure tm</span>
+<span class="lineno">  811 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  812 </span><span class="spaces">    </span><span class="istickedoff">-- Resolve a per-entry 'try': re-raise 'AsyncCancelled', log + fall back to</span>
+<span class="lineno">  813 </span><span class="spaces">    </span><span class="istickedoff">-- the unchanged turn map on any other error, otherwise take the new map.</span>
+<span class="lineno">  814 </span><span class="spaces">    </span><span class="istickedoff">resolveTry</span>
+<span class="lineno">  815 </span><span class="spaces">      </span><span class="istickedoff">:: Text</span>
+<span class="lineno">  816 </span><span class="spaces">      </span><span class="istickedoff">-&gt; Text</span>
+<span class="lineno">  817 </span><span class="spaces">      </span><span class="istickedoff">-&gt; Map Text TurnState</span>
+<span class="lineno">  818 </span><span class="spaces">      </span><span class="istickedoff">-&gt; Either SomeException (Map Text TurnState)</span>
+<span class="lineno">  819 </span><span class="spaces">      </span><span class="istickedoff">-&gt; IO (Map Text TurnState)</span>
+<span class="lineno">  820 </span><span class="spaces">    </span><span class="istickedoff">resolveTry what idText fallback r = case r of</span>
+<span class="lineno">  821 </span><span class="spaces">      </span><span class="istickedoff">Left err</span>
+<span class="lineno">  822 </span><span class="spaces">        </span><span class="istickedoff">| Just AsyncCancelled &lt;- fromException err -&gt; throwIO err</span>
+<span class="lineno">  823 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt; do</span>
+<span class="lineno">  824 </span><span class="spaces">            </span><span class="istickedoff">_lh_logWarn logger</span>
+<span class="lineno">  825 </span><span class="spaces">              </span><span class="istickedoff">(&quot;reconcile: &quot; &lt;&gt; what &lt;&gt; &quot; for &quot; &lt;&gt; idText</span>
+<span class="lineno">  826 </span><span class="spaces">                 </span><span class="istickedoff">&lt;&gt; &quot; failed: &quot; &lt;&gt; T.pack (show err) &lt;&gt; &quot; — skipping&quot;)</span>
+<span class="lineno">  827 </span><span class="spaces">            </span><span class="istickedoff">pure fallback</span>
+<span class="lineno">  828 </span><span class="spaces">      </span><span class="istickedoff">Right tm' -&gt; pure tm'</span>
+<span class="lineno">  829 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  830 </span><span class="spaces">    </span><span class="istickedoff">-- Ids whose liveness THIS tick is one we can stream\/finalize from:</span>
+<span class="lineno">  831 </span><span class="spaces">    </span><span class="istickedoff">-- Thinking\/Idle\/AwaitingInput, paired with that liveness. Exited\/Orphaned</span>
+<span class="lineno">  832 </span><span class="spaces">    </span><span class="istickedoff">-- are handled by the terminal pass.</span>
+<span class="lineno">  833 </span><span class="spaces">    </span><span class="istickedoff">streamableIds obs =</span>
+<span class="lineno">  834 </span><span class="spaces">      </span><span class="istickedoff">[ (idText, _to_liveness o)</span>
+<span class="lineno">  835 </span><span class="spaces">      </span><span class="istickedoff">| (idText, o) &lt;- Map.toList obs</span>
+<span class="lineno">  836 </span><span class="spaces">      </span><span class="istickedoff">, _to_liveness o `elem`</span>
+<span class="lineno">  837 </span><span class="spaces">          </span><span class="istickedoff">[Reg.LivenessThinking, Reg.LivenessIdle, Reg.LivenessAwaitingInput]</span>
+<span class="lineno">  838 </span><span class="spaces">      </span><span class="istickedoff">]</span>
+<span class="lineno">  839 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  840 </span><span class="spaces">    </span><span class="istickedoff">-- Ids (paired with their state) with an ACTIVE turn (after the live pass)</span>
+<span class="lineno">  841 </span><span class="spaces">    </span><span class="istickedoff">-- whose current liveness is terminal (Exited\/Orphaned) OR which are absent</span>
+<span class="lineno">  842 </span><span class="spaces">    </span><span class="istickedoff">-- from this tick's observation entirely (evicted\/orphaned-then-removed).</span>
+<span class="lineno">  843 </span><span class="spaces">    </span><span class="istickedoff">terminalIds obs tm =</span>
+<span class="lineno">  844 </span><span class="spaces">      </span><span class="istickedoff">[ (idText, st)</span>
+<span class="lineno">  845 </span><span class="spaces">      </span><span class="istickedoff">| (idText, st) &lt;- Map.toList tm</span>
+<span class="lineno">  846 </span><span class="spaces">      </span><span class="istickedoff">, _tsActive st</span>
+<span class="lineno">  847 </span><span class="spaces">      </span><span class="istickedoff">, case Map.lookup idText obs of</span>
+<span class="lineno">  848 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; True</span>
+<span class="lineno">  849 </span><span class="spaces">          </span><span class="istickedoff">Just o  -&gt; _to_liveness o `elem` [Reg.LivenessExited, Reg.LivenessOrphaned]</span>
+<span class="lineno">  850 </span><span class="spaces">      </span><span class="istickedoff">]</span>
+<span class="lineno">  851 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  852 </span><span class="spaces">    </span><span class="istickedoff">-- Project the observation map into the (sessionId, liveness) snapshot the</span>
+<span class="lineno">  853 </span><span class="spaces">    </span><span class="istickedoff">-- 'diffLiveness' publish path consumes, and into the carry-forward captures.</span>
+<span class="lineno">  854 </span><span class="spaces">    </span><span class="istickedoff">livenessSnap :: Map Text TickObservation -&gt; Map Text (Text, Reg.Liveness)</span>
+<span class="lineno">  855 </span><span class="spaces">    </span><span class="istickedoff">livenessSnap = Map.map (\o -&gt; (_to_sessionId o, _to_liveness o))</span>
+<span class="lineno">  856 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  857 </span><span class="spaces">    </span><span class="istickedoff">capSnap :: Map Text TickObservation -&gt; Map Text Text</span>
+<span class="lineno">  858 </span><span class="spaces">    </span><span class="istickedoff">capSnap = Map.mapMaybe _to_capture</span>
+<span class="lineno">  859 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  860 </span><span class="spaces">    </span><span class="istickedoff">publishEvictions = mapM_ $ \sid -&gt;</span>
+<span class="lineno">  861 </span><span class="spaces">      </span><span class="istickedoff">_streamBroker_publish broker</span>
+<span class="lineno">  862 </span><span class="spaces">        </span><span class="istickedoff">(ActivityChanged (SessionId sid) (SaHarnessStatus (livenessToActivity Reg.LivenessOrphaned)))</span>
+<span class="lineno">  863 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  864 </span><span class="spaces">    </span><span class="istickedoff">-- AsyncCancelled MUST be re-raised so 'Async.withAsync'/'Async.cancel'</span>
+<span class="lineno">  865 </span><span class="spaces">    </span><span class="istickedoff">-- complete cleanly (project-wide invariant).</span>
+<span class="lineno">  866 </span><span class="spaces">    </span><span class="istickedoff">outer :: SomeException -&gt; IO ()</span>
+<span class="lineno">  867 </span><span class="spaces">    </span><span class="istickedoff">outer ex</span>
+<span class="lineno">  868 </span><span class="spaces">      </span><span class="istickedoff">| Just AsyncCancelled &lt;- fromException ex = throwIO ex</span>
+<span class="lineno">  869 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = _lh_logError logger</span>
+<span class="lineno">  870 </span><span class="spaces">          </span><span class="istickedoff">(&quot;reconcile loop crashed: &quot; &lt;&gt; T.pack (show ex))</span></span>
+<span class="lineno">  871 </span>
+<span class="lineno">  872 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  873 </span>-- Boot reconstruction (D5.6)
+<span class="lineno">  874 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  875 </span>
+<span class="lineno">  876 </span>-- | At startup, run one sweep and register an entry for every window we own:
+<span class="lineno">  877 </span>--
+<span class="lineno">  878 </span>--   * a window carrying our @\@pcl_id@ → an 'Reg.OriginDiscovered' entry (the
+<span class="lineno">  879 </span>--     PCL-restart reconnect path);
+<span class="lineno">  880 </span>--   * a legacy @claude-code-\&lt;idx\&gt;@ window with no marker → lazily stamped a
+<span class="lineno">  881 </span>--     fresh id (via '_rd_stampLegacy') and registered as 'Reg.OriginDiscovered'.
+<span class="lineno">  882 </span>--
+<span class="lineno">  883 </span>-- The legacy harness map is seeded separately by the unchanged
+<span class="lineno">  884 </span>-- @discoverHarnesses@; this builds the parallel registry the reconcile loop
+<span class="lineno">  885 </span>-- owns. Idempotent-ish: an already-registered id is overwritten with the
+<span class="lineno">  886 </span>-- freshly observed coordinate (boot runs once).
+<span class="lineno">  887 </span>bootReconstruct :: ReconcileDeps -&gt; Reg.HarnessRegistry -&gt; LogHandle -&gt; IO ()
+<span class="lineno">  888 </span><span class="decl"><span class="istickedoff">bootReconstruct deps reg logger = do</span>
+<span class="lineno">  889 </span><span class="spaces">  </span><span class="istickedoff">sessions &lt;- _rd_sessions deps</span>
+<span class="lineno">  890 </span><span class="spaces">  </span><span class="istickedoff">forM_ sessions $ \session -&gt; do</span>
+<span class="lineno">  891 </span><span class="spaces">    </span><span class="istickedoff">r &lt;- try @SomeException (_rd_sweep deps <span class="nottickedoff">session</span>)</span>
+<span class="lineno">  892 </span><span class="spaces">    </span><span class="istickedoff">case r of</span>
+<span class="lineno">  893 </span><span class="spaces">      </span><span class="istickedoff">Left err -&gt;</span>
+<span class="lineno">  894 </span><span class="spaces">        </span><span class="istickedoff">_lh_logWarn logger</span>
+<span class="lineno">  895 </span><span class="spaces">          </span><span class="istickedoff">(&quot;bootReconstruct: sweep of &quot; &lt;&gt; session &lt;&gt; &quot; failed: &quot; &lt;&gt; T.pack (show err))</span>
+<span class="lineno">  896 </span><span class="spaces">      </span><span class="istickedoff">Right rows -&gt; forM_ rows $ \row -&gt; do</span>
+<span class="lineno">  897 </span><span class="spaces">        </span><span class="istickedoff">case Reg.parseHarnessId (_twr_pclId row) of</span>
+<span class="lineno">  898 </span><span class="spaces">          </span><span class="istickedoff">Just hid -&gt;</span>
+<span class="lineno">  899 </span><span class="spaces">            </span><span class="istickedoff">registerEntry session row hid</span>
+<span class="lineno">  900 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; do</span>
+<span class="lineno">  901 </span><span class="spaces">            </span><span class="istickedoff">mHid &lt;- _rd_stampLegacy deps <span class="nottickedoff">session</span> (_twr_windowName row)</span>
+<span class="lineno">  902 </span><span class="spaces">            </span><span class="istickedoff">for_ mHid (registerEntry session row)  -- 'Nothing' ⇒ not ours</span>
+<span class="lineno">  903 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  904 </span><span class="spaces">    </span><span class="istickedoff">registerEntry session row hid = do</span>
+<span class="lineno">  905 </span><span class="spaces">      </span><span class="istickedoff">let live = if _twr_paneDead row then Reg.LivenessExited else Reg.LivenessIdle</span>
+<span class="lineno">  906 </span><span class="spaces">      </span><span class="istickedoff">Reg.insertEntry reg Reg.HarnessEntry</span>
+<span class="lineno">  907 </span><span class="spaces">        </span><span class="istickedoff">{ Reg._he_id          = hid</span>
+<span class="lineno">  908 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_session     = session</span>
+<span class="lineno">  909 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_windowName  = _twr_windowName row</span>
+<span class="lineno">  910 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_shellPid    = _twr_panePid row</span>
+<span class="lineno">  911 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_harnessPid  = Nothing</span>
+<span class="lineno">  912 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_origin      = Reg.OriginDiscovered</span>
+<span class="lineno">  913 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_flavour     = Kind.HClaudeCode</span>
+<span class="lineno">  914 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_liveness    = live</span>
+<span class="lineno">  915 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_extModified = False</span>
+<span class="lineno">  916 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_stale       = False</span>
+<span class="lineno">  917 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_sessionId   = Nothing</span>
+<span class="lineno">  918 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_label       = _twr_windowName row</span>
+<span class="lineno">  919 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_orphanedTicks = 0</span>
+<span class="lineno">  920 </span><span class="spaces">        </span><span class="istickedoff">, Reg._he_handle      = Nothing</span>
+<span class="lineno">  921 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  922 </span>
+<span class="lineno">  923 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  924 </span>-- Legacy window-name recognition
+<span class="lineno">  925 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  926 </span>
+<span class="lineno">  927 </span>-- | A legacy harness window name is @\&lt;canonical\&gt;-\&lt;idx\&gt;@ for a known flavour
+<span class="lineno">  928 </span>-- (Phase 1: only @claude-code@). Used by the default 'ReconcileDeps' to decide
+<span class="lineno">  929 </span>-- whether an unmarked window should be lazily stamped.
+<span class="lineno">  930 </span>isLegacyWindowName :: Text -&gt; Bool
+<span class="lineno">  931 </span><span class="decl"><span class="istickedoff">isLegacyWindowName name =</span>
+<span class="lineno">  932 </span><span class="spaces">  </span><span class="istickedoff">case T.stripPrefix &quot;claude-code-&quot; name of</span>
+<span class="lineno">  933 </span><span class="spaces">    </span><span class="istickedoff">Just suffix -&gt; not (T.null suffix) &amp;&amp; T.all isDigit suffix</span>
+<span class="lineno">  934 </span><span class="spaces">    </span><span class="istickedoff">Nothing     -&gt; False</span></span>
+
+</pre>
+</body>
+</html>

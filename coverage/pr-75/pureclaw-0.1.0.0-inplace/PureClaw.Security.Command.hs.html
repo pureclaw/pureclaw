@@ -1,0 +1,122 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Security.Command
+<span class="lineno">    2 </span>  ( -- * Authorized command type (constructor intentionally NOT exported)
+<span class="lineno">    3 </span>    AuthorizedCommand
+<span class="lineno">    4 </span>    -- * Command errors
+<span class="lineno">    5 </span>  , CommandError (..)
+<span class="lineno">    6 </span>    -- * Authorization (pure — no IO)
+<span class="lineno">    7 </span>  , authorize
+<span class="lineno">    8 </span>  , authorizeShell
+<span class="lineno">    9 </span>    -- * Manager-owned tmux seam (always permitted; see note below)
+<span class="lineno">   10 </span>  , authorizeTmuxCommand
+<span class="lineno">   11 </span>    -- * Read-only accessors
+<span class="lineno">   12 </span>  , getCommandProgram
+<span class="lineno">   13 </span>  , getCommandArgs
+<span class="lineno">   14 </span>  ) where
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>import Data.Text (Text)
+<span class="lineno">   17 </span>import Data.Text qualified as T
+<span class="lineno">   18 </span>import System.FilePath
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>import PureClaw.Core.Types
+<span class="lineno">   21 </span>import PureClaw.Security.Policy
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>-- | A command that has been authorized by the security policy.
+<span class="lineno">   24 </span>-- Constructor is intentionally NOT exported — the only way to obtain an
+<span class="lineno">   25 </span>-- 'AuthorizedCommand' is through 'authorize'.
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- Note for downstream: 'ShellHandle.execute' is responsible for stripping
+<span class="lineno">   28 </span>-- the subprocess environment (@setEnv (Just [])@) — environment isolation
+<span class="lineno">   29 </span>-- is an execution-time concern, not a policy concern.
+<span class="lineno">   30 </span>newtype AuthorizedCommand = AuthorizedCommand { <span class="istickedoff"><span class="decl"><span class="istickedoff">unAuthorizedCommand</span></span></span> :: (FilePath, [Text]) }
+<span class="lineno">   31 </span>
+<span class="lineno">   32 </span>-- | Errors from command authorization.
+<span class="lineno">   33 </span>data CommandError
+<span class="lineno">   34 </span>  = CommandNotAllowed Text    -- ^ The command is not in the policy's allowed set
+<span class="lineno">   35 </span>  | CommandInAutonomyDeny     -- ^ The policy's autonomy level is 'Deny'
+<span class="lineno">   36 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>)
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>-- | Authorize a command against a security policy. Pure — no IO.
+<span class="lineno">   39 </span>--
+<span class="lineno">   40 </span>-- Checks:
+<span class="lineno">   41 </span>-- 1. Autonomy level is not 'Deny'
+<span class="lineno">   42 </span>-- 2. Command basename is in the policy's allowed command set
+<span class="lineno">   43 </span>authorize :: SecurityPolicy -&gt; FilePath -&gt; [Text] -&gt; Either CommandError AuthorizedCommand
+<span class="lineno">   44 </span><span class="decl"><span class="istickedoff">authorize policy cmd args</span>
+<span class="lineno">   45 </span><span class="spaces">  </span><span class="istickedoff">| _sp_autonomy policy == Deny =</span>
+<span class="lineno">   46 </span><span class="spaces">      </span><span class="istickedoff">Left CommandInAutonomyDeny</span>
+<span class="lineno">   47 </span><span class="spaces">  </span><span class="istickedoff">| not (isCommandAllowed policy (CommandName (T.pack (takeFileName cmd)))) =</span>
+<span class="lineno">   48 </span><span class="spaces">      </span><span class="istickedoff">Left (CommandNotAllowed (T.pack (takeFileName cmd)))</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">   50 </span><span class="spaces">      </span><span class="istickedoff">Right (AuthorizedCommand (cmd, args))</span></span>
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>-- | Authorize a shell-string command for execution via @bash -c@. Pure — no IO.
+<span class="lineno">   53 </span>--
+<span class="lineno">   54 </span>-- Gating is intentionally a single yes/no toggle: the policy must list
+<span class="lineno">   55 </span>-- @shell@ in its allowed-command set. Per-basename allowlisting is
+<span class="lineno">   56 </span>-- meaningless once bash is in the loop (pipes, @&amp;&amp;@, @$()@ can all
+<span class="lineno">   57 </span>-- compose forbidden basenames), so we don't pretend to enforce it here.
+<span class="lineno">   58 </span>-- Deployments that want fine-grained per-program control should disable
+<span class="lineno">   59 </span>-- @shell@ in the policy and use the argv-style @exec@ tool instead.
+<span class="lineno">   60 </span>authorizeShell :: SecurityPolicy -&gt; Text -&gt; Either CommandError AuthorizedCommand
+<span class="lineno">   61 </span><span class="decl"><span class="istickedoff">authorizeShell policy cmd</span>
+<span class="lineno">   62 </span><span class="spaces">  </span><span class="istickedoff">| _sp_autonomy policy == Deny =</span>
+<span class="lineno">   63 </span><span class="spaces">      </span><span class="istickedoff">Left CommandInAutonomyDeny</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">| not (isCommandAllowed policy (CommandName &quot;shell&quot;)) =</span>
+<span class="lineno">   65 </span><span class="spaces">      </span><span class="istickedoff">Left (CommandNotAllowed <span class="nottickedoff">&quot;shell&quot;</span>)</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">   67 </span><span class="spaces">      </span><span class="istickedoff">Right (AuthorizedCommand (&quot;bash&quot;, [&quot;-c&quot;, cmd]))</span></span>
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>-- | Construct an 'AuthorizedCommand' for PureClaw's OWN tmux process
+<span class="lineno">   70 </span>-- management. This is the controlled internal seam through which EVERY tmux
+<span class="lineno">   71 </span>-- subprocess invocation flows, so that an unauthorized tmux call is impossible
+<span class="lineno">   72 </span>-- by construction (the 'AuthorizedCommand' value constructor is not exported,
+<span class="lineno">   73 </span>-- and this is the sole tmux-specific path to obtain one).
+<span class="lineno">   74 </span>--
+<span class="lineno">   75 </span>-- Unlike 'authorize'/'authorizeShell', this performs NO 'SecurityPolicy'
+<span class="lineno">   76 </span>-- check and ALWAYS succeeds: tmux invocations here are PureClaw's own
+<span class="lineno">   77 </span>-- harness-lifecycle management (spawn/sweep/capture/kill of windows it owns),
+<span class="lineno">   78 </span>-- NOT user-issued commands. The user-command policy gate governs commands the
+<span class="lineno">   79 </span>-- agent is asked to run on the user's behalf; the manager's internal tmux use
+<span class="lineno">   80 </span>-- is a separate, manager-owned boundary. The in-pane harness command itself
+<span class="lineno">   81 </span>-- (a deliberately shell-interpreted string) is defended separately by
+<span class="lineno">   82 </span>-- 'PureClaw.Internal.ShellQuote' / @escapeForShell@, not by this seam.
+<span class="lineno">   83 </span>--
+<span class="lineno">   84 </span>-- TODO(harness-registry phase 2): audit-log tmux seam invocations once a
+<span class="lineno">   85 </span>-- 'LogHandle' is threaded to the call sites. The design (§8 B1) specifies this
+<span class="lineno">   86 </span>-- seam as &quot;always-permitted-but-logged&quot;; threading a logger through
+<span class="lineno">   87 </span>-- @Harness/Tmux.hs@ would change exported signatures (out of scope for the
+<span class="lineno">   88 </span>-- additive Phase-1 refactor), so logging is deferred. The hard, type-enforced
+<span class="lineno">   89 </span>-- invariant — a single tmux chokepoint — is delivered now.
+<span class="lineno">   90 </span>authorizeTmuxCommand :: FilePath -&gt; [Text] -&gt; AuthorizedCommand
+<span class="lineno">   91 </span><span class="decl"><span class="istickedoff">authorizeTmuxCommand tmuxBin args = AuthorizedCommand (tmuxBin, args)</span></span>
+<span class="lineno">   92 </span>
+<span class="lineno">   93 </span>-- | Get the program path from an authorized command.
+<span class="lineno">   94 </span>getCommandProgram :: AuthorizedCommand -&gt; FilePath
+<span class="lineno">   95 </span><span class="decl"><span class="istickedoff">getCommandProgram = fst . unAuthorizedCommand</span></span>
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>-- | Get the arguments from an authorized command.
+<span class="lineno">   98 </span>getCommandArgs :: AuthorizedCommand -&gt; [Text]
+<span class="lineno">   99 </span><span class="decl"><span class="istickedoff">getCommandArgs = snd . unAuthorizedCommand</span></span>
+
+</pre>
+</body>
+</html>

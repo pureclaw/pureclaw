@@ -1,0 +1,345 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- | In-process pub/sub broker for the live transcript streaming feature.
+<span class="lineno">    2 </span>--
+<span class="lineno">    3 </span>-- The broker fans out 'BrokerEvent's to a bounded set of subscribers via
+<span class="lineno">    4 </span>-- per-subscriber 'TBQueue's. Publish is non-blocking and STM-atomic: under
+<span class="lineno">    5 </span>-- contention a full subscriber queue has its oldest entry dropped, its
+<span class="lineno">    6 </span>-- overflow flag set, and the new entry written — all in a single
+<span class="lineno">    7 </span>-- transaction.
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- The broker is origin-agnostic; per-origin caps are enforced at the WS
+<span class="lineno">   10 </span>-- handler layer (WU3) by a separate 'StreamGuard'. The broker only enforces
+<span class="lineno">   11 </span>-- the global subscriber cap configured by '_bc_maxSubscribers'.
+<span class="lineno">   12 </span>--
+<span class="lineno">   13 </span>-- See &quot;docs/transcript-streaming.md&quot; §Broker for the full design.
+<span class="lineno">   14 </span>module PureClaw.Frontend.StreamBroker
+<span class="lineno">   15 </span>  ( -- * Broker handle
+<span class="lineno">   16 </span>    StreamBroker (..)
+<span class="lineno">   17 </span>    -- * Events
+<span class="lineno">   18 </span>  , BrokerEvent (..)
+<span class="lineno">   19 </span>  , SessionActivity (..)
+<span class="lineno">   20 </span>    -- * Subscription
+<span class="lineno">   21 </span>  , Subscription (..)
+<span class="lineno">   22 </span>  , SubscriberId (..)
+<span class="lineno">   23 </span>    -- * Errors
+<span class="lineno">   24 </span>  , BrokerError (..)
+<span class="lineno">   25 </span>    -- * Introspection
+<span class="lineno">   26 </span>  , BrokerStats (..)
+<span class="lineno">   27 </span>    -- * Configuration
+<span class="lineno">   28 </span>  , BrokerConfig (..)
+<span class="lineno">   29 </span>  , defaultBrokerConfig
+<span class="lineno">   30 </span>    -- * Constructor
+<span class="lineno">   31 </span>  , mkInProcessBroker
+<span class="lineno">   32 </span>  ) where
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>import Data.Aeson (Value)
+<span class="lineno">   35 </span>import Control.Concurrent.STM
+<span class="lineno">   36 </span>  ( STM
+<span class="lineno">   37 </span>  , TBQueue
+<span class="lineno">   38 </span>  , TVar
+<span class="lineno">   39 </span>  , atomically
+<span class="lineno">   40 </span>  , isFullTBQueue
+<span class="lineno">   41 </span>  , lengthTBQueue
+<span class="lineno">   42 </span>  , modifyTVar'
+<span class="lineno">   43 </span>  , newTBQueue
+<span class="lineno">   44 </span>  , newTVar
+<span class="lineno">   45 </span>  , newTVarIO
+<span class="lineno">   46 </span>  , readTBQueue
+<span class="lineno">   47 </span>  , readTVar
+<span class="lineno">   48 </span>  , readTVarIO
+<span class="lineno">   49 </span>  , writeTBQueue
+<span class="lineno">   50 </span>  , writeTVar
+<span class="lineno">   51 </span>  )
+<span class="lineno">   52 </span>import Control.Monad (forM, forM_, when)
+<span class="lineno">   53 </span>import Data.Map.Strict (Map)
+<span class="lineno">   54 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   55 </span>import Data.Time (UTCTime)
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>import PureClaw.Core.Types (SessionId)
+<span class="lineno">   58 </span>import PureClaw.Frontend.Activity.Types (HarnessActivity (..))
+<span class="lineno">   59 </span>import PureClaw.Session.Types (SessionMeta)
+<span class="lineno">   60 </span>import PureClaw.Transcript.Types (TranscriptEntry)
+<span class="lineno">   61 </span>
+<span class="lineno">   62 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   63 </span>-- Events
+<span class="lineno">   64 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   65 </span>
+<span class="lineno">   66 </span>-- | Tagged event published by writers and consumed by subscribers (WS
+<span class="lineno">   67 </span>-- handlers). 'EntryRecorded' carries the full transcript entry; subscribers
+<span class="lineno">   68 </span>-- filter by 'SessionId' when delivering to their peer. 'ActivityChanged'
+<span class="lineno">   69 </span>-- carries lightweight per-session signals that the frontend uses for the
+<span class="lineno">   70 </span>-- sidebar.
+<span class="lineno">   71 </span>data BrokerEvent
+<span class="lineno">   72 </span>  = EntryRecorded   !SessionId !TranscriptEntry
+<span class="lineno">   73 </span>  | ActivityChanged !SessionId !SessionActivity
+<span class="lineno">   74 </span>    -- | Full sidebar list snapshot (tabs + recent + archived) pushed on
+<span class="lineno">   75 </span>    -- every mutation and once on WS connect. Carries pre-serialized JSON
+<span class="lineno">   76 </span>    -- so the WS handler can send it without knowing the domain types.
+<span class="lineno">   77 </span>  | ListsSnapshot   !Value
+<span class="lineno">   78 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>-- | Per-session live signals for sidebar/tab indicators.
+<span class="lineno">   81 </span>data SessionActivity
+<span class="lineno">   82 </span>  = -- | A new entry was recorded at this timestamp; carries no payload (the
+<span class="lineno">   83 </span>    -- entry itself rides on the companion 'EntryRecorded' publish).
+<span class="lineno">   84 </span>    SaEntryAt !UTCTime
+<span class="lineno">   85 </span>    -- | The session's harness transitioned to a new activity state.
+<span class="lineno">   86 </span>  | SaHarnessStatus !HarnessActivity
+<span class="lineno">   87 </span>    -- | A new session appeared (carries its meta so the sidebar can render
+<span class="lineno">   88 </span>    -- it immediately).
+<span class="lineno">   89 </span>  | SaSessionCreated !SessionMeta
+<span class="lineno">   90 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   91 </span>
+<span class="lineno">   92 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   93 </span>-- Subscription
+<span class="lineno">   94 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">   95 </span>
+<span class="lineno">   96 </span>-- | Opaque identifier for a subscriber, allocated by the broker via a
+<span class="lineno">   97 </span>-- monotonically increasing STM counter.
+<span class="lineno">   98 </span>newtype SubscriberId = SubscriberId { <span class="nottickedoff"><span class="decl"><span class="nottickedoff">unSubscriberId</span></span></span> :: Int }
+<span class="lineno">   99 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  100 </span>
+<span class="lineno">  101 </span>-- | Subscription handle returned by '_streamBroker_subscribe'. The WS
+<span class="lineno">  102 </span>-- handler reads from '_sub_queue' for events and from '_sub_overflow' for
+<span class="lineno">  103 </span>-- the overflow signal (via STM @orElse@). On disconnect the handler must
+<span class="lineno">  104 </span>-- invoke '_sub_cancel' to atomically remove the subscriber from the broker.
+<span class="lineno">  105 </span>data Subscription = Subscription
+<span class="lineno">  106 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sub_queue</span></span></span>    :: !(TBQueue BrokerEvent)
+<span class="lineno">  107 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sub_overflow</span></span></span> :: !(TVar Bool)
+<span class="lineno">  108 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_sub_cancel</span></span></span>   :: !(IO ())
+<span class="lineno">  109 </span>  }
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  112 </span>-- Errors
+<span class="lineno">  113 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  114 </span>
+<span class="lineno">  115 </span>-- | Broker-level subscribe failures. The WS handler maps
+<span class="lineno">  116 </span>-- 'SubscriberCapReached' to a 503 on the upgrade.
+<span class="lineno">  117 </span>data BrokerError
+<span class="lineno">  118 </span>  = SubscriberCapReached
+<span class="lineno">  119 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  122 </span>-- Introspection
+<span class="lineno">  123 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>-- | Snapshot of broker state used by tests and operators. Cheap to compute
+<span class="lineno">  126 </span>-- (one STM transaction).
+<span class="lineno">  127 </span>data BrokerStats = BrokerStats
+<span class="lineno">  128 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_bs_subscriberCount</span></span></span> :: !Int
+<span class="lineno">  129 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bs_queueDepths</span></span></span>     :: ![Int]
+<span class="lineno">  130 </span>  }
+<span class="lineno">  131 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  134 </span>-- Configuration
+<span class="lineno">  135 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  136 </span>
+<span class="lineno">  137 </span>-- | Static configuration for an in-process broker. All caps are enforced at
+<span class="lineno">  138 </span>-- broker boundaries; per-origin enforcement is the WS handler's
+<span class="lineno">  139 </span>-- responsibility ('_bc_maxSubsPerOrigin' is provided here so that handler
+<span class="lineno">  140 </span>-- code can read a single source of truth via '_streamBroker_config').
+<span class="lineno">  141 </span>data BrokerConfig = BrokerConfig
+<span class="lineno">  142 </span>  { -- | Per-subscriber 'TBQueue' depth.
+<span class="lineno">  143 </span>    <span class="istickedoff"><span class="decl"><span class="istickedoff">_bc_queueDepth</span></span></span>       :: !Int
+<span class="lineno">  144 </span>    -- | Per-process subscriber cap.
+<span class="lineno">  145 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bc_maxSubscribers</span></span></span>   :: !Int
+<span class="lineno">  146 </span>    -- | Per-origin subscriber cap (enforced by the WS handler's
+<span class="lineno">  147 </span>    -- 'StreamGuard', not by the broker itself).
+<span class="lineno">  148 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_bc_maxSubsPerOrigin</span></span></span> :: !Int
+<span class="lineno">  149 </span>    -- | Per-event payload byte cap. Larger entries are truncated upstream
+<span class="lineno">  150 </span>    -- by 'BroadcastingTranscriptHandle' (WU2) before publish.
+<span class="lineno">  151 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bc_maxEventBytes</span></span></span>    :: !Int
+<span class="lineno">  152 </span>  }
+<span class="lineno">  153 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>-- | Default config: queue depth 256, 32 subscribers, 8 per origin, 256 KB
+<span class="lineno">  156 </span>-- per event.
+<span class="lineno">  157 </span>defaultBrokerConfig :: BrokerConfig
+<span class="lineno">  158 </span><span class="decl"><span class="istickedoff">defaultBrokerConfig =</span>
+<span class="lineno">  159 </span><span class="spaces">  </span><span class="istickedoff">BrokerConfig</span>
+<span class="lineno">  160 </span><span class="spaces">    </span><span class="istickedoff">{ _bc_queueDepth       = 256</span>
+<span class="lineno">  161 </span><span class="spaces">    </span><span class="istickedoff">, _bc_maxSubscribers   = 32</span>
+<span class="lineno">  162 </span><span class="spaces">    </span><span class="istickedoff">, _bc_maxSubsPerOrigin = 8</span>
+<span class="lineno">  163 </span><span class="spaces">    </span><span class="istickedoff">, _bc_maxEventBytes    = 256 * 1024</span>
+<span class="lineno">  164 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  165 </span>
+<span class="lineno">  166 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  167 </span>-- Broker handle
+<span class="lineno">  168 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>-- | Pub/sub broker capability. All operations are 'IO' so the broker can
+<span class="lineno">  171 </span>-- be passed across thread boundaries (it lives at the lifetime of the
+<span class="lineno">  172 </span>-- process).
+<span class="lineno">  173 </span>data StreamBroker = StreamBroker
+<span class="lineno">  174 </span>  { -- | Non-blocking publish to all current subscribers. STM-atomic:
+<span class="lineno">  175 </span>    -- enqueue or (on full queue) pop oldest + enqueue + set overflow flag,
+<span class="lineno">  176 </span>    -- in a single transaction across every subscriber.
+<span class="lineno">  177 </span>    <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamBroker_publish</span></span></span>    :: BrokerEvent -&gt; IO ()
+<span class="lineno">  178 </span>    -- | Allocate a new subscription. Returns 'Left' 'SubscriberCapReached'
+<span class="lineno">  179 </span>    -- when the per-process subscriber cap is reached.
+<span class="lineno">  180 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamBroker_subscribe</span></span></span>  :: IO (Either BrokerError Subscription)
+<span class="lineno">  181 </span>    -- | Snapshot of broker state (subscriber count + per-subscriber queue
+<span class="lineno">  182 </span>    -- depths). Cheap; STM-atomic.
+<span class="lineno">  183 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamBroker_introspect</span></span></span> :: IO BrokerStats
+<span class="lineno">  184 </span>    -- | Read-only accessor exposing the configuration. WU2's
+<span class="lineno">  185 </span>    -- 'BroadcastingTranscriptHandle' reads '_bc_maxEventBytes' through
+<span class="lineno">  186 </span>    -- this; the WS handler reads '_bc_maxSubsPerOrigin'.
+<span class="lineno">  187 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamBroker_config</span></span></span>     :: BrokerConfig
+<span class="lineno">  188 </span>    -- | Most-recent 'HarnessActivity' observed for a session via an
+<span class="lineno">  189 </span>    -- 'ActivityChanged' / 'SaHarnessStatus' publish, or 'Nothing' if no
+<span class="lineno">  190 </span>    -- such event has been seen. The WS handler reads this on a fresh
+<span class="lineno">  191 </span>    -- focus so a client connecting mid-request sees the in-flight
+<span class="lineno">  192 </span>    -- thinking state immediately, rather than waiting for the next
+<span class="lineno">  193 </span>    -- transition.
+<span class="lineno">  194 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_streamBroker_currentActivity</span></span></span> :: SessionId -&gt; IO (Maybe HarnessActivity)
+<span class="lineno">  195 </span>  }
+<span class="lineno">  196 </span>
+<span class="lineno">  197 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  198 </span>-- In-process broker implementation
+<span class="lineno">  199 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  200 </span>
+<span class="lineno">  201 </span>-- | The mutable state of an in-process broker.
+<span class="lineno">  202 </span>data BrokerState = BrokerState
+<span class="lineno">  203 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_bst_nextId</span></span></span>           :: !(TVar Int)
+<span class="lineno">  204 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bst_subscribers</span></span></span>      :: !(TVar (Map SubscriberId Subscription))
+<span class="lineno">  205 </span>    -- | Latest 'SaHarnessStatus' seen for each session. Updated inside the
+<span class="lineno">  206 </span>    -- same STM transaction as the publish so a focus snapshot taken just
+<span class="lineno">  207 </span>    -- after a publish observes the post-publish state.
+<span class="lineno">  208 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_bst_currentActivity</span></span></span>  :: !(TVar (Map SessionId HarnessActivity))
+<span class="lineno">  209 </span>  }
+<span class="lineno">  210 </span>
+<span class="lineno">  211 </span>-- | Construct an in-process broker. The broker exists for the lifetime of
+<span class="lineno">  212 </span>-- the process and is shared across every write site, the activity probe,
+<span class="lineno">  213 </span>-- and every WS connection. There is exactly one broker per binary main
+<span class="lineno">  214 </span>-- process (see the design's lifecycle section).
+<span class="lineno">  215 </span>mkInProcessBroker :: BrokerConfig -&gt; IO StreamBroker
+<span class="lineno">  216 </span><span class="decl"><span class="istickedoff">mkInProcessBroker cfg = do</span>
+<span class="lineno">  217 </span><span class="spaces">  </span><span class="istickedoff">state &lt;- BrokerState</span>
+<span class="lineno">  218 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; newTVarIO 0</span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; newTVarIO Map.empty</span>
+<span class="lineno">  220 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; newTVarIO Map.empty</span>
+<span class="lineno">  221 </span><span class="spaces">  </span><span class="istickedoff">pure StreamBroker</span>
+<span class="lineno">  222 </span><span class="spaces">    </span><span class="istickedoff">{ _streamBroker_publish          = publishEvent state</span>
+<span class="lineno">  223 </span><span class="spaces">    </span><span class="istickedoff">, _streamBroker_subscribe        = subscribeNew cfg state</span>
+<span class="lineno">  224 </span><span class="spaces">    </span><span class="istickedoff">, _streamBroker_introspect       = introspect state</span>
+<span class="lineno">  225 </span><span class="spaces">    </span><span class="istickedoff">, _streamBroker_config           = cfg</span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="istickedoff">, _streamBroker_currentActivity  = currentActivity state</span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  228 </span>
+<span class="lineno">  229 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  230 </span>-- Publish
+<span class="lineno">  231 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  232 </span>
+<span class="lineno">  233 </span>-- | Publish to every current subscriber in a single STM transaction.
+<span class="lineno">  234 </span>--
+<span class="lineno">  235 </span>-- For each subscriber, if its queue is full: drop the oldest entry, set its
+<span class="lineno">  236 </span>-- overflow 'TVar', then write the new entry. Otherwise just write the new
+<span class="lineno">  237 </span>-- entry. Performing all subscriber updates inside one 'atomically' block
+<span class="lineno">  238 </span>-- gives the design's linearizability guarantee (D3): any later
+<span class="lineno">  239 </span>-- 'atomically' read from a subscriber observes either the pre- or
+<span class="lineno">  240 </span>-- post-publish state for every subscriber, never a mix.
+<span class="lineno">  241 </span>publishEvent :: BrokerState -&gt; BrokerEvent -&gt; IO ()
+<span class="lineno">  242 </span><span class="decl"><span class="istickedoff">publishEvent state ev = atomically $ do</span>
+<span class="lineno">  243 </span><span class="spaces">  </span><span class="istickedoff">-- Record the latest harness status for the affected session before fanning</span>
+<span class="lineno">  244 </span><span class="spaces">  </span><span class="istickedoff">-- out so a subsequent 'currentActivity' read observes the post-publish</span>
+<span class="lineno">  245 </span><span class="spaces">  </span><span class="istickedoff">-- value. Only 'SaHarnessStatus' contributes to the snapshot; entry/created</span>
+<span class="lineno">  246 </span><span class="spaces">  </span><span class="istickedoff">-- events carry no persistent state we need to replay on focus.</span>
+<span class="lineno">  247 </span><span class="spaces">  </span><span class="istickedoff">case ev of</span>
+<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">ActivityChanged sid (SaHarnessStatus s) -&gt;</span>
+<span class="lineno">  249 </span><span class="spaces">      </span><span class="istickedoff">modifyTVar' (_bst_currentActivity state) (Map.insert sid s)</span>
+<span class="lineno">  250 </span><span class="spaces">    </span><span class="istickedoff">_ -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  251 </span><span class="spaces">  </span><span class="istickedoff">subs &lt;- readTVar (_bst_subscribers state)</span>
+<span class="lineno">  252 </span><span class="spaces">  </span><span class="istickedoff">forM_ (Map.elems subs) $ \sub -&gt; publishOne sub ev</span></span>
+<span class="lineno">  253 </span>
+<span class="lineno">  254 </span>-- | Read the most recent 'HarnessActivity' the broker has observed for a
+<span class="lineno">  255 </span>-- session. STM-atomic and cheap.
+<span class="lineno">  256 </span>currentActivity :: BrokerState -&gt; SessionId -&gt; IO (Maybe HarnessActivity)
+<span class="lineno">  257 </span><span class="decl"><span class="istickedoff">currentActivity state sid =</span>
+<span class="lineno">  258 </span><span class="spaces">  </span><span class="istickedoff">Map.lookup sid &lt;$&gt; readTVarIO (_bst_currentActivity state)</span></span>
+<span class="lineno">  259 </span>
+<span class="lineno">  260 </span>-- | Enqueue one event to one subscriber under the overflow protocol.
+<span class="lineno">  261 </span>-- Pure-STM so multiple invocations compose inside the publish transaction.
+<span class="lineno">  262 </span>publishOne :: Subscription -&gt; BrokerEvent -&gt; STM ()
+<span class="lineno">  263 </span><span class="decl"><span class="istickedoff">publishOne sub ev = do</span>
+<span class="lineno">  264 </span><span class="spaces">  </span><span class="istickedoff">full &lt;- isFullTBQueue (_sub_queue sub)</span>
+<span class="lineno">  265 </span><span class="spaces">  </span><span class="istickedoff">when full $ do</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">_ &lt;- readTBQueue (_sub_queue sub)</span>
+<span class="lineno">  267 </span><span class="spaces">    </span><span class="istickedoff">writeTVar (_sub_overflow sub) True</span>
+<span class="lineno">  268 </span><span class="spaces">  </span><span class="istickedoff">writeTBQueue (_sub_queue sub) ev</span></span>
+<span class="lineno">  269 </span>
+<span class="lineno">  270 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  271 </span>-- Subscribe
+<span class="lineno">  272 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  273 </span>
+<span class="lineno">  274 </span>-- | Allocate a new subscriber slot. Enforces the per-process subscriber cap
+<span class="lineno">  275 </span>-- ('_bc_maxSubscribers'). Returns 'Left' 'SubscriberCapReached' when the
+<span class="lineno">  276 </span>-- cap is reached; the WS handler maps this to a 503.
+<span class="lineno">  277 </span>subscribeNew
+<span class="lineno">  278 </span>  :: BrokerConfig
+<span class="lineno">  279 </span>  -&gt; BrokerState
+<span class="lineno">  280 </span>  -&gt; IO (Either BrokerError Subscription)
+<span class="lineno">  281 </span><span class="decl"><span class="istickedoff">subscribeNew cfg state = atomically $ do</span>
+<span class="lineno">  282 </span><span class="spaces">  </span><span class="istickedoff">subs &lt;- readTVar (_bst_subscribers state)</span>
+<span class="lineno">  283 </span><span class="spaces">  </span><span class="istickedoff">if Map.size subs &gt;= _bc_maxSubscribers cfg</span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left SubscriberCapReached)</span>
+<span class="lineno">  285 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  286 </span><span class="spaces">      </span><span class="istickedoff">nextId &lt;- readTVar (_bst_nextId state)</span>
+<span class="lineno">  287 </span><span class="spaces">      </span><span class="istickedoff">writeTVar (_bst_nextId state) (nextId + 1)</span>
+<span class="lineno">  288 </span><span class="spaces">      </span><span class="istickedoff">let sid = SubscriberId nextId</span>
+<span class="lineno">  289 </span><span class="spaces">      </span><span class="istickedoff">queue    &lt;- newTBQueue (fromIntegral (_bc_queueDepth cfg))</span>
+<span class="lineno">  290 </span><span class="spaces">      </span><span class="istickedoff">overflow &lt;- newTVar False</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">let sub = Subscription</span>
+<span class="lineno">  292 </span><span class="spaces">            </span><span class="istickedoff">{ _sub_queue    = queue</span>
+<span class="lineno">  293 </span><span class="spaces">            </span><span class="istickedoff">, _sub_overflow = overflow</span>
+<span class="lineno">  294 </span><span class="spaces">            </span><span class="istickedoff">, _sub_cancel   = cancelSubscriber state sid</span>
+<span class="lineno">  295 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  296 </span><span class="spaces">      </span><span class="istickedoff">modifyTVar' (_bst_subscribers state) (Map.insert sid sub)</span>
+<span class="lineno">  297 </span><span class="spaces">      </span><span class="istickedoff">pure (Right sub)</span></span>
+<span class="lineno">  298 </span>
+<span class="lineno">  299 </span>-- | Remove a subscriber from the broker map atomically. Idempotent — a
+<span class="lineno">  300 </span>-- second call is a no-op (the WS handler may invoke this from both the
+<span class="lineno">  301 </span>-- bracket cleanup and an error path; the no-op is intentional).
+<span class="lineno">  302 </span>cancelSubscriber :: BrokerState -&gt; SubscriberId -&gt; IO ()
+<span class="lineno">  303 </span><span class="decl"><span class="istickedoff">cancelSubscriber state sid =</span>
+<span class="lineno">  304 </span><span class="spaces">  </span><span class="istickedoff">atomically $ modifyTVar' (_bst_subscribers state) (Map.delete sid)</span></span>
+<span class="lineno">  305 </span>
+<span class="lineno">  306 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  307 </span>-- Introspect
+<span class="lineno">  308 </span>-- ---------------------------------------------------------------------------
+<span class="lineno">  309 </span>
+<span class="lineno">  310 </span>-- | Snapshot the broker's state. The per-subscriber queue depths are read
+<span class="lineno">  311 </span>-- atomically alongside the subscriber count so the resulting 'BrokerStats'
+<span class="lineno">  312 </span>-- reflects a single point in time.
+<span class="lineno">  313 </span>introspect :: BrokerState -&gt; IO BrokerStats
+<span class="lineno">  314 </span><span class="decl"><span class="istickedoff">introspect state = do</span>
+<span class="lineno">  315 </span><span class="spaces">  </span><span class="istickedoff">subs &lt;- readTVarIO (_bst_subscribers state)</span>
+<span class="lineno">  316 </span><span class="spaces">  </span><span class="istickedoff">let elems = Map.elems subs</span>
+<span class="lineno">  317 </span><span class="spaces">  </span><span class="istickedoff">depths &lt;- atomically $ forM elems $ \sub -&gt;</span>
+<span class="lineno">  318 </span><span class="spaces">    </span><span class="istickedoff">fromIntegral &lt;$&gt; lengthTBQueue (_sub_queue sub)</span>
+<span class="lineno">  319 </span><span class="spaces">  </span><span class="istickedoff">pure BrokerStats</span>
+<span class="lineno">  320 </span><span class="spaces">    </span><span class="istickedoff">{ _bs_subscriberCount = Map.size subs</span>
+<span class="lineno">  321 </span><span class="spaces">    </span><span class="istickedoff">, _bs_queueDepths     = depths</span>
+<span class="lineno">  322 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

@@ -1,0 +1,235 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE OverloadedStrings #-}
+<span class="lineno">    2 </span>
+<span class="lineno">    3 </span>-- | Per-flavour, PURE detection and extraction of harness terminal output.
+<span class="lineno">    4 </span>-- Each harness TUI (Claude Code, Codex, …) draws its screen differently, so
+<span class="lineno">    5 </span>-- working/idle/awaiting-input detection and response extraction are
+<span class="lineno">    6 </span>-- flavour-specific. The reconcile loop and the @/harness output@ command both
+<span class="lineno">    7 </span>-- select an observer via 'observerFor'. Heuristics are facts about each tool's
+<span class="lineno">    8 </span>-- terminal output; they were validated against live captures.
+<span class="lineno">    9 </span>module PureClaw.Harness.Observer
+<span class="lineno">   10 </span>  ( HarnessActivityState (..)
+<span class="lineno">   11 </span>  , HarnessObserver (..)
+<span class="lineno">   12 </span>  , observerFor
+<span class="lineno">   13 </span>  , claudeObserver
+<span class="lineno">   14 </span>  , genericObserver
+<span class="lineno">   15 </span>  ) where
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import           Data.ByteString (ByteString)
+<span class="lineno">   18 </span>import qualified Data.ByteString as BS
+<span class="lineno">   19 </span>import           Data.Char (isSpace)
+<span class="lineno">   20 </span>import           Data.Text (Text)
+<span class="lineno">   21 </span>import qualified Data.Text as T
+<span class="lineno">   22 </span>import qualified Data.Text.Encoding as TE
+<span class="lineno">   23 </span>import           PureClaw.Session.Kind (HarnessFlavour (..))
+<span class="lineno">   24 </span>
+<span class="lineno">   25 </span>data HarnessActivityState = HasWorking | HasAwaitingInput | HasIdle
+<span class="lineno">   26 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>data HarnessObserver = HarnessObserver
+<span class="lineno">   29 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ho_classify</span></span></span>        :: Text -&gt; HarnessActivityState
+<span class="lineno">   30 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ho_extractResponse</span></span></span> :: Int -&gt; ByteString -&gt; Text
+<span class="lineno">   31 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ho_relevantTail</span></span></span>    :: Int -&gt; ByteString -&gt; Text
+<span class="lineno">   32 </span>  }
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>observerFor :: HarnessFlavour -&gt; HarnessObserver
+<span class="lineno">   35 </span><span class="decl"><span class="istickedoff">observerFor HClaudeCode = claudeObserver</span>
+<span class="lineno">   36 </span><span class="spaces"></span><span class="istickedoff">observerFor _           = genericObserver</span></span>
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>-- ── Claude Code ────────────────────────────────────────────────────────────
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | Spinner glyphs Claude rotates while working (Dingbats range + a few extras).
+<span class="lineno">   41 </span>-- NOTE: the response-marker characters ⏺ (U+23FA), ● (U+25CF), and ⬤ (U+2B24)
+<span class="lineno">   42 </span>-- are intentionally NOT included here — they introduce those glyph characters as
+<span class="lineno">   43 </span>-- actual content (e.g. &quot;⏺ Let me check the other call sites…&quot;) and must NOT be
+<span class="lineno">   44 </span>-- classified as working-spinner lines.  'isResponseMarkerLine' handles them for
+<span class="lineno">   45 </span>-- extraction; classification sees them only via the idle-prompt path.
+<span class="lineno">   46 </span>claudeSpinnerGlyphs :: [Char]
+<span class="lineno">   47 </span><span class="decl"><span class="istickedoff">claudeSpinnerGlyphs =</span>
+<span class="lineno">   48 </span><span class="spaces">  </span><span class="istickedoff">&quot;\x2022&quot;   -- •  BULLET</span>
+<span class="lineno">   49 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2019&quot;   -- '  RIGHT SINGLE QUOTATION MARK (used in some spinner patterns)</span>
+<span class="lineno">   50 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2726&quot;   -- ✦  BLACK FOUR POINTED STAR</span>
+<span class="lineno">   51 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2732&quot;   -- ✲  OPEN CENTRE ASTERISK</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2733&quot;   -- ✳  EIGHT SPOKED ASTERISK</span>
+<span class="lineno">   53 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2734&quot;   -- ✴  EIGHT POINTED BLACK STAR</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2735&quot;   -- ✵  EIGHT POINTED PINWHEEL STAR</span>
+<span class="lineno">   55 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2736&quot;   -- ✶  SIX POINTED BLACK STAR</span>
+<span class="lineno">   56 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2737&quot;   -- ✷  EIGHT POINTED RECTILINEAR BLACK STAR</span>
+<span class="lineno">   57 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2738&quot;   -- ✸  HEAVY EIGHT POINTED RECTILINEAR BLACK STAR</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2739&quot;   -- ✹  TWELVE POINTED BLACK STAR</span>
+<span class="lineno">   59 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x273A&quot;   -- ✺  SIXTEEN POINTED ASTERISK</span>
+<span class="lineno">   60 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x273B&quot;   -- ✻  TEARDROP-SPOKED ASTERISK</span>
+<span class="lineno">   61 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x273C&quot;   -- ✼  OPEN CENTRE TEARDROP-SPOKED ASTERISK</span>
+<span class="lineno">   62 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x273D&quot;   -- ✽  HEAVY TEARDROP-SPOKED ASTERISK</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x273E&quot;   -- ✾  SIX PETALLED BLACK AND WHITE FLORETTE</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x273F&quot;   -- ✿  BLACK FLORETTE</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2605&quot;   -- ★  BLACK STAR</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x22C6&quot;   -- ⋆  STAR OPERATOR</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x22C7&quot;   -- ⋇  DIVISION TIMES</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2642&quot;   -- ♂  MALE SIGN (used in some Hermes spinner patterns)</span>
+<span class="lineno">   69 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2666&quot;   -- ♦  BLACK DIAMOND SUIT</span>
+<span class="lineno">   70 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x00B7&quot;   -- ·  MIDDLE DOT</span>
+<span class="lineno">   71 </span><span class="spaces">  </span><span class="istickedoff">&lt;&gt; &quot;\x2026&quot;</span></span>   -- …  HORIZONTAL ELLIPSIS (shouldn't start a line, belt-and-suspenders)
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>-- Additional spinner chars observed in the wild (Hermes, faryo patterns).
+<span class="lineno">   74 </span>-- Claude Code uses the ✶ (U+2736) glyph as the primary working-status marker.
+<span class="lineno">   75 </span>-- The status line for &quot;working&quot; looks like: ✶ Smooshing… (4m 55s · ↓ 16.6k tokens)
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>-- | A working/status line: starts with a spinner/star glyph followed by
+<span class="lineno">   78 </span>-- a description containing ellipsis or a token counter in parens, or the
+<span class="lineno">   79 </span>-- @esc to interrupt@ hint.
+<span class="lineno">   80 </span>isClaudeWorkingLine :: Text -&gt; Bool
+<span class="lineno">   81 </span><span class="decl"><span class="istickedoff">isClaudeWorkingLine raw =</span>
+<span class="lineno">   82 </span><span class="spaces">  </span><span class="istickedoff">let l = T.stripStart raw</span>
+<span class="lineno">   83 </span><span class="spaces">  </span><span class="istickedoff">in (not (T.null l) &amp;&amp; isSpinnerGlyph (T.head l)</span>
+<span class="lineno">   84 </span><span class="spaces">       </span><span class="istickedoff">&amp;&amp; (T.isInfixOf &quot;\x2026&quot; l || <span class="nottickedoff">T.isInfixOf &quot;...&quot; l</span>))   -- … or ...</span>
+<span class="lineno">   85 </span><span class="spaces">     </span><span class="istickedoff">|| hasTokenCounter l</span>
+<span class="lineno">   86 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;esc to interrupt&quot; (T.toLower l)</span>
+<span class="lineno">   87 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   88 </span><span class="spaces">    </span><span class="istickedoff">-- A spinner glyph is any character in 'claudeSpinnerGlyphs'.</span>
+<span class="lineno">   89 </span><span class="spaces">    </span><span class="istickedoff">isSpinnerGlyph c = c `elem` claudeSpinnerGlyphs</span>
+<span class="lineno">   90 </span><span class="spaces">    </span><span class="istickedoff">hasTokenCounter t =</span>
+<span class="lineno">   91 </span><span class="spaces">      </span><span class="istickedoff">T.isInfixOf &quot;tokens&quot; (T.toLower t)</span>
+<span class="lineno">   92 </span><span class="spaces">      </span><span class="istickedoff">&amp;&amp; <span class="nottickedoff">T.isInfixOf &quot;(&quot; t &amp;&amp; T.isInfixOf &quot;)&quot; t</span></span></span>
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>-- | An approval/menu prompt: Claude is blocked on the user.
+<span class="lineno">   95 </span>isClaudeApprovalLine :: Text -&gt; Bool
+<span class="lineno">   96 </span><span class="decl"><span class="istickedoff">isClaudeApprovalLine raw =</span>
+<span class="lineno">   97 </span><span class="spaces">  </span><span class="istickedoff">let l = T.toLower (T.stripStart raw)</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">in T.isInfixOf &quot;do you want to proceed?&quot; l</span>
+<span class="lineno">   99 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;yes, and don't ask again&quot; l</span>
+<span class="lineno">  100 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;yes, and don\x2019t ask again&quot; l</span>
+<span class="lineno">  101 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;enter to confirm&quot; l</span>
+<span class="lineno">  102 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;esc to cancel&quot; l</span>
+<span class="lineno">  103 </span><span class="spaces">     </span><span class="istickedoff">|| isNumberedYesNo (T.stripStart raw)</span></span>
+<span class="lineno">  104 </span>
+<span class="lineno">  105 </span>-- | A numbered option line, optionally led by the @❯@ menu cursor: @❯ 1. Yes@.
+<span class="lineno">  106 </span>-- Matches lines like &quot;❯ 1. Yes&quot;, &quot;  2. No&quot;, &quot;1. Something&quot;.
+<span class="lineno">  107 </span>isNumberedYesNo :: Text -&gt; Bool
+<span class="lineno">  108 </span><span class="decl"><span class="istickedoff">isNumberedYesNo l0 =</span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff">-- strip leading ❯ ›  and spaces</span>
+<span class="lineno">  110 </span><span class="spaces">  </span><span class="istickedoff">let l = T.dropWhile (\c -&gt; c == '\x276F' || c == '\x203A' || c == ' ') l0</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff">in case T.span (\c -&gt; c &gt;= '0' &amp;&amp; c &lt;= '9') l of</span>
+<span class="lineno">  112 </span><span class="spaces">       </span><span class="istickedoff">(ds, rest) -&gt; not (T.null ds) &amp;&amp; T.isPrefixOf &quot;.&quot; rest</span></span>
+<span class="lineno">  113 </span>
+<span class="lineno">  114 </span>-- | The idle input prompt: a bare @❯@/@›@ NOT followed by a number+dot
+<span class="lineno">  115 </span>-- (which would be a menu-selection cursor, not the prompt).
+<span class="lineno">  116 </span>isIdlePromptLine :: Text -&gt; Bool
+<span class="lineno">  117 </span><span class="decl"><span class="istickedoff">isIdlePromptLine raw =</span>
+<span class="lineno">  118 </span><span class="spaces">  </span><span class="istickedoff">let l = T.stripStart raw</span>
+<span class="lineno">  119 </span><span class="spaces">  </span><span class="istickedoff">in (T.isPrefixOf &quot;\x276F&quot; l || T.isPrefixOf &quot;\x203A&quot; l)  -- ❯ ›</span>
+<span class="lineno">  120 </span><span class="spaces">     </span><span class="istickedoff">&amp;&amp; not (isNumberedYesNo l)</span>
+<span class="lineno">  121 </span><span class="spaces">     </span><span class="istickedoff">&amp;&amp; T.null (T.strip (T.drop 1 l))</span></span>  -- nothing after the prompt glyph
+<span class="lineno">  122 </span>
+<span class="lineno">  123 </span>classifyClaude :: Text -&gt; HarnessActivityState
+<span class="lineno">  124 </span><span class="decl"><span class="istickedoff">classifyClaude screen =</span>
+<span class="lineno">  125 </span><span class="spaces">  </span><span class="istickedoff">let ls = T.lines screen</span>
+<span class="lineno">  126 </span><span class="spaces">  </span><span class="istickedoff">in if any isClaudeWorkingLine ls then HasWorking</span>
+<span class="lineno">  127 </span><span class="spaces">     </span><span class="istickedoff">else if any isClaudeApprovalLine ls then HasAwaitingInput</span>
+<span class="lineno">  128 </span><span class="spaces">     </span><span class="istickedoff">else HasIdle</span></span>
+<span class="lineno">  129 </span>
+<span class="lineno">  130 </span>-- | True for chrome lines that must never appear in extracted output.
+<span class="lineno">  131 </span>isClaudeChrome :: Text -&gt; Bool
+<span class="lineno">  132 </span><span class="decl"><span class="istickedoff">isClaudeChrome raw =</span>
+<span class="lineno">  133 </span><span class="spaces">  </span><span class="istickedoff">let l = T.stripStart raw</span>
+<span class="lineno">  134 </span><span class="spaces">  </span><span class="istickedoff">in T.null (T.strip l)</span>
+<span class="lineno">  135 </span><span class="spaces">     </span><span class="istickedoff">|| isClaudeWorkingLine raw</span>
+<span class="lineno">  136 </span><span class="spaces">     </span><span class="istickedoff">|| (isIdlePromptLine raw)</span>
+<span class="lineno">  137 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;for shortcuts&quot; (T.toLower l)</span>
+<span class="lineno">  138 </span><span class="spaces">     </span><span class="istickedoff">|| T.isInfixOf &quot;ctrl+o to expand&quot; (T.toLower l)</span>
+<span class="lineno">  139 </span><span class="spaces">     </span><span class="istickedoff">|| isBoxDrawingLine l</span></span>  -- ─ ▀ ▄ lines (horizontal rules)
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>isBoxDrawingLine :: Text -&gt; Bool
+<span class="lineno">  142 </span><span class="decl"><span class="istickedoff">isBoxDrawingLine l =</span>
+<span class="lineno">  143 </span><span class="spaces">  </span><span class="istickedoff">not (T.null l)</span>
+<span class="lineno">  144 </span><span class="spaces">  </span><span class="istickedoff">&amp;&amp; T.all (\c -&gt; c == '\x2500' || c == '\x2580' || c == '\x2584' || isSpace c) l</span></span>
+<span class="lineno">  145 </span>
+<span class="lineno">  146 </span>isResponseMarkerLine :: Text -&gt; Bool
+<span class="lineno">  147 </span><span class="decl"><span class="istickedoff">isResponseMarkerLine line =</span>
+<span class="lineno">  148 </span><span class="spaces">  </span><span class="istickedoff">let l = T.stripStart line</span>
+<span class="lineno">  149 </span><span class="spaces">  </span><span class="istickedoff">in T.isPrefixOf &quot;\x23FA&quot; l    -- ⏺</span>
+<span class="lineno">  150 </span><span class="spaces">     </span><span class="istickedoff">|| T.isPrefixOf &quot;\x25CF&quot; l -- ● (alternate, faryo)</span>
+<span class="lineno">  151 </span><span class="spaces">     </span><span class="istickedoff">|| T.isPrefixOf &quot;\x2B24&quot; l</span></span> -- ⬤ (alternate)
+<span class="lineno">  152 </span>
+<span class="lineno">  153 </span>stripResponseMarker :: Text -&gt; Text
+<span class="lineno">  154 </span><span class="decl"><span class="istickedoff">stripResponseMarker line =</span>
+<span class="lineno">  155 </span><span class="spaces">  </span><span class="istickedoff">T.stripStart (T.dropWhile (`elem` (&quot;\x23FA\x25CF\x2B24 &quot; :: String)) (T.stripStart line))</span></span>
+<span class="lineno">  156 </span>
+<span class="lineno">  157 </span>-- | Extract the latest assistant response. @baseline@ is the number of lines
+<span class="lineno">  158 </span>-- already seen (used to skip already-delivered content). When awaiting input,
+<span class="lineno">  159 </span>-- return the approval/menu prompt block so the user sees the question.
+<span class="lineno">  160 </span>extractClaude :: Int -&gt; ByteString -&gt; Text
+<span class="lineno">  161 </span><span class="decl"><span class="istickedoff">extractClaude baseline capture =</span>
+<span class="lineno">  162 </span><span class="spaces">  </span><span class="istickedoff">let body = dropBaseline baseline capture</span>
+<span class="lineno">  163 </span><span class="spaces">      </span><span class="istickedoff">ls   = T.lines (TE.decodeUtf8Lenient body)</span>
+<span class="lineno">  164 </span><span class="spaces">  </span><span class="istickedoff">in if any isClaudeApprovalLine ls</span>
+<span class="lineno">  165 </span><span class="spaces">       </span><span class="istickedoff">then T.strip . T.unlines $ dropWhile (not . isClaudeApprovalLine) ls</span>
+<span class="lineno">  166 </span><span class="spaces">       </span><span class="istickedoff">else case reverse [ i | (i, l) &lt;- zip [0 :: Int ..] ls, isResponseMarkerLine l ] of</span>
+<span class="lineno">  167 </span><span class="spaces">              </span><span class="istickedoff">[]      -&gt; <span class="nottickedoff">&quot;&quot;</span></span>
+<span class="lineno">  168 </span><span class="spaces">              </span><span class="istickedoff">(i : _) -&gt;</span>
+<span class="lineno">  169 </span><span class="spaces">                </span><span class="istickedoff">let block   = takeWhile (not . isIdlePromptLine) (drop i ls)</span>
+<span class="lineno">  170 </span><span class="spaces">                    </span><span class="istickedoff">cleaned = case block of</span>
+<span class="lineno">  171 </span><span class="spaces">                      </span><span class="istickedoff">(h : rest) -&gt; stripResponseMarker h : filter (not . isClaudeChrome) rest</span>
+<span class="lineno">  172 </span><span class="spaces">                      </span><span class="istickedoff">[]         -&gt; <span class="nottickedoff">[]</span></span>
+<span class="lineno">  173 </span><span class="spaces">                </span><span class="istickedoff">in T.strip (T.intercalate <span class="nottickedoff">&quot;\n&quot;</span> (filter (not . T.null) cleaned))</span></span>
+<span class="lineno">  174 </span>
+<span class="lineno">  175 </span>relevantTailClaude :: Int -&gt; ByteString -&gt; Text
+<span class="lineno">  176 </span><span class="decl"><span class="istickedoff">relevantTailClaude n capture =</span>
+<span class="lineno">  177 </span><span class="spaces">  </span><span class="istickedoff">let ls = filter (not . isClaudeChrome) (T.lines (TE.decodeUtf8Lenient capture))</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="istickedoff">in T.intercalate &quot;\n&quot; (lastN n ls)</span></span>
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>claudeObserver :: HarnessObserver
+<span class="lineno">  181 </span><span class="decl"><span class="istickedoff">claudeObserver = HarnessObserver</span>
+<span class="lineno">  182 </span><span class="spaces">  </span><span class="istickedoff">{ _ho_classify        = classifyClaude</span>
+<span class="lineno">  183 </span><span class="spaces">  </span><span class="istickedoff">, _ho_extractResponse = extractClaude</span>
+<span class="lineno">  184 </span><span class="spaces">  </span><span class="istickedoff">, _ho_relevantTail    = relevantTailClaude</span>
+<span class="lineno">  185 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">  186 </span>
+<span class="lineno">  187 </span>-- ── Generic fallback (Codex/OpenCode/Hermes/PureClaw/Custom) ─────────────────
+<span class="lineno">  188 </span>
+<span class="lineno">  189 </span>-- | Generic observer for non-Claude harnesses. Classification is always
+<span class="lineno">  190 </span>-- 'HasIdle' — stability over time (in the reconcile loop) is the only signal.
+<span class="lineno">  191 </span>genericObserver :: HarnessObserver
+<span class="lineno">  192 </span><span class="decl"><span class="istickedoff">genericObserver = HarnessObserver</span>
+<span class="lineno">  193 </span><span class="spaces">  </span><span class="istickedoff">{ _ho_classify        = const HasIdle</span>
+<span class="lineno">  194 </span><span class="spaces">  </span><span class="istickedoff">, _ho_extractResponse = <span class="nottickedoff">\n cap -&gt;</span></span>
+<span class="lineno">  195 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">let ls = cleanLines cap</span></span>
+<span class="lineno">  196 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">in if n &lt;= 0</span></span>
+<span class="lineno">  197 </span><span class="spaces">           </span><span class="istickedoff"><span class="nottickedoff">then T.intercalate &quot;\n&quot; ls</span></span>
+<span class="lineno">  198 </span><span class="spaces">           </span><span class="istickedoff"><span class="nottickedoff">else T.intercalate &quot;\n&quot; (lastN n ls)</span></span>
+<span class="lineno">  199 </span><span class="spaces">  </span><span class="istickedoff">, _ho_relevantTail    = \n cap -&gt; T.intercalate &quot;\n&quot; (lastN n (cleanLines cap))</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  202 </span><span class="spaces">    </span><span class="istickedoff">cleanLines cap = filter (not . T.null . T.strip) (T.lines (TE.decodeUtf8Lenient cap))</span></span>
+<span class="lineno">  203 </span>
+<span class="lineno">  204 </span>-- ── Shared helpers ───────────────────────────────────────────────────────────
+<span class="lineno">  205 </span>
+<span class="lineno">  206 </span>dropBaseline :: Int -&gt; ByteString -&gt; ByteString
+<span class="lineno">  207 </span><span class="decl"><span class="istickedoff">dropBaseline n cap</span>
+<span class="lineno">  208 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">n &lt;= 0</span>    = cap</span>
+<span class="lineno">  209 </span><span class="spaces">  </span><span class="istickedoff">| <span class="nottickedoff">otherwise</span> = <span class="nottickedoff">BS.intercalate (BS.singleton 0x0A) (drop n (BS.split 0x0A cap))</span></span></span>
+<span class="lineno">  210 </span>
+<span class="lineno">  211 </span>lastN :: Int -&gt; [a] -&gt; [a]
+<span class="lineno">  212 </span><span class="decl"><span class="istickedoff">lastN n xs = drop (max 0 (length xs - n)) xs</span></span>
+
+</pre>
+</body>
+</html>

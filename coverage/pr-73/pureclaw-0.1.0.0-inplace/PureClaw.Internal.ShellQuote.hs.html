@@ -1,0 +1,91 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Internal.ShellQuote
+<span class="lineno">    3 </span>-- Description : Canonical single-quote shell quoter (WU4).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- Single source of truth for POSIX single-quote-style shell quoting
+<span class="lineno">    6 </span>-- across PureClaw. The output is safe to splice into a command line
+<span class="lineno">    7 </span>-- that will be re-parsed by a POSIX-compatible shell ('sh', 'bash',
+<span class="lineno">    8 </span>-- 'dash', the remote login shell sshd hands off to, etc.).
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- Quoting rules:
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>--   * The empty string returns the literal two-character output @''@
+<span class="lineno">   13 </span>--     (so an empty positional arg survives shell re-tokenisation).
+<span class="lineno">   14 </span>--
+<span class="lineno">   15 </span>--   * Inputs whose characters are all in the \&quot;safe\&quot; set
+<span class="lineno">   16 </span>--     @[A-Za-z0-9_./=:@-]@ are returned unchanged — quoting them
+<span class="lineno">   17 </span>--     would only add noise to logs and command-line traces.
+<span class="lineno">   18 </span>--
+<span class="lineno">   19 </span>--   * All other inputs are wrapped in single quotes. Embedded single
+<span class="lineno">   20 </span>--     quotes are emitted as the four-character sequence @'\\''@
+<span class="lineno">   21 </span>--     (close-quote, backslash-escaped quote, reopen-quote), which is
+<span class="lineno">   22 </span>--     the canonical idiom for embedding a literal single quote inside
+<span class="lineno">   23 </span>--     a single-quoted POSIX string.
+<span class="lineno">   24 </span>--
+<span class="lineno">   25 </span>-- The byte-for-byte semantics match the original
+<span class="lineno">   26 </span>-- 'PureClaw.Harness.Tmux.shellEscape' / 'shellEscapeStr' helpers, which
+<span class="lineno">   27 </span>-- have been in production use; this module is now the canonical
+<span class="lineno">   28 </span>-- location for new code, and the 'Harness.Tmux' names delegate here.
+<span class="lineno">   29 </span>--
+<span class="lineno">   30 </span>-- See @docs\/terminal-backend-abstractions.md@ § \&quot;Remote arg quoting\&quot;
+<span class="lineno">   31 </span>-- and § \&quot;Scope of Harness.Tmux migration\&quot;.
+<span class="lineno">   32 </span>module PureClaw.Internal.ShellQuote
+<span class="lineno">   33 </span>  ( shellQuote
+<span class="lineno">   34 </span>  , shellQuoteString
+<span class="lineno">   35 </span>  ) where
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>import Data.Text (Text)
+<span class="lineno">   38 </span>import Data.Text qualified as T
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>-- | Quote a 'Text' for inclusion as a single argument in a POSIX
+<span class="lineno">   41 </span>-- shell command line.
+<span class="lineno">   42 </span>--
+<span class="lineno">   43 </span>-- See the module haddock for the full rules. Examples:
+<span class="lineno">   44 </span>--
+<span class="lineno">   45 </span>-- &gt;&gt;&gt; shellQuote &quot;&quot;
+<span class="lineno">   46 </span>-- &quot;''&quot;
+<span class="lineno">   47 </span>--
+<span class="lineno">   48 </span>-- &gt;&gt;&gt; shellQuote &quot;hello&quot;
+<span class="lineno">   49 </span>-- &quot;hello&quot;
+<span class="lineno">   50 </span>--
+<span class="lineno">   51 </span>-- &gt;&gt;&gt; shellQuote &quot;hello world&quot;
+<span class="lineno">   52 </span>-- &quot;'hello world'&quot;
+<span class="lineno">   53 </span>--
+<span class="lineno">   54 </span>-- &gt;&gt;&gt; shellQuote &quot;it's&quot;
+<span class="lineno">   55 </span>-- &quot;'it'\\''s'&quot;
+<span class="lineno">   56 </span>shellQuote :: Text -&gt; Text
+<span class="lineno">   57 </span><span class="decl"><span class="istickedoff">shellQuote t</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">| T.null t = &quot;''&quot;</span>
+<span class="lineno">   59 </span><span class="spaces">  </span><span class="istickedoff">| T.all isSafe t = t</span>
+<span class="lineno">   60 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = &quot;'&quot; &lt;&gt; T.replace &quot;'&quot; &quot;'\\''&quot; t &lt;&gt; &quot;'&quot;</span>
+<span class="lineno">   61 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   62 </span><span class="spaces">    </span><span class="istickedoff">isSafe c = c `elem` safeChars</span>
+<span class="lineno">   63 </span><span class="spaces">    </span><span class="istickedoff">safeChars = ['a'..'z'] &lt;&gt; ['A'..'Z'] &lt;&gt; ['0'..'9'] &lt;&gt; &quot;-_./=:@&quot;</span></span>
+<span class="lineno">   64 </span>
+<span class="lineno">   65 </span>-- | 'String'-typed convenience wrapper around 'shellQuote' for callers
+<span class="lineno">   66 </span>-- working with 'FilePath' or other @String@-shaped argv values.
+<span class="lineno">   67 </span>shellQuoteString :: String -&gt; String
+<span class="lineno">   68 </span><span class="decl"><span class="istickedoff">shellQuoteString = T.unpack . shellQuote . T.pack</span></span>
+
+</pre>
+</body>
+</html>

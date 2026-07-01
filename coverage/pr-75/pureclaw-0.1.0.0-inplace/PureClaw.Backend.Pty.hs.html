@@ -1,0 +1,628 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>-- |
+<span class="lineno">    2 </span>-- Module      : PureClaw.Backend.Pty
+<span class="lineno">    3 </span>-- Description : PTY allocation seam, drainer state machine, recv idle logic (WU7).
+<span class="lineno">    4 </span>--
+<span class="lineno">    5 </span>-- == Posix-pty firewall
+<span class="lineno">    6 </span>--
+<span class="lineno">    7 </span>-- This module is the __only__ module in the codebase that imports
+<span class="lineno">    8 </span>-- &quot;System.Posix.Pty&quot;. The 'PtyFds' ADT is opaque to the rest of the
+<span class="lineno">    9 </span>-- code: its constructors are not exported, which is the type-level
+<span class="lineno">   10 </span>-- side of the firewall. The CI gate
+<span class="lineno">   11 </span>-- @scripts\/check-pty-firewall.sh@ enforces the same invariant at the
+<span class="lineno">   12 </span>-- import level.
+<span class="lineno">   13 </span>--
+<span class="lineno">   14 </span>-- A sibling module 'PureClaw.Backend.Pty.Fake' is the only other
+<span class="lineno">   15 </span>-- member of the firewall — it consumes a small internal-only
+<span class="lineno">   16 </span>-- accessor surface (@FakePtyState@, 'mkFakePtyFds', 'withFakePtyState')
+<span class="lineno">   17 </span>-- to build a deterministic in-process 'PtyIO' for tests. No other
+<span class="lineno">   18 </span>-- module may pattern-match on 'PtyFds' or import @System.Posix.Pty@.
+<span class="lineno">   19 </span>--
+<span class="lineno">   20 </span>-- == 'realPtyIO' coverage policy
+<span class="lineno">   21 </span>--
+<span class="lineno">   22 </span>-- 'realPtyIO' is exercised only via integration tests that spawn real
+<span class="lineno">   23 </span>-- subprocesses (WU8 \/ WU9). Lines that cannot be reached without a
+<span class="lineno">   24 </span>-- real kernel-level PTY (the kernel-error paths inside @posix-pty@)
+<span class="lineno">   25 </span>-- are flagged @-- HPC:Exclude@ at the call sites. The @fakePtyIO@
+<span class="lineno">   26 </span>-- path in 'PureClaw.Backend.Pty.Fake' carries 100% branch coverage
+<span class="lineno">   27 </span>-- and is the substrate for the drainer\'s property tests.
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- == Drainer ⇄ Recv signalling
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- 'runDrainerLoop' forks an 'Control.Concurrent.Async.Async' that
+<span class="lineno">   32 </span>-- reads from a 'PtyFds' into the STM 'DrainState'. 'drainerRecv' is
+<span class="lineno">   33 </span>-- the consumer side: it implements the idle state machine from
+<span class="lineno">   34 </span>-- @docs\/terminal-backend-abstractions.md@ § &quot;Idle state machine&quot;
+<span class="lineno">   35 </span>-- (waiting-for-first-byte → draining → settled\/timed-out\/eof\/truncated).
+<span class="lineno">   36 </span>module PureClaw.Backend.Pty
+<span class="lineno">   37 </span>  ( -- * PTY seam
+<span class="lineno">   38 </span>    PtyIO (..)
+<span class="lineno">   39 </span>  , PtyFds
+<span class="lineno">   40 </span>  , PtyOpenSpec (..)
+<span class="lineno">   41 </span>  , realPtyIO
+<span class="lineno">   42 </span>    -- * Construction of fake-side PtyFds (consumed by &quot;PureClaw.Backend.Pty.Fake&quot;)
+<span class="lineno">   43 </span>  , FakePtyState (..)
+<span class="lineno">   44 </span>  , mkFakePtyFds
+<span class="lineno">   45 </span>  , withFakePtyState
+<span class="lineno">   46 </span>  , isFakePtyFds
+<span class="lineno">   47 </span>    -- * Drainer
+<span class="lineno">   48 </span>  , RecvSignal (..)
+<span class="lineno">   49 </span>  , DrainState (..)
+<span class="lineno">   50 </span>  , newDrainState
+<span class="lineno">   51 </span>  , runDrainerLoop
+<span class="lineno">   52 </span>  , drainerRecv
+<span class="lineno">   53 </span>    -- * Drainer-backed factory substrate
+<span class="lineno">   54 </span>  , mkDrainerBackendHandle
+<span class="lineno">   55 </span>  ) where
+<span class="lineno">   56 </span>
+<span class="lineno">   57 </span>import Control.Concurrent.Async (Async)
+<span class="lineno">   58 </span>import Control.Concurrent.Async qualified as Async
+<span class="lineno">   59 </span>import Control.Concurrent.MVar (modifyMVar_, newMVar)
+<span class="lineno">   60 </span>import Control.Concurrent.STM
+<span class="lineno">   61 </span>  ( STM
+<span class="lineno">   62 </span>  , atomically
+<span class="lineno">   63 </span>  , orElse
+<span class="lineno">   64 </span>  , registerDelay
+<span class="lineno">   65 </span>  , retry
+<span class="lineno">   66 </span>  )
+<span class="lineno">   67 </span>import Control.Concurrent.STM.TBQueue
+<span class="lineno">   68 </span>  ( TBQueue
+<span class="lineno">   69 </span>  , newTBQueueIO
+<span class="lineno">   70 </span>  , readTBQueue
+<span class="lineno">   71 </span>  , tryReadTBQueue
+<span class="lineno">   72 </span>  , writeTBQueue
+<span class="lineno">   73 </span>  )
+<span class="lineno">   74 </span>import Control.Concurrent.STM.TVar
+<span class="lineno">   75 </span>  ( TVar
+<span class="lineno">   76 </span>  , newTVarIO
+<span class="lineno">   77 </span>  , readTVar
+<span class="lineno">   78 </span>  , readTVarIO
+<span class="lineno">   79 </span>  , writeTVar
+<span class="lineno">   80 </span>  )
+<span class="lineno">   81 </span>import Control.Exception (SomeException, mask, try)
+<span class="lineno">   82 </span>import Control.Monad qualified
+<span class="lineno">   83 </span>import Control.Monad (unless, when)
+<span class="lineno">   84 </span>import Data.ByteString (ByteString)
+<span class="lineno">   85 </span>import Data.ByteString qualified as BS
+<span class="lineno">   86 </span>import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+<span class="lineno">   87 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   88 </span>import Data.Maybe (fromMaybe)
+<span class="lineno">   89 </span>import Data.Text (Text)
+<span class="lineno">   90 </span>import Data.Text qualified as T
+<span class="lineno">   91 </span>import System.Posix.Signals qualified as Posix.Sig
+<span class="lineno">   92 </span>import System.Process qualified as Proc
+<span class="lineno">   93 </span>import System.Timeout (timeout)
+<span class="lineno">   94 </span>
+<span class="lineno">   95 </span>import System.Posix.Pty qualified as Posix.Pty
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>import PureClaw.Handles.Backend
+<span class="lineno">   98 </span>  ( BackendError
+<span class="lineno">   99 </span>  , BackendHandle (..)
+<span class="lineno">  100 </span>  , BackendKind (..)
+<span class="lineno">  101 </span>  , Cols (..)
+<span class="lineno">  102 </span>  , EnvMap
+<span class="lineno">  103 </span>  , EnvValue (..)
+<span class="lineno">  104 </span>  , IdleSpec
+<span class="lineno">  105 </span>  , PtyOpts (..)
+<span class="lineno">  106 </span>  , RecvResult (..)
+<span class="lineno">  107 </span>  , Rows (..)
+<span class="lineno">  108 </span>  , acquireBufferQuota
+<span class="lineno">  109 </span>  , globalBackendBufferQuota
+<span class="lineno">  110 </span>  , idleMinFirstByte
+<span class="lineno">  111 </span>  , idleQuietMs
+<span class="lineno">  112 </span>  , idleTimeoutMs
+<span class="lineno">  113 </span>  , releaseBufferQuota
+<span class="lineno">  114 </span>  )
+<span class="lineno">  115 </span>import PureClaw.Internal.FakeClock (FakeClock)
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>--------------------------------------------------------------------------------
+<span class="lineno">  118 </span>-- PTY seam
+<span class="lineno">  119 </span>--------------------------------------------------------------------------------
+<span class="lineno">  120 </span>
+<span class="lineno">  121 </span>-- | Caller-supplied parameters for opening a PTY.
+<span class="lineno">  122 </span>--
+<span class="lineno">  123 </span>-- Built by factory modules ('PureClaw.Backend.Local',
+<span class="lineno">  124 </span>-- 'PureClaw.Backend.SSH', 'PureClaw.Backend.Tmux') from an
+<span class="lineno">  125 </span>-- 'PureClaw.Security.Command.AuthorizedCommand' (or remote analogue)
+<span class="lineno">  126 </span>-- plus the option record\'s geometry / env / cwd.
+<span class="lineno">  127 </span>data PtyOpenSpec = PtyOpenSpec
+<span class="lineno">  128 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pos_program</span></span></span> :: !FilePath
+<span class="lineno">  129 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pos_args</span></span></span>    :: ![Text]
+<span class="lineno">  130 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pos_env</span></span></span>     :: !EnvMap
+<span class="lineno">  131 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pos_cwd</span></span></span>     :: !(Maybe FilePath)
+<span class="lineno">  132 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pos_cols</span></span></span>    :: !Cols
+<span class="lineno">  133 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pos_rows</span></span></span>    :: !Rows
+<span class="lineno">  134 </span>  }
+<span class="lineno">  135 </span>
+<span class="lineno">  136 </span>-- | Opaque PTY file-descriptors handle.
+<span class="lineno">  137 </span>--
+<span class="lineno">  138 </span>-- The constructors are NOT exported. Other modules see 'PtyFds' as an
+<span class="lineno">  139 </span>-- abstract type and operate on it only via a 'PtyIO' record. This is
+<span class="lineno">  140 </span>-- the type-level half of the @posix-pty@ firewall.
+<span class="lineno">  141 </span>data PtyFds
+<span class="lineno">  142 </span>  = RealPtyFds !Posix.Pty.Pty !(Maybe Proc.ProcessHandle)
+<span class="lineno">  143 </span>  | FakePtyFds !FakePtyState
+<span class="lineno">  144 </span>
+<span class="lineno">  145 </span>-- | Internal record state for the fake PTY path.
+<span class="lineno">  146 </span>--
+<span class="lineno">  147 </span>-- Defined here (rather than in &quot;PureClaw.Backend.Pty.Fake&quot;) so that
+<span class="lineno">  148 </span>-- the 'PtyFds' constructors can remain hidden from the world while
+<span class="lineno">  149 </span>-- the @Fake@ submodule still has the structure it needs to update via
+<span class="lineno">  150 </span>-- 'withFakePtyState'.
+<span class="lineno">  151 </span>data FakePtyState = FakePtyState
+<span class="lineno">  152 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_fps_readQueue</span></span></span> :: !(IORef [ByteString])
+<span class="lineno">  153 </span>    -- ^ Pending output chunks, head consumed first.
+<span class="lineno">  154 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fps_writeLog</span></span></span>  :: !(IORef [ByteString])
+<span class="lineno">  155 </span>    -- ^ All bytes ever written through '_pio_write', newest first.
+<span class="lineno">  156 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fps_resizeLog</span></span></span> :: !(IORef [(Cols, Rows)])
+<span class="lineno">  157 </span>    -- ^ All resize calls, newest first.
+<span class="lineno">  158 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fps_closed</span></span></span>    :: !(IORef Bool)
+<span class="lineno">  159 </span>    -- ^ 'True' once '_pio_close' has been called at least once.
+<span class="lineno">  160 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fps_eofAfter</span></span></span>  :: !(IORef (Maybe Int))
+<span class="lineno">  161 </span>    -- ^ Optional cap: after this many bytes have been read,
+<span class="lineno">  162 </span>    -- @_pio_read@ returns empty 'ByteString' (EOF).
+<span class="lineno">  163 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_fps_bytesRead</span></span></span> :: !(IORef Int)
+<span class="lineno">  164 </span>    -- ^ Running total of bytes returned from '_pio_read'.
+<span class="lineno">  165 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_fps_clock</span></span></span>     :: !FakeClock
+<span class="lineno">  166 </span>    -- ^ Deterministic clock; tests advance it explicitly.
+<span class="lineno">  167 </span>  }
+<span class="lineno">  168 </span>
+<span class="lineno">  169 </span>-- | Construct a fake 'PtyFds' from a populated 'FakePtyState'. Used
+<span class="lineno">  170 </span>-- only by &quot;PureClaw.Backend.Pty.Fake&quot;.
+<span class="lineno">  171 </span>mkFakePtyFds :: FakePtyState -&gt; PtyFds
+<span class="lineno">  172 </span><span class="decl"><span class="istickedoff">mkFakePtyFds = FakePtyFds</span></span>
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>-- | Apply an action to the fake state inside a 'PtyFds', if the value
+<span class="lineno">  175 </span>-- came from the fake path. Returns 'Nothing' if the 'PtyFds' is real.
+<span class="lineno">  176 </span>withFakePtyState :: PtyFds -&gt; (FakePtyState -&gt; IO a) -&gt; IO (Maybe a)
+<span class="lineno">  177 </span><span class="decl"><span class="istickedoff">withFakePtyState fds f = case fds of</span>
+<span class="lineno">  178 </span><span class="spaces">  </span><span class="istickedoff">FakePtyFds st -&gt; Just &lt;$&gt; f st</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="istickedoff">RealPtyFds {} -&gt; <span class="nottickedoff">pure Nothing</span></span></span>
+<span class="lineno">  180 </span>
+<span class="lineno">  181 </span>-- | Predicate: did this 'PtyFds' come from the fake path?
+<span class="lineno">  182 </span>--
+<span class="lineno">  183 </span>-- Provided so the rest of the codebase never has to pattern-match on
+<span class="lineno">  184 </span>-- 'PtyFds' to know which side it is on.
+<span class="lineno">  185 </span>isFakePtyFds :: PtyFds -&gt; Bool
+<span class="lineno">  186 </span><span class="decl"><span class="nottickedoff">isFakePtyFds (FakePtyFds {}) = True</span>
+<span class="lineno">  187 </span><span class="spaces"></span><span class="nottickedoff">isFakePtyFds (RealPtyFds {}) = False</span></span>
+<span class="lineno">  188 </span>
+<span class="lineno">  189 </span>-- | The injectable PTY-allocation seam.
+<span class="lineno">  190 </span>--
+<span class="lineno">  191 </span>-- The factory modules ('PureClaw.Backend.Local' etc.) consume a value
+<span class="lineno">  192 </span>-- of this type instead of importing @posix-pty@ directly. Tests use
+<span class="lineno">  193 </span>-- 'PureClaw.Backend.Pty.Fake.fakePtyIO'; production uses 'realPtyIO'.
+<span class="lineno">  194 </span>data PtyIO = PtyIO
+<span class="lineno">  195 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pio_open</span></span></span>   :: PtyOpenSpec -&gt; IO PtyFds
+<span class="lineno">  196 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pio_read</span></span></span>   :: PtyFds -&gt; Int -&gt; IO ByteString
+<span class="lineno">  197 </span>    -- ^ Read up to N bytes. May block. An empty result means EOF.
+<span class="lineno">  198 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pio_write</span></span></span>  :: PtyFds -&gt; ByteString -&gt; IO ()
+<span class="lineno">  199 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_pio_resize</span></span></span> :: PtyFds -&gt; Cols -&gt; Rows -&gt; IO ()
+<span class="lineno">  200 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pio_close</span></span></span>  :: PtyFds -&gt; IO ()
+<span class="lineno">  201 </span>  }
+<span class="lineno">  202 </span>
+<span class="lineno">  203 </span>-- | The real, @posix-pty@-backed 'PtyIO'.
+<span class="lineno">  204 </span>--
+<span class="lineno">  205 </span>-- The 'PtyOpenSpec' carries the program + args + env + cwd + geometry;
+<span class="lineno">  206 </span>-- the open action calls 'Posix.Pty.spawnWithPty' inside a real PTY and
+<span class="lineno">  207 </span>-- returns a wrapping 'PtyFds'.
+<span class="lineno">  208 </span>realPtyIO :: PtyIO
+<span class="lineno">  209 </span><span class="decl"><span class="istickedoff">realPtyIO = PtyIO</span>
+<span class="lineno">  210 </span><span class="spaces">  </span><span class="istickedoff">{ _pio_open   = realOpen</span>
+<span class="lineno">  211 </span><span class="spaces">  </span><span class="istickedoff">, _pio_read   = realRead</span>
+<span class="lineno">  212 </span><span class="spaces">  </span><span class="istickedoff">, _pio_write  = realWrite</span>
+<span class="lineno">  213 </span><span class="spaces">  </span><span class="istickedoff">, _pio_resize = <span class="nottickedoff">realResize</span></span>
+<span class="lineno">  214 </span><span class="spaces">  </span><span class="istickedoff">, _pio_close  = realClose</span>
+<span class="lineno">  215 </span><span class="spaces">  </span><span class="istickedoff">}</span>
+<span class="lineno">  216 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  217 </span><span class="spaces">    </span><span class="istickedoff">-- HPC:Exclude — kernel-error paths exercised only via integration tests.</span>
+<span class="lineno">  218 </span><span class="spaces">    </span><span class="istickedoff">realOpen :: PtyOpenSpec -&gt; IO PtyFds</span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="istickedoff">realOpen spec = do</span>
+<span class="lineno">  220 </span><span class="spaces">      </span><span class="istickedoff">let cols = unCols (_pos_cols spec)</span>
+<span class="lineno">  221 </span><span class="spaces">          </span><span class="istickedoff">rows = unRows (_pos_rows spec)</span>
+<span class="lineno">  222 </span><span class="spaces">          </span><span class="istickedoff">env  = envToTuples (_pos_env spec)</span>
+<span class="lineno">  223 </span><span class="spaces">          </span><span class="istickedoff">mEnv = if null env then Nothing else Just env</span>
+<span class="lineno">  224 </span><span class="spaces">          </span><span class="istickedoff">prog = _pos_program spec</span>
+<span class="lineno">  225 </span><span class="spaces">          </span><span class="istickedoff">args = map T.unpack (_pos_args spec)</span>
+<span class="lineno">  226 </span><span class="spaces">      </span><span class="istickedoff">(pty, ph) &lt;- Posix.Pty.spawnWithPty mEnv True prog args (cols, rows)</span>
+<span class="lineno">  227 </span><span class="spaces">      </span><span class="istickedoff">pure (RealPtyFds pty (Just ph))</span>
+<span class="lineno">  228 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  229 </span><span class="spaces">    </span><span class="istickedoff">realRead :: PtyFds -&gt; Int -&gt; IO ByteString</span>
+<span class="lineno">  230 </span><span class="spaces">    </span><span class="istickedoff">realRead fds _ = case fds of</span>
+<span class="lineno">  231 </span><span class="spaces">      </span><span class="istickedoff">RealPtyFds pty _ -&gt; do</span>
+<span class="lineno">  232 </span><span class="spaces">        </span><span class="istickedoff">-- HPC:Exclude — real-PTY error paths</span>
+<span class="lineno">  233 </span><span class="spaces">        </span><span class="istickedoff">r &lt;- try @SomeException (Posix.Pty.readPty pty)</span>
+<span class="lineno">  234 </span><span class="spaces">        </span><span class="istickedoff">case r of</span>
+<span class="lineno">  235 </span><span class="spaces">          </span><span class="istickedoff">Right bs -&gt; pure bs</span>
+<span class="lineno">  236 </span><span class="spaces">          </span><span class="istickedoff">Left _   -&gt; pure BS.empty -- treat as EOF</span>
+<span class="lineno">  237 </span><span class="spaces">      </span><span class="istickedoff">FakePtyFds _ -&gt; <span class="nottickedoff">pure BS.empty</span></span>
+<span class="lineno">  238 </span><span class="spaces">      </span><span class="istickedoff">-- ^ unreachable: realPtyIO never produces a FakePtyFds; the</span>
+<span class="lineno">  239 </span><span class="spaces">      </span><span class="istickedoff">--   total pattern keeps -Wall quiet.</span>
+<span class="lineno">  240 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">realWrite :: PtyFds -&gt; ByteString -&gt; IO ()</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">realWrite fds bs = case fds of</span>
+<span class="lineno">  243 </span><span class="spaces">      </span><span class="istickedoff">RealPtyFds pty _ -&gt; Posix.Pty.writePty pty bs</span>
+<span class="lineno">  244 </span><span class="spaces">      </span><span class="istickedoff">FakePtyFds _     -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  245 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  246 </span><span class="spaces">    </span><span class="istickedoff">realResize :: PtyFds -&gt; Cols -&gt; Rows -&gt; IO ()</span>
+<span class="lineno">  247 </span><span class="spaces">    </span><span class="istickedoff"><span class="nottickedoff">realResize fds (Cols c) (Rows r) = case fds of</span></span>
+<span class="lineno">  248 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">RealPtyFds pty _ -&gt; Posix.Pty.resizePty pty (c, r)</span></span>
+<span class="lineno">  249 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">FakePtyFds _     -&gt; pure ()</span></span>
+<span class="lineno">  250 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  251 </span><span class="spaces">    </span><span class="istickedoff">realClose :: PtyFds -&gt; IO ()</span>
+<span class="lineno">  252 </span><span class="spaces">    </span><span class="istickedoff">realClose fds = case fds of</span>
+<span class="lineno">  253 </span><span class="spaces">      </span><span class="istickedoff">RealPtyFds pty mPh -&gt; do</span>
+<span class="lineno">  254 </span><span class="spaces">        </span><span class="istickedoff">-- 1. SIGKILL the child FIRST when we have its PID.</span>
+<span class="lineno">  255 </span><span class="spaces">        </span><span class="istickedoff">--</span>
+<span class="lineno">  256 </span><span class="spaces">        </span><span class="istickedoff">-- SIGTERM (what 'Proc.terminateProcess' sends on POSIX) is</span>
+<span class="lineno">  257 </span><span class="spaces">        </span><span class="istickedoff">-- ignored by interactive shells — see bash(1): &quot;In the</span>
+<span class="lineno">  258 </span><span class="spaces">        </span><span class="istickedoff">-- absence of any traps, an interactive shell ignores</span>
+<span class="lineno">  259 </span><span class="spaces">        </span><span class="istickedoff">-- SIGTERM&quot;. A 'bash -i' child therefore survives the polite</span>
+<span class="lineno">  260 </span><span class="spaces">        </span><span class="istickedoff">-- termination signal and 'Proc.waitForProcess' blocks</span>
+<span class="lineno">  261 </span><span class="spaces">        </span><span class="istickedoff">-- forever. SIGKILL cannot be caught or ignored, so it is</span>
+<span class="lineno">  262 </span><span class="spaces">        </span><span class="istickedoff">-- the only signal that reliably unblocks the close path.</span>
+<span class="lineno">  263 </span><span class="spaces">        </span><span class="istickedoff">--</span>
+<span class="lineno">  264 </span><span class="spaces">        </span><span class="istickedoff">-- We do this BEFORE closing the PTY master so the drainer's</span>
+<span class="lineno">  265 </span><span class="spaces">        </span><span class="istickedoff">-- blocking read (a non-interruptible C call inside</span>
+<span class="lineno">  266 </span><span class="spaces">        </span><span class="istickedoff">-- @posix-pty@) terminates deterministically — once the child</span>
+<span class="lineno">  267 </span><span class="spaces">        </span><span class="istickedoff">-- is gone, the slave fd is closed and the master read returns</span>
+<span class="lineno">  268 </span><span class="spaces">        </span><span class="istickedoff">-- EOF, which lets the drainer Async exit its loop.</span>
+<span class="lineno">  269 </span><span class="spaces">        </span><span class="istickedoff">case mPh of</span>
+<span class="lineno">  270 </span><span class="spaces">          </span><span class="istickedoff">Just ph -&gt; do</span>
+<span class="lineno">  271 </span><span class="spaces">            </span><span class="istickedoff">mPid &lt;- Proc.getPid ph</span>
+<span class="lineno">  272 </span><span class="spaces">            </span><span class="istickedoff">case mPid of</span>
+<span class="lineno">  273 </span><span class="spaces">              </span><span class="istickedoff">Just pid -&gt;</span>
+<span class="lineno">  274 </span><span class="spaces">                </span><span class="istickedoff">Control.Monad.void $ try @SomeException</span>
+<span class="lineno">  275 </span><span class="spaces">                  </span><span class="istickedoff">(Posix.Sig.signalProcess Posix.Sig.sigKILL pid)</span>
+<span class="lineno">  276 </span><span class="spaces">              </span><span class="istickedoff">Nothing  -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  277 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  278 </span><span class="spaces">        </span><span class="istickedoff">-- 2. Close PTY master. Also a hangup signal for any child</span>
+<span class="lineno">  279 </span><span class="spaces">        </span><span class="istickedoff">-- that we somehow couldn't address by PID.</span>
+<span class="lineno">  280 </span><span class="spaces">        </span><span class="istickedoff">_ &lt;- try @SomeException (Posix.Pty.closePty pty)</span>
+<span class="lineno">  281 </span><span class="spaces">        </span><span class="istickedoff">-- 3. Collect the zombie. SIGKILL above means this should</span>
+<span class="lineno">  282 </span><span class="spaces">        </span><span class="istickedoff">-- return immediately; bound it to 2s to defend against any</span>
+<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">-- pathological case where the child survived.</span>
+<span class="lineno">  284 </span><span class="spaces">        </span><span class="istickedoff">case mPh of</span>
+<span class="lineno">  285 </span><span class="spaces">          </span><span class="istickedoff">Just ph -&gt; do</span>
+<span class="lineno">  286 </span><span class="spaces">            </span><span class="istickedoff">_ &lt;- timeout 2_000_000 (try @SomeException (Proc.waitForProcess ph))</span>
+<span class="lineno">  287 </span><span class="spaces">            </span><span class="istickedoff">pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  288 </span><span class="spaces">          </span><span class="istickedoff">Nothing -&gt; <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  289 </span><span class="spaces">      </span><span class="istickedoff">FakePtyFds _ -&gt; <span class="nottickedoff">pure ()</span></span></span>
+<span class="lineno">  290 </span>
+<span class="lineno">  291 </span>unCols :: Cols -&gt; Int
+<span class="lineno">  292 </span><span class="decl"><span class="istickedoff">unCols (Cols n) = n</span></span>
+<span class="lineno">  293 </span>
+<span class="lineno">  294 </span>unRows :: Rows -&gt; Int
+<span class="lineno">  295 </span><span class="decl"><span class="istickedoff">unRows (Rows n) = n</span></span>
+<span class="lineno">  296 </span>
+<span class="lineno">  297 </span>envToTuples :: EnvMap -&gt; [(String, String)]
+<span class="lineno">  298 </span><span class="decl"><span class="istickedoff">envToTuples = map render . Map.toAscList</span>
+<span class="lineno">  299 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  300 </span><span class="spaces">    </span><span class="istickedoff">render (k, EnvValue v) = (k, byteStringToString v)</span>
+<span class="lineno">  301 </span><span class="spaces">    </span><span class="istickedoff">byteStringToString bs = map (toEnum . fromIntegral) (BS.unpack bs)</span></span>
+<span class="lineno">  302 </span>
+<span class="lineno">  303 </span>--------------------------------------------------------------------------------
+<span class="lineno">  304 </span>-- Drainer
+<span class="lineno">  305 </span>--------------------------------------------------------------------------------
+<span class="lineno">  306 </span>
+<span class="lineno">  307 </span>-- | A unit pushed onto 'DrainState._ds_queue' by the drainer 'Async'.
+<span class="lineno">  308 </span>data RecvSignal
+<span class="lineno">  309 </span>  = RsChunk !ByteString
+<span class="lineno">  310 </span>    -- ^ A new chunk of output.
+<span class="lineno">  311 </span>  | RsEof
+<span class="lineno">  312 </span>    -- ^ The drainer\'s underlying read returned EOF (PTY closed).
+<span class="lineno">  313 </span>  | RsTrunc
+<span class="lineno">  314 </span>    -- ^ The per-backend recv-buffer cap was reached. After this
+<span class="lineno">  315 </span>    -- sentinel, the drainer stops enqueuing chunks and the truncate
+<span class="lineno">  316 </span>    -- latch ('_ds_truncated') is set to 'True'.
+<span class="lineno">  317 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  318 </span>
+<span class="lineno">  319 </span>-- | The STM state shared between the drainer 'Async' and 'drainerRecv'.
+<span class="lineno">  320 </span>data DrainState = DrainState
+<span class="lineno">  321 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ds_queue</span></span></span>       :: !(TBQueue RecvSignal)
+<span class="lineno">  322 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ds_truncated</span></span></span>   :: !(TVar Bool)
+<span class="lineno">  323 </span>    -- ^ Latches 'True' on the first 'RsTrunc'; never reset.
+<span class="lineno">  324 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ds_drainerDone</span></span></span> :: !(TVar Bool)
+<span class="lineno">  325 </span>    -- ^ Set to 'True' when the drainer 'Async' has finished
+<span class="lineno">  326 </span>    -- (EOF, exception, or cancel).
+<span class="lineno">  327 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ds_bytesQueued</span></span></span> :: !(TVar Int)
+<span class="lineno">  328 </span>    -- ^ Sum of bytes accepted by the queue (i.e. before truncation).
+<span class="lineno">  329 </span>  }
+<span class="lineno">  330 </span>
+<span class="lineno">  331 </span>-- | Allocate a fresh 'DrainState'. The queue capacity is generous: the
+<span class="lineno">  332 </span>-- per-byte cap is enforced by 'runDrainerLoop' against
+<span class="lineno">  333 </span>-- '_ds_bytesQueued', not by the queue\'s slot count.
+<span class="lineno">  334 </span>newDrainState :: IO DrainState
+<span class="lineno">  335 </span><span class="decl"><span class="istickedoff">newDrainState = do</span>
+<span class="lineno">  336 </span><span class="spaces">  </span><span class="istickedoff">q  &lt;- newTBQueueIO 1024</span>
+<span class="lineno">  337 </span><span class="spaces">  </span><span class="istickedoff">tr &lt;- newTVarIO False</span>
+<span class="lineno">  338 </span><span class="spaces">  </span><span class="istickedoff">dd &lt;- newTVarIO False</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="istickedoff">bq &lt;- newTVarIO 0</span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="istickedoff">pure DrainState</span>
+<span class="lineno">  341 </span><span class="spaces">    </span><span class="istickedoff">{ _ds_queue       = q</span>
+<span class="lineno">  342 </span><span class="spaces">    </span><span class="istickedoff">, _ds_truncated   = tr</span>
+<span class="lineno">  343 </span><span class="spaces">    </span><span class="istickedoff">, _ds_drainerDone = dd</span>
+<span class="lineno">  344 </span><span class="spaces">    </span><span class="istickedoff">, _ds_bytesQueued = bq</span>
+<span class="lineno">  345 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  346 </span>
+<span class="lineno">  347 </span>-- | Spawn the drainer loop.
+<span class="lineno">  348 </span>--
+<span class="lineno">  349 </span>-- The loop reads chunks from the 'PtyFds' via @_pio_read@; on each
+<span class="lineno">  350 </span>-- non-empty chunk it accounts for it against the per-backend
+<span class="lineno">  351 </span>-- @recvBufferCap@ (in bytes); on overflow it sets '_ds_truncated' and
+<span class="lineno">  352 </span>-- emits 'RsTrunc', then stops reading. On EOF (empty 'ByteString'
+<span class="lineno">  353 </span>-- from the read) it emits 'RsEof' and exits. Cancelling the returned
+<span class="lineno">  354 </span>-- 'Async' terminates the loop; '_ds_drainerDone' is set on any exit.
+<span class="lineno">  355 </span>runDrainerLoop
+<span class="lineno">  356 </span>  :: PtyIO
+<span class="lineno">  357 </span>  -&gt; PtyFds
+<span class="lineno">  358 </span>  -&gt; Int -- ^ recv-buffer cap, bytes
+<span class="lineno">  359 </span>  -&gt; DrainState
+<span class="lineno">  360 </span>  -&gt; IO (Async ())
+<span class="lineno">  361 </span><span class="decl"><span class="istickedoff">runDrainerLoop pio fds cap st = Async.async (loop `finallyAtomic` markDone)</span>
+<span class="lineno">  362 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  363 </span><span class="spaces">    </span><span class="istickedoff">loop :: IO ()</span>
+<span class="lineno">  364 </span><span class="spaces">    </span><span class="istickedoff">loop = do</span>
+<span class="lineno">  365 </span><span class="spaces">      </span><span class="istickedoff">truncated &lt;- readTVarIO (_ds_truncated st)</span>
+<span class="lineno">  366 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlyfalse">truncated</span></span>
+<span class="lineno">  367 </span><span class="spaces">        </span><span class="istickedoff">then <span class="nottickedoff">pure ()</span></span>
+<span class="lineno">  368 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  369 </span><span class="spaces">          </span><span class="istickedoff">chunk &lt;- _pio_read pio fds <span class="nottickedoff">4096</span></span>
+<span class="lineno">  370 </span><span class="spaces">          </span><span class="istickedoff">if BS.null chunk</span>
+<span class="lineno">  371 </span><span class="spaces">            </span><span class="istickedoff">then atomically (writeTBQueue (_ds_queue st) RsEof)</span>
+<span class="lineno">  372 </span><span class="spaces">            </span><span class="istickedoff">else do</span>
+<span class="lineno">  373 </span><span class="spaces">              </span><span class="istickedoff">cont &lt;- atomically $ do</span>
+<span class="lineno">  374 </span><span class="spaces">                </span><span class="istickedoff">queued &lt;- readTVar (_ds_bytesQueued st)</span>
+<span class="lineno">  375 </span><span class="spaces">                </span><span class="istickedoff">let newTotal = queued + BS.length chunk</span>
+<span class="lineno">  376 </span><span class="spaces">                </span><span class="istickedoff">if newTotal &gt; cap</span>
+<span class="lineno">  377 </span><span class="spaces">                  </span><span class="istickedoff">then do</span>
+<span class="lineno">  378 </span><span class="spaces">                    </span><span class="istickedoff">writeTVar (_ds_truncated st) True</span>
+<span class="lineno">  379 </span><span class="spaces">                    </span><span class="istickedoff">writeTBQueue (_ds_queue st) RsTrunc</span>
+<span class="lineno">  380 </span><span class="spaces">                    </span><span class="istickedoff">pure False</span>
+<span class="lineno">  381 </span><span class="spaces">                  </span><span class="istickedoff">else do</span>
+<span class="lineno">  382 </span><span class="spaces">                    </span><span class="istickedoff">writeTVar (_ds_bytesQueued st) newTotal</span>
+<span class="lineno">  383 </span><span class="spaces">                    </span><span class="istickedoff">writeTBQueue (_ds_queue st) (RsChunk chunk)</span>
+<span class="lineno">  384 </span><span class="spaces">                    </span><span class="istickedoff">pure True</span>
+<span class="lineno">  385 </span><span class="spaces">              </span><span class="istickedoff">when cont loop</span>
+<span class="lineno">  386 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  387 </span><span class="spaces">    </span><span class="istickedoff">markDone :: IO ()</span>
+<span class="lineno">  388 </span><span class="spaces">    </span><span class="istickedoff">markDone = atomically (writeTVar (_ds_drainerDone st) <span class="nottickedoff">True</span>)</span>
+<span class="lineno">  389 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  390 </span><span class="spaces">    </span><span class="istickedoff">-- A 'finally'-style wrapper that ignores exceptions from the inner</span>
+<span class="lineno">  391 </span><span class="spaces">    </span><span class="istickedoff">-- action (the drainer is best-effort) but always runs the cleanup.</span>
+<span class="lineno">  392 </span><span class="spaces">    </span><span class="istickedoff">finallyAtomic :: IO () -&gt; IO () -&gt; IO ()</span>
+<span class="lineno">  393 </span><span class="spaces">    </span><span class="istickedoff">finallyAtomic action fin = mask $ \restore -&gt; do</span>
+<span class="lineno">  394 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- try @SomeException (restore action)</span>
+<span class="lineno">  395 </span><span class="spaces">      </span><span class="istickedoff">fin</span>
+<span class="lineno">  396 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  397 </span><span class="spaces">        </span><span class="istickedoff">Right () -&gt; pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  398 </span><span class="spaces">        </span><span class="istickedoff">Left _   -&gt; pure <span class="nottickedoff">()</span></span></span>
+<span class="lineno">  399 </span>
+<span class="lineno">  400 </span>-- | Consume from 'DrainState' according to the supplied 'IdleSpec'.
+<span class="lineno">  401 </span>--
+<span class="lineno">  402 </span>-- Implements the idle state machine from
+<span class="lineno">  403 </span>-- @docs\/terminal-backend-abstractions.md@ § &quot;Idle state machine&quot;:
+<span class="lineno">  404 </span>--
+<span class="lineno">  405 </span>-- 1. Wait up to @idleMinFirstByte@ ms (or @idleTimeoutMs@ — whichever
+<span class="lineno">  406 </span>--    bounds the wait first) for the first chunk. If nothing arrives
+<span class="lineno">  407 </span>--    within @idleTimeoutMs@ total, return 'RecvTimedOut' on the
+<span class="lineno">  408 </span>--    bytes-so-far (empty if no chunk ever arrived).
+<span class="lineno">  409 </span>-- 2. After the first chunk, accumulate bytes from subsequent chunks.
+<span class="lineno">  410 </span>--    Each chunk resets a rolling quiet-window timer of length
+<span class="lineno">  411 </span>--    @idleQuietMs@. When the quiet window elapses with no further
+<span class="lineno">  412 </span>--    chunks, return 'RecvSettled'.
+<span class="lineno">  413 </span>-- 3. The truncate latch ('_ds_truncated' @== True@) short-circuits
+<span class="lineno">  414 </span>--    every recv with 'RecvTruncated' on whatever has accumulated.
+<span class="lineno">  415 </span>--    The latch persists across calls until @_bh_close@.
+<span class="lineno">  416 </span>-- 4. An 'RsEof' on the queue (or '_ds_drainerDone' going 'True')
+<span class="lineno">  417 </span>--    yields 'RecvEof' on the bytes-so-far.
+<span class="lineno">  418 </span>-- 5. If @idleTimeoutMs@ elapses at any point (including mid-drain),
+<span class="lineno">  419 </span>--    return 'RecvTimedOut' on whatever has accumulated.
+<span class="lineno">  420 </span>drainerRecv :: DrainState -&gt; IdleSpec -&gt; IO (RecvResult ByteString)
+<span class="lineno">  421 </span><span class="decl"><span class="istickedoff">drainerRecv st idle = do</span>
+<span class="lineno">  422 </span><span class="spaces">  </span><span class="istickedoff">isTrunc &lt;- readTVarIO (_ds_truncated st)</span>
+<span class="lineno">  423 </span><span class="spaces">  </span><span class="istickedoff">if isTrunc</span>
+<span class="lineno">  424 </span><span class="spaces">    </span><span class="istickedoff">then drainQueueLatched</span>
+<span class="lineno">  425 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  426 </span><span class="spaces">      </span><span class="istickedoff">totalTimer &lt;- registerDelay (totalMs * 1_000)</span>
+<span class="lineno">  427 </span><span class="spaces">      </span><span class="istickedoff">phaseWait totalTimer</span>
+<span class="lineno">  428 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  429 </span><span class="spaces">    </span><span class="istickedoff">totalMs = idleTimeoutMs idle</span>
+<span class="lineno">  430 </span><span class="spaces">    </span><span class="istickedoff">quietMs = idleQuietMs idle</span>
+<span class="lineno">  431 </span><span class="spaces">    </span><span class="istickedoff">firstMs = idleMinFirstByte idle</span>
+<span class="lineno">  432 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  433 </span><span class="spaces">    </span><span class="istickedoff">-- Phase 0: waiting for the first chunk. Bounded by @firstMs@</span>
+<span class="lineno">  434 </span><span class="spaces">    </span><span class="istickedoff">-- (or @totalMs@ if @firstMs == 0@), but never longer than the</span>
+<span class="lineno">  435 </span><span class="spaces">    </span><span class="istickedoff">-- total timer.</span>
+<span class="lineno">  436 </span><span class="spaces">    </span><span class="istickedoff">phaseWait :: TVar Bool -&gt; IO (RecvResult ByteString)</span>
+<span class="lineno">  437 </span><span class="spaces">    </span><span class="istickedoff">phaseWait totalTimer = do</span>
+<span class="lineno">  438 </span><span class="spaces">      </span><span class="istickedoff">let firstWaitMs = if firstMs &gt; 0 then firstMs else totalMs</span>
+<span class="lineno">  439 </span><span class="spaces">      </span><span class="istickedoff">firstTimer &lt;- registerDelay (firstWaitMs * 1_000)</span>
+<span class="lineno">  440 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- atomically $</span>
+<span class="lineno">  441 </span><span class="spaces">        </span><span class="istickedoff">(Right &lt;$&gt; readSignal st)</span>
+<span class="lineno">  442 </span><span class="spaces">          </span><span class="istickedoff">`orElse` (do</span>
+<span class="lineno">  443 </span><span class="spaces">              </span><span class="istickedoff">total &lt;- readTVar totalTimer</span>
+<span class="lineno">  444 </span><span class="spaces">              </span><span class="istickedoff">first &lt;- readTVar firstTimer</span>
+<span class="lineno">  445 </span><span class="spaces">              </span><span class="istickedoff">if total || first</span>
+<span class="lineno">  446 </span><span class="spaces">                </span><span class="istickedoff">then pure (Left ())</span>
+<span class="lineno">  447 </span><span class="spaces">                </span><span class="istickedoff">else retry)</span>
+<span class="lineno">  448 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  449 </span><span class="spaces">        </span><span class="istickedoff">Left ()             -&gt; pure (RecvTimedOut BS.empty)</span>
+<span class="lineno">  450 </span><span class="spaces">        </span><span class="istickedoff">Right RsEof         -&gt; <span class="nottickedoff">pure (RecvEof BS.empty)</span></span>
+<span class="lineno">  451 </span><span class="spaces">        </span><span class="istickedoff">Right RsTrunc       -&gt; pure (RecvTruncated BS.empty)</span>
+<span class="lineno">  452 </span><span class="spaces">        </span><span class="istickedoff">Right (RsChunk bs)  -&gt; phaseDrain totalTimer [bs]</span>
+<span class="lineno">  453 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  454 </span><span class="spaces">    </span><span class="istickedoff">-- Phase 1: draining. Loops on rolling @quietMs@ STM waits, bounded</span>
+<span class="lineno">  455 </span><span class="spaces">    </span><span class="istickedoff">-- by the same total timer as phase 0. EOF, truncate, total-timeout</span>
+<span class="lineno">  456 </span><span class="spaces">    </span><span class="istickedoff">-- and quiet-window-elapsed are the four exits.</span>
+<span class="lineno">  457 </span><span class="spaces">    </span><span class="istickedoff">phaseDrain :: TVar Bool -&gt; [ByteString] -&gt; IO (RecvResult ByteString)</span>
+<span class="lineno">  458 </span><span class="spaces">    </span><span class="istickedoff">phaseDrain totalTimer acc = do</span>
+<span class="lineno">  459 </span><span class="spaces">      </span><span class="istickedoff">quietTimer &lt;- registerDelay (quietMs * 1_000)</span>
+<span class="lineno">  460 </span><span class="spaces">      </span><span class="istickedoff">r &lt;- atomically $</span>
+<span class="lineno">  461 </span><span class="spaces">        </span><span class="istickedoff">(Right &lt;$&gt; readSignal st)</span>
+<span class="lineno">  462 </span><span class="spaces">          </span><span class="istickedoff">`orElse` (do</span>
+<span class="lineno">  463 </span><span class="spaces">              </span><span class="istickedoff">total &lt;- readTVar totalTimer</span>
+<span class="lineno">  464 </span><span class="spaces">              </span><span class="istickedoff">quiet &lt;- readTVar quietTimer</span>
+<span class="lineno">  465 </span><span class="spaces">              </span><span class="istickedoff">if <span class="tickonlyfalse">total</span></span>
+<span class="lineno">  466 </span><span class="spaces">                </span><span class="istickedoff">then <span class="nottickedoff">pure (Left True)</span>   -- total-timeout</span>
+<span class="lineno">  467 </span><span class="spaces">                </span><span class="istickedoff">else if quiet</span>
+<span class="lineno">  468 </span><span class="spaces">                  </span><span class="istickedoff">then pure (Left False) -- quiet-elapsed</span>
+<span class="lineno">  469 </span><span class="spaces">                  </span><span class="istickedoff">else retry)</span>
+<span class="lineno">  470 </span><span class="spaces">      </span><span class="istickedoff">case r of</span>
+<span class="lineno">  471 </span><span class="spaces">        </span><span class="istickedoff">Left True             -&gt; <span class="nottickedoff">pure (RecvTimedOut (BS.concat (reverse acc)))</span></span>
+<span class="lineno">  472 </span><span class="spaces">        </span><span class="istickedoff">Left False            -&gt; pure (RecvSettled  (BS.concat (reverse acc)))</span>
+<span class="lineno">  473 </span><span class="spaces">        </span><span class="istickedoff">Right RsEof           -&gt; pure (RecvEof (BS.concat (reverse acc)))</span>
+<span class="lineno">  474 </span><span class="spaces">        </span><span class="istickedoff">Right RsTrunc         -&gt; <span class="nottickedoff">pure (RecvTruncated (BS.concat (reverse acc)))</span></span>
+<span class="lineno">  475 </span><span class="spaces">        </span><span class="istickedoff">Right (RsChunk bs)    -&gt; phaseDrain totalTimer (bs : acc)</span>
+<span class="lineno">  476 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  477 </span><span class="spaces">    </span><span class="istickedoff">-- Latch set: drain whatever is already queued non-blockingly and</span>
+<span class="lineno">  478 </span><span class="spaces">    </span><span class="istickedoff">-- return 'RecvTruncated'.</span>
+<span class="lineno">  479 </span><span class="spaces">    </span><span class="istickedoff">drainQueueLatched :: IO (RecvResult ByteString)</span>
+<span class="lineno">  480 </span><span class="spaces">    </span><span class="istickedoff">drainQueueLatched = do</span>
+<span class="lineno">  481 </span><span class="spaces">      </span><span class="istickedoff">acc &lt;- drainNonBlocking []</span>
+<span class="lineno">  482 </span><span class="spaces">      </span><span class="istickedoff">pure (RecvTruncated (BS.concat (reverse acc)))</span>
+<span class="lineno">  483 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  484 </span><span class="spaces">    </span><span class="istickedoff">drainNonBlocking :: [ByteString] -&gt; IO [ByteString]</span>
+<span class="lineno">  485 </span><span class="spaces">    </span><span class="istickedoff">drainNonBlocking acc = do</span>
+<span class="lineno">  486 </span><span class="spaces">      </span><span class="istickedoff">mSig &lt;- atomically (tryReadTBQueue (_ds_queue st))</span>
+<span class="lineno">  487 </span><span class="spaces">      </span><span class="istickedoff">case mSig of</span>
+<span class="lineno">  488 </span><span class="spaces">        </span><span class="istickedoff">Nothing           -&gt; pure acc</span>
+<span class="lineno">  489 </span><span class="spaces">        </span><span class="istickedoff">Just (RsChunk bs) -&gt; <span class="nottickedoff">drainNonBlocking (bs : acc)</span></span>
+<span class="lineno">  490 </span><span class="spaces">        </span><span class="istickedoff">Just RsEof        -&gt; <span class="nottickedoff">pure acc</span></span>
+<span class="lineno">  491 </span><span class="spaces">        </span><span class="istickedoff">Just RsTrunc      -&gt; <span class="nottickedoff">pure acc</span></span></span>
+<span class="lineno">  492 </span>
+<span class="lineno">  493 </span>-- | Read a single 'RecvSignal' atomically. Also wakes on truncate-
+<span class="lineno">  494 </span>-- latch flip or drainer-done so callers can short-circuit promptly.
+<span class="lineno">  495 </span>readSignal :: DrainState -&gt; STM RecvSignal
+<span class="lineno">  496 </span><span class="decl"><span class="istickedoff">readSignal st =</span>
+<span class="lineno">  497 </span><span class="spaces">  </span><span class="istickedoff">readTBQueue (_ds_queue st)</span>
+<span class="lineno">  498 </span><span class="spaces">    </span><span class="istickedoff">`orElse` (do</span>
+<span class="lineno">  499 </span><span class="spaces">        </span><span class="istickedoff">tr &lt;- readTVar (_ds_truncated st)</span>
+<span class="lineno">  500 </span><span class="spaces">        </span><span class="istickedoff">unless tr retry</span>
+<span class="lineno">  501 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">pure RsTrunc</span>)</span>
+<span class="lineno">  502 </span><span class="spaces">    </span><span class="istickedoff">`orElse` (do</span>
+<span class="lineno">  503 </span><span class="spaces">        </span><span class="istickedoff">dd &lt;- readTVar (_ds_drainerDone st)</span>
+<span class="lineno">  504 </span><span class="spaces">        </span><span class="istickedoff">unless dd retry</span>
+<span class="lineno">  505 </span><span class="spaces">        </span><span class="istickedoff"><span class="nottickedoff">pure RsEof</span>)</span></span>
+<span class="lineno">  506 </span>
+<span class="lineno">  507 </span>--------------------------------------------------------------------------------
+<span class="lineno">  508 </span>-- Drainer-backed factory substrate
+<span class="lineno">  509 </span>--------------------------------------------------------------------------------
+<span class="lineno">  510 </span>
+<span class="lineno">  511 </span>-- | Wire a 'PtyIO' + 'PtyOpts' into a complete 'BackendHandle' whose
+<span class="lineno">  512 </span>-- @_bh_recv@ talks to a 'drainerRecv' loop.
+<span class="lineno">  513 </span>--
+<span class="lineno">  514 </span>-- The factory:
+<span class="lineno">  515 </span>--
+<span class="lineno">  516 </span>-- 1. Acquires the per-backend recv buffer cap from the process-wide
+<span class="lineno">  517 </span>--    quota (rounded up to whole MiB). On oversubscription returns
+<span class="lineno">  518 </span>--    @Left BackendBufferQuotaExceeded@ — no resources opened.
+<span class="lineno">  519 </span>-- 2. Opens the PTY via @_pio_open@ (which uses the program + args
+<span class="lineno">  520 </span>--    from the supplied 'PtyOpenSpec'-like fields on 'PtyOpts'). On
+<span class="lineno">  521 </span>--    a failure the quota is released and the error propagates.
+<span class="lineno">  522 </span>-- 3. Spawns the drainer 'Async' via 'runDrainerLoop'.
+<span class="lineno">  523 </span>-- 4. Builds a 'BackendHandle' whose @_bh_close@ is idempotent: it
+<span class="lineno">  524 </span>--    flips an internal flag, cancels the drainer, closes the PTY,
+<span class="lineno">  525 </span>--    and releases the buffer quota exactly once.
+<span class="lineno">  526 </span>--
+<span class="lineno">  527 </span>-- WU7 ships the seam and the test-side fake. WU8 \/ WU9 \/ WU10 will
+<span class="lineno">  528 </span>-- compose @AuthorizedCommand@ \/ @RemoteCommand@ \/ tmux selectors
+<span class="lineno">  529 </span>-- into the 'PtyOpenSpec' the factories pass in. For WU7\'s tests, the
+<span class="lineno">  530 </span>-- @open@ closure is called with a dummy 'PtyOpenSpec' (only the
+<span class="lineno">  531 </span>-- geometry matters to fakePtyIO).
+<span class="lineno">  532 </span>mkDrainerBackendHandle
+<span class="lineno">  533 </span>  :: PtyIO
+<span class="lineno">  534 </span>  -&gt; PtyOpts
+<span class="lineno">  535 </span>  -&gt; PtyOpenSpec
+<span class="lineno">  536 </span>  -&gt; BackendKind
+<span class="lineno">  537 </span>  -&gt; IO (Either BackendError BackendHandle)
+<span class="lineno">  538 </span><span class="decl"><span class="istickedoff">mkDrainerBackendHandle pio opts spec kind = do</span>
+<span class="lineno">  539 </span><span class="spaces">  </span><span class="istickedoff">let capBytes = _pto_recvBufferCap opts</span>
+<span class="lineno">  540 </span><span class="spaces">      </span><span class="istickedoff">capMiB   = bytesToMiBCeil capBytes</span>
+<span class="lineno">  541 </span><span class="spaces">  </span><span class="istickedoff">quotaPtr &lt;- readIORef globalBackendBufferQuota</span>
+<span class="lineno">  542 </span><span class="spaces">  </span><span class="istickedoff">acq &lt;- acquireBufferQuota quotaPtr capMiB</span>
+<span class="lineno">  543 </span><span class="spaces">  </span><span class="istickedoff">case acq of</span>
+<span class="lineno">  544 </span><span class="spaces">    </span><span class="istickedoff">Left e  -&gt; pure (Left e)</span>
+<span class="lineno">  545 </span><span class="spaces">    </span><span class="istickedoff">Right () -&gt; do</span>
+<span class="lineno">  546 </span><span class="spaces">      </span><span class="istickedoff">fds &lt;- _pio_open pio spec</span>
+<span class="lineno">  547 </span><span class="spaces">      </span><span class="istickedoff">st  &lt;- newDrainState</span>
+<span class="lineno">  548 </span><span class="spaces">      </span><span class="istickedoff">drainerAsync &lt;- runDrainerLoop pio fds capBytes st</span>
+<span class="lineno">  549 </span><span class="spaces">      </span><span class="istickedoff">releasedRef  &lt;- newIORef False</span>
+<span class="lineno">  550 </span><span class="spaces">      </span><span class="istickedoff">closeLock    &lt;- newMVar ()</span>
+<span class="lineno">  551 </span><span class="spaces">      </span><span class="istickedoff">let releaseQuotaOnce = do</span>
+<span class="lineno">  552 </span><span class="spaces">            </span><span class="istickedoff">already &lt;- atomicSwapTrue releasedRef</span>
+<span class="lineno">  553 </span><span class="spaces">            </span><span class="istickedoff">if already</span>
+<span class="lineno">  554 </span><span class="spaces">              </span><span class="istickedoff">then pure <span class="nottickedoff">()</span></span>
+<span class="lineno">  555 </span><span class="spaces">              </span><span class="istickedoff">else releaseBufferQuota quotaPtr capMiB</span>
+<span class="lineno">  556 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  557 </span><span class="spaces">          </span><span class="istickedoff">doSend = _pio_write pio fds</span>
+<span class="lineno">  558 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  559 </span><span class="spaces">          </span><span class="istickedoff">doRecv mIdle = drainerRecv st (fromMaybe (_pto_idle opts) mIdle)</span>
+<span class="lineno">  560 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  561 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">doResize = _pio_resize pio fds</span></span>
+<span class="lineno">  562 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  563 </span><span class="spaces">          </span><span class="istickedoff">doClose = modifyMVar_ closeLock $ \() -&gt; do</span>
+<span class="lineno">  564 </span><span class="spaces">            </span><span class="istickedoff">-- Close FIRST. The drainer is almost always parked in a</span>
+<span class="lineno">  565 </span><span class="spaces">            </span><span class="istickedoff">-- blocking read inside @posix-pty@ — a non-interruptible</span>
+<span class="lineno">  566 </span><span class="spaces">            </span><span class="istickedoff">-- C call. 'Async.cancel' queues an async exception, but</span>
+<span class="lineno">  567 </span><span class="spaces">            </span><span class="istickedoff">-- the FFI call does not return until bytes arrive OR the</span>
+<span class="lineno">  568 </span><span class="spaces">            </span><span class="istickedoff">-- child dies OR the fd is closed. So cancelling before</span>
+<span class="lineno">  569 </span><span class="spaces">            </span><span class="istickedoff">-- '_pio_close' makes the subsequent 'Async.waitCatch'</span>
+<span class="lineno">  570 </span><span class="spaces">            </span><span class="istickedoff">-- block forever.</span>
+<span class="lineno">  571 </span><span class="spaces">            </span><span class="istickedoff">--</span>
+<span class="lineno">  572 </span><span class="spaces">            </span><span class="istickedoff">-- '_pio_close' (for 'realPtyIO') sends SIGKILL to the</span>
+<span class="lineno">  573 </span><span class="spaces">            </span><span class="istickedoff">-- child and closes the master fd, which together force</span>
+<span class="lineno">  574 </span><span class="spaces">            </span><span class="istickedoff">-- the blocking read to return EOF promptly. The drainer</span>
+<span class="lineno">  575 </span><span class="spaces">            </span><span class="istickedoff">-- loop then sees an empty 'ByteString', pushes 'RsEof',</span>
+<span class="lineno">  576 </span><span class="spaces">            </span><span class="istickedoff">-- and exits naturally — and now 'cancel'/'waitCatch'</span>
+<span class="lineno">  577 </span><span class="spaces">            </span><span class="istickedoff">-- below are fast no-ops.</span>
+<span class="lineno">  578 </span><span class="spaces">            </span><span class="istickedoff">_ &lt;- try @SomeException (_pio_close pio fds)</span>
+<span class="lineno">  579 </span><span class="spaces">            </span><span class="istickedoff">Async.cancel drainerAsync</span>
+<span class="lineno">  580 </span><span class="spaces">            </span><span class="istickedoff">_ &lt;- Async.waitCatch drainerAsync</span>
+<span class="lineno">  581 </span><span class="spaces">            </span><span class="istickedoff">releaseQuotaOnce</span>
+<span class="lineno">  582 </span><span class="spaces">            </span><span class="istickedoff">pure ()</span>
+<span class="lineno">  583 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  584 </span><span class="spaces">      </span><span class="istickedoff">pure $ Right BackendHandle</span>
+<span class="lineno">  585 </span><span class="spaces">        </span><span class="istickedoff">{ _bh_name        = &quot;drainer-pty&quot;</span>
+<span class="lineno">  586 </span><span class="spaces">        </span><span class="istickedoff">, _bh_kind        = kind</span>
+<span class="lineno">  587 </span><span class="spaces">        </span><span class="istickedoff">, _bh_defaultIdle = _pto_idle opts</span>
+<span class="lineno">  588 </span><span class="spaces">        </span><span class="istickedoff">, _bh_send        = doSend</span>
+<span class="lineno">  589 </span><span class="spaces">        </span><span class="istickedoff">, _bh_recv        = doRecv</span>
+<span class="lineno">  590 </span><span class="spaces">        </span><span class="istickedoff">, _bh_resize      = <span class="nottickedoff">doResize</span></span>
+<span class="lineno">  591 </span><span class="spaces">        </span><span class="istickedoff">, _bh_close       = doClose</span>
+<span class="lineno">  592 </span><span class="spaces">        </span><span class="istickedoff">}</span></span>
+<span class="lineno">  593 </span>
+<span class="lineno">  594 </span>-- | Atomically set an 'IORef Bool' to 'True', returning its previous
+<span class="lineno">  595 </span>-- value. Used to defend against double-release of the buffer quota.
+<span class="lineno">  596 </span>atomicSwapTrue :: IORef Bool -&gt; IO Bool
+<span class="lineno">  597 </span><span class="decl"><span class="istickedoff">atomicSwapTrue ref = atomicModifyIORef' ref (True,)</span></span>
+<span class="lineno">  598 </span>
+<span class="lineno">  599 </span>-- | Round a byte count up to whole MiB (1 MiB == 1_048_576 bytes).
+<span class="lineno">  600 </span>-- Zero or negative byte counts produce @0@.
+<span class="lineno">  601 </span>bytesToMiBCeil :: Int -&gt; Int
+<span class="lineno">  602 </span><span class="decl"><span class="istickedoff">bytesToMiBCeil n</span>
+<span class="lineno">  603 </span><span class="spaces">  </span><span class="istickedoff">| n &lt;= 0    = 0</span>
+<span class="lineno">  604 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = (n + mib - 1) `div` mib</span>
+<span class="lineno">  605 </span><span class="spaces">  </span><span class="istickedoff">where mib = 1024 * 1024</span></span>
+
+</pre>
+</body>
+</html>

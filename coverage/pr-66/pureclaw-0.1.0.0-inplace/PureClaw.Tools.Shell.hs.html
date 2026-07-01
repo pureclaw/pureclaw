@@ -1,0 +1,225 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Tools.Shell
+<span class="lineno">    2 </span>  ( -- * Tool registration
+<span class="lineno">    3 </span>    shellTool
+<span class="lineno">    4 </span>  , execTool
+<span class="lineno">    5 </span>  ) where
+<span class="lineno">    6 </span>
+<span class="lineno">    7 </span>import Control.Exception
+<span class="lineno">    8 </span>import Data.Aeson
+<span class="lineno">    9 </span>import Data.Aeson.Types
+<span class="lineno">   10 </span>import Data.ByteString.Char8 qualified as BS8
+<span class="lineno">   11 </span>import Data.Text (Text)
+<span class="lineno">   12 </span>import Data.Text qualified as T
+<span class="lineno">   13 </span>import System.Exit
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>import PureClaw.Handles.Shell
+<span class="lineno">   16 </span>import PureClaw.Providers.Class
+<span class="lineno">   17 </span>import PureClaw.Security.Command
+<span class="lineno">   18 </span>import PureClaw.Security.Policy
+<span class="lineno">   19 </span>import PureClaw.Tools.Registry
+<span class="lineno">   20 </span>
+<span class="lineno">   21 </span>-- | Run a process result through the same output-shaping logic both tools
+<span class="lineno">   22 </span>-- share: stdout + stderr + an &quot;Exit code: N&quot; suffix on failure, with a
+<span class="lineno">   23 </span>-- placeholder for empty output. Returns (text, isError) where isError is
+<span class="lineno">   24 </span>-- True iff the process exited non-zero — the model and the frontend both
+<span class="lineno">   25 </span>-- key off this flag to decide whether the call succeeded.
+<span class="lineno">   26 </span>shapeResult :: ProcessResult -&gt; (Text, Bool)
+<span class="lineno">   27 </span><span class="decl"><span class="istickedoff">shapeResult pr =</span>
+<span class="lineno">   28 </span><span class="spaces">  </span><span class="istickedoff">let out      = T.pack (BS8.unpack (_pr_stdout pr))</span>
+<span class="lineno">   29 </span><span class="spaces">      </span><span class="istickedoff">err      = T.pack (BS8.unpack (_pr_stderr pr))</span>
+<span class="lineno">   30 </span><span class="spaces">      </span><span class="istickedoff">(exitInfo, isError) = case _pr_exitCode pr of</span>
+<span class="lineno">   31 </span><span class="spaces">        </span><span class="istickedoff">ExitSuccess     -&gt; (&quot;&quot;, False)</span>
+<span class="lineno">   32 </span><span class="spaces">        </span><span class="istickedoff">ExitFailure n   -&gt; (&quot;\nExit code: &quot; &lt;&gt; T.pack (show n), True)</span>
+<span class="lineno">   33 </span><span class="spaces">      </span><span class="istickedoff">combined = T.strip (out &lt;&gt; err &lt;&gt; exitInfo)</span>
+<span class="lineno">   34 </span><span class="spaces">  </span><span class="istickedoff">in  (if <span class="tickonlyfalse">T.null combined</span> then <span class="nottickedoff">&quot;(no output)&quot;</span> else combined, isError)</span></span>
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>runAuthorized :: ShellHandle -&gt; ExecOptions -&gt; AuthorizedCommand -&gt; IO (Text, Bool)
+<span class="lineno">   37 </span><span class="decl"><span class="istickedoff">runAuthorized sh opts cmd = do</span>
+<span class="lineno">   38 </span><span class="spaces">  </span><span class="istickedoff">result &lt;- try @SomeException (_sh_execute sh <span class="nottickedoff">opts</span> cmd)</span>
+<span class="lineno">   39 </span><span class="spaces">  </span><span class="istickedoff">case result of</span>
+<span class="lineno">   40 </span><span class="spaces">    </span><span class="istickedoff">Left e   -&gt; <span class="nottickedoff">pure (T.pack (show e), True)</span></span>
+<span class="lineno">   41 </span><span class="spaces">    </span><span class="istickedoff">Right pr -&gt; pure (shapeResult pr)</span></span>
+<span class="lineno">   42 </span>
+<span class="lineno">   43 </span>-- | Bash-backed shell tool. The @command@ string is handed verbatim to
+<span class="lineno">   44 </span>-- @bash -c@, so the LLM gets full shell semantics: tilde expansion, glob
+<span class="lineno">   45 </span>-- patterns, env-var substitution, pipes, @&amp;&amp;@, redirects, etc.
+<span class="lineno">   46 </span>--
+<span class="lineno">   47 </span>-- Gated by the policy having @shell@ in its allowed-command set
+<span class="lineno">   48 </span>-- (see 'authorizeShell'). Per-basename allowlisting is the @exec@ tool's
+<span class="lineno">   49 </span>-- job — once bash is in the loop, basename checks are not meaningful.
+<span class="lineno">   50 </span>shellTool :: SecurityPolicy -&gt; ShellHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">   51 </span><span class="decl"><span class="istickedoff">shellTool policy sh = (def, handler)</span>
+<span class="lineno">   52 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   53 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">   54 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;shell&quot;</span>
+<span class="lineno">   55 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">   56 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Run a shell command. The string is executed by /bin/bash -c, so&quot;</span></span>
+<span class="lineno">   57 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;shell features work: pipes (|), command chaining (&amp;&amp;, ||, ;),&quot;</span></span>
+<span class="lineno">   58 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;redirects (&gt;, &lt;), tilde expansion (~), glob patterns (*, ?),&quot;</span></span>
+<span class="lineno">   59 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;and environment variable substitution ($VAR).&quot;</span></span>
+<span class="lineno">   60 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Optional: set timeout_ms to limit execution time (returns exit code 124 on timeout).&quot;</span></span>
+<span class="lineno">   61 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Optional: set working_dir to run in a specific directory.&quot;</span></span>
+<span class="lineno">   62 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Returns combined stdout+stderr. Non-zero exit appends 'Exit code: N'.&quot;</span></span>
+<span class="lineno">   63 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">   65 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">   66 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">   67 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;command&quot; .= object</span></span>
+<span class="lineno">   68 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   69 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;The shell command line. Passed verbatim to bash -c.&quot; :: Text)</span></span>
+<span class="lineno">   70 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   71 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;timeout_ms&quot; .= object</span></span>
+<span class="lineno">   72 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;integer&quot; :: Text)</span></span>
+<span class="lineno">   73 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Timeout in milliseconds. Command is killed after this time (default: no timeout)&quot; :: Text)</span></span>
+<span class="lineno">   74 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   75 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;working_dir&quot; .= object</span></span>
+<span class="lineno">   76 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">   77 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Working directory for the command (default: agent workspace)&quot; :: Text)</span></span>
+<span class="lineno">   78 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   79 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   80 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;command&quot;] :: [Text])</span></span>
+<span class="lineno">   81 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">   82 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   83 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">   84 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">   85 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseShellInput input of</span>
+<span class="lineno">   86 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">   87 </span><span class="spaces">        </span><span class="istickedoff">Right si</span>
+<span class="lineno">   88 </span><span class="spaces">          </span><span class="istickedoff">| T.null (T.strip (_si_command si)) -&gt;</span>
+<span class="lineno">   89 </span><span class="spaces">              </span><span class="istickedoff">pure (<span class="nottickedoff">&quot;Empty command&quot;</span>, True)</span>
+<span class="lineno">   90 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt;</span>
+<span class="lineno">   91 </span><span class="spaces">              </span><span class="istickedoff">case authorizeShell policy (_si_command si) of</span>
+<span class="lineno">   92 </span><span class="spaces">                </span><span class="istickedoff">Left (CommandNotAllowed _) -&gt;</span>
+<span class="lineno">   93 </span><span class="spaces">                  </span><span class="istickedoff">pure (&quot;shell tool not enabled in security policy (add \&quot;shell\&quot; to allowed_commands, or use the exec tool)&quot;, True)</span>
+<span class="lineno">   94 </span><span class="spaces">                </span><span class="istickedoff">Left CommandInAutonomyDeny -&gt;</span>
+<span class="lineno">   95 </span><span class="spaces">                  </span><span class="istickedoff">pure (<span class="nottickedoff">&quot;All commands denied by security policy&quot;</span>, True)</span>
+<span class="lineno">   96 </span><span class="spaces">                </span><span class="istickedoff">Right authorized -&gt;</span>
+<span class="lineno">   97 </span><span class="spaces">                  </span><span class="istickedoff">runAuthorized sh <span class="nottickedoff">(shellExecOpts si)</span> authorized</span></span>
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>-- | Argv-style exec tool. Takes an explicit @program@ name and @args@
+<span class="lineno">  100 </span>-- list — no shell interpretation. Every argument reaches the program as
+<span class="lineno">  101 </span>-- a literal string: @~@ is not expanded, @*@ is not globbed, @|@ is not a
+<span class="lineno">  102 </span>-- pipe.
+<span class="lineno">  103 </span>--
+<span class="lineno">  104 </span>-- Authorized against the policy's per-basename allowlist (see 'authorize').
+<span class="lineno">  105 </span>-- This is the tool to expose when a deployment wants to lock the agent
+<span class="lineno">  106 </span>-- down to an explicit set of executables.
+<span class="lineno">  107 </span>execTool :: SecurityPolicy -&gt; ShellHandle -&gt; (ToolDefinition, ToolHandler)
+<span class="lineno">  108 </span><span class="decl"><span class="istickedoff">execTool policy sh = (def, handler)</span>
+<span class="lineno">  109 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  110 </span><span class="spaces">    </span><span class="istickedoff">def = ToolDefinition</span>
+<span class="lineno">  111 </span><span class="spaces">      </span><span class="istickedoff">{ _td_name        = &quot;exec&quot;</span>
+<span class="lineno">  112 </span><span class="spaces">      </span><span class="istickedoff">, _td_description = <span class="nottickedoff">T.unlines</span></span>
+<span class="lineno">  113 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;Execute a program with explicit arguments. No shell is involved:&quot;</span></span>
+<span class="lineno">  114 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;tilde (~), glob (*), env vars ($VAR), pipes (|), redirects (&gt;),&quot;</span></span>
+<span class="lineno">  115 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;and chaining (&amp;&amp;) are NOT interpreted — every arg is a literal.&quot;</span></span>
+<span class="lineno">  116 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Use this for tighter security: the policy allowlist gates each&quot;</span></span>
+<span class="lineno">  117 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;program by name.&quot;</span></span>
+<span class="lineno">  118 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Optional: set timeout_ms to limit execution time (returns exit code 124 on timeout).&quot;</span></span>
+<span class="lineno">  119 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Optional: set working_dir to run in a specific directory.&quot;</span></span>
+<span class="lineno">  120 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;Returns combined stdout+stderr. Non-zero exit appends 'Exit code: N'.&quot;</span></span>
+<span class="lineno">  121 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  122 </span><span class="spaces">      </span><span class="istickedoff">, _td_inputSchema = <span class="nottickedoff">object</span></span>
+<span class="lineno">  123 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;object&quot; :: Text)</span></span>
+<span class="lineno">  124 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;properties&quot; .= object</span></span>
+<span class="lineno">  125 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">[ &quot;program&quot; .= object</span></span>
+<span class="lineno">  126 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">  127 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Program to execute (e.g. \&quot;ls\&quot;, \&quot;git\&quot;). Looked up via PATH.&quot; :: Text)</span></span>
+<span class="lineno">  128 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  129 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;args&quot; .= object</span></span>
+<span class="lineno">  130 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot;        .= (&quot;array&quot; :: Text)</span></span>
+<span class="lineno">  131 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;items&quot;       .= object [ &quot;type&quot; .= (&quot;string&quot; :: Text) ]</span></span>
+<span class="lineno">  132 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Arguments as literal strings. No shell expansion.&quot; :: Text)</span></span>
+<span class="lineno">  133 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  134 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;timeout_ms&quot; .= object</span></span>
+<span class="lineno">  135 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;integer&quot; :: Text)</span></span>
+<span class="lineno">  136 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Timeout in milliseconds. Command is killed after this time (default: no timeout)&quot; :: Text)</span></span>
+<span class="lineno">  137 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  138 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">, &quot;working_dir&quot; .= object</span></span>
+<span class="lineno">  139 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">[ &quot;type&quot; .= (&quot;string&quot; :: Text)</span></span>
+<span class="lineno">  140 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">, &quot;description&quot; .= (&quot;Working directory for the command (default: agent workspace)&quot; :: Text)</span></span>
+<span class="lineno">  141 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  142 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  143 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">, &quot;required&quot; .= ([&quot;program&quot;] :: [Text])</span></span>
+<span class="lineno">  144 </span><span class="spaces">          </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  145 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">  146 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  147 </span><span class="spaces">    </span><span class="istickedoff">handler = ToolHandler $ \input -&gt;</span>
+<span class="lineno">  148 </span><span class="spaces">      </span><span class="istickedoff">case parseEither parseExecInput input of</span>
+<span class="lineno">  149 </span><span class="spaces">        </span><span class="istickedoff">Left err -&gt; <span class="nottickedoff">pure (T.pack err, True)</span></span>
+<span class="lineno">  150 </span><span class="spaces">        </span><span class="istickedoff">Right ei</span>
+<span class="lineno">  151 </span><span class="spaces">          </span><span class="istickedoff">| T.null (T.strip (_ei_program ei)) -&gt;</span>
+<span class="lineno">  152 </span><span class="spaces">              </span><span class="istickedoff">pure (<span class="nottickedoff">&quot;Empty program&quot;</span>, True)</span>
+<span class="lineno">  153 </span><span class="spaces">          </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> -&gt;</span>
+<span class="lineno">  154 </span><span class="spaces">              </span><span class="istickedoff">case authorize policy (T.unpack (_ei_program ei)) (_ei_args ei) of</span>
+<span class="lineno">  155 </span><span class="spaces">                </span><span class="istickedoff">Left (CommandNotAllowed c) -&gt;</span>
+<span class="lineno">  156 </span><span class="spaces">                  </span><span class="istickedoff">pure (&quot;Command not allowed: &quot; &lt;&gt; c, True)</span>
+<span class="lineno">  157 </span><span class="spaces">                </span><span class="istickedoff">Left CommandInAutonomyDeny -&gt;</span>
+<span class="lineno">  158 </span><span class="spaces">                  </span><span class="istickedoff"><span class="nottickedoff">pure (&quot;All commands denied by security policy&quot;, True)</span></span>
+<span class="lineno">  159 </span><span class="spaces">                </span><span class="istickedoff">Right authorized -&gt;</span>
+<span class="lineno">  160 </span><span class="spaces">                  </span><span class="istickedoff">runAuthorized sh <span class="nottickedoff">(execExecOpts ei)</span> authorized</span></span>
+<span class="lineno">  161 </span>
+<span class="lineno">  162 </span>-- ── Input parsing ─────────────────────────────────────────────────────
+<span class="lineno">  163 </span>
+<span class="lineno">  164 </span>data ShellInput = ShellInput
+<span class="lineno">  165 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_si_command</span></span></span>    :: Text
+<span class="lineno">  166 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_si_timeout</span></span></span>    :: Maybe Int
+<span class="lineno">  167 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_si_workingDir</span></span></span> :: Maybe Text
+<span class="lineno">  168 </span>  }
+<span class="lineno">  169 </span>
+<span class="lineno">  170 </span>parseShellInput :: Value -&gt; Parser ShellInput
+<span class="lineno">  171 </span><span class="decl"><span class="istickedoff">parseShellInput = withObject <span class="nottickedoff">&quot;ShellInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  172 </span><span class="spaces">  </span><span class="istickedoff">ShellInput</span>
+<span class="lineno">  173 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; o .:  &quot;command&quot;</span>
+<span class="lineno">  174 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;timeout_ms&quot;</span>
+<span class="lineno">  175 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;working_dir&quot;</span></span>
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>shellExecOpts :: ShellInput -&gt; ExecOptions
+<span class="lineno">  178 </span><span class="decl"><span class="nottickedoff">shellExecOpts si = ExecOptions</span>
+<span class="lineno">  179 </span><span class="spaces">  </span><span class="nottickedoff">{ _eo_timeout    = _si_timeout si</span>
+<span class="lineno">  180 </span><span class="spaces">  </span><span class="nottickedoff">, _eo_workingDir = fmap T.unpack (_si_workingDir si)</span>
+<span class="lineno">  181 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+<span class="lineno">  182 </span>
+<span class="lineno">  183 </span>data ExecInput = ExecInput
+<span class="lineno">  184 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ei_program</span></span></span>    :: Text
+<span class="lineno">  185 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ei_args</span></span></span>       :: [Text]
+<span class="lineno">  186 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ei_timeout</span></span></span>    :: Maybe Int
+<span class="lineno">  187 </span>  , <span class="nottickedoff"><span class="decl"><span class="nottickedoff">_ei_workingDir</span></span></span> :: Maybe Text
+<span class="lineno">  188 </span>  }
+<span class="lineno">  189 </span>
+<span class="lineno">  190 </span>parseExecInput :: Value -&gt; Parser ExecInput
+<span class="lineno">  191 </span><span class="decl"><span class="istickedoff">parseExecInput = withObject <span class="nottickedoff">&quot;ExecInput&quot;</span> $ \o -&gt;</span>
+<span class="lineno">  192 </span><span class="spaces">  </span><span class="istickedoff">ExecInput</span>
+<span class="lineno">  193 </span><span class="spaces">    </span><span class="istickedoff">&lt;$&gt; o .:  &quot;program&quot;</span>
+<span class="lineno">  194 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;args&quot; .!= []</span>
+<span class="lineno">  195 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;timeout_ms&quot;</span>
+<span class="lineno">  196 </span><span class="spaces">    </span><span class="istickedoff">&lt;*&gt; o .:? &quot;working_dir&quot;</span></span>
+<span class="lineno">  197 </span>
+<span class="lineno">  198 </span>execExecOpts :: ExecInput -&gt; ExecOptions
+<span class="lineno">  199 </span><span class="decl"><span class="nottickedoff">execExecOpts ei = ExecOptions</span>
+<span class="lineno">  200 </span><span class="spaces">  </span><span class="nottickedoff">{ _eo_timeout    = _ei_timeout ei</span>
+<span class="lineno">  201 </span><span class="spaces">  </span><span class="nottickedoff">, _eo_workingDir = fmap T.unpack (_ei_workingDir ei)</span>
+<span class="lineno">  202 </span><span class="spaces">  </span><span class="nottickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

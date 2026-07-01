@@ -1,0 +1,91 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Handles.Shell
+<span class="lineno">    2 </span>  ( -- * Process result
+<span class="lineno">    3 </span>    ProcessResult (..)
+<span class="lineno">    4 </span>    -- * Handle type
+<span class="lineno">    5 </span>  , ShellHandle (..)
+<span class="lineno">    6 </span>    -- * Implementations
+<span class="lineno">    7 </span>  , mkShellHandle
+<span class="lineno">    8 </span>  , mkNoOpShellHandle
+<span class="lineno">    9 </span>  ) where
+<span class="lineno">   10 </span>
+<span class="lineno">   11 </span>import Data.ByteString (ByteString)
+<span class="lineno">   12 </span>import Data.ByteString.Lazy qualified as BL
+<span class="lineno">   13 </span>import Data.Text qualified as T
+<span class="lineno">   14 </span>import System.Exit
+<span class="lineno">   15 </span>import System.Process.Typed qualified as P
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>import PureClaw.Handles.Log
+<span class="lineno">   18 </span>import PureClaw.Security.Command
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>-- | Result of a subprocess execution.
+<span class="lineno">   21 </span>data ProcessResult = ProcessResult
+<span class="lineno">   22 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_exitCode</span></span></span> :: ExitCode
+<span class="lineno">   23 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_stdout</span></span></span>   :: ByteString
+<span class="lineno">   24 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_pr_stderr</span></span></span>   :: ByteString
+<span class="lineno">   25 </span>  }
+<span class="lineno">   26 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>-- | Subprocess execution capability. Only accepts 'AuthorizedCommand',
+<span class="lineno">   29 </span>-- which is proof that the command passed security policy evaluation.
+<span class="lineno">   30 </span>--
+<span class="lineno">   31 </span>-- The real implementation strips the subprocess environment to prevent
+<span class="lineno">   32 </span>-- secret leakage via inherited environment variables.
+<span class="lineno">   33 </span>newtype ShellHandle = ShellHandle
+<span class="lineno">   34 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_sh_execute</span></span></span> :: AuthorizedCommand -&gt; IO ProcessResult
+<span class="lineno">   35 </span>  }
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>-- | Minimal safe environment for subprocesses. Provides only PATH so
+<span class="lineno">   38 </span>-- commands can be resolved, but inherits nothing else from the parent.
+<span class="lineno">   39 </span>safeEnv :: [(String, String)]
+<span class="lineno">   40 </span><span class="decl"><span class="istickedoff">safeEnv = [(&quot;PATH&quot;, &quot;/usr/bin:/bin:/usr/local/bin&quot;)]</span></span>
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>-- | Real shell handle using @typed-process@. Strips the subprocess
+<span class="lineno">   43 </span>-- environment (provides only a minimal PATH) as noted in the architecture.
+<span class="lineno">   44 </span>mkShellHandle :: LogHandle -&gt; ShellHandle
+<span class="lineno">   45 </span><span class="decl"><span class="istickedoff">mkShellHandle logger = ShellHandle</span>
+<span class="lineno">   46 </span><span class="spaces">  </span><span class="istickedoff">{ _sh_execute = \cmd -&gt; do</span>
+<span class="lineno">   47 </span><span class="spaces">      </span><span class="istickedoff">let prog = getCommandProgram cmd</span>
+<span class="lineno">   48 </span><span class="spaces">          </span><span class="istickedoff">args = map T.unpack (getCommandArgs cmd)</span>
+<span class="lineno">   49 </span><span class="spaces">          </span><span class="istickedoff">config = P.setEnv safeEnv</span>
+<span class="lineno">   50 </span><span class="spaces">                 </span><span class="istickedoff">$ P.proc prog args</span>
+<span class="lineno">   51 </span><span class="spaces">      </span><span class="istickedoff">_lh_logInfo logger $ <span class="nottickedoff">&quot;Executing: &quot; &lt;&gt; T.pack prog &lt;&gt; &quot; &quot; &lt;&gt; T.unwords (getCommandArgs cmd)</span></span>
+<span class="lineno">   52 </span><span class="spaces">      </span><span class="istickedoff">(exitCode, outLazy, errLazy) &lt;- P.readProcess config</span>
+<span class="lineno">   53 </span><span class="spaces">      </span><span class="istickedoff">pure ProcessResult</span>
+<span class="lineno">   54 </span><span class="spaces">        </span><span class="istickedoff">{ _pr_exitCode = exitCode</span>
+<span class="lineno">   55 </span><span class="spaces">        </span><span class="istickedoff">, _pr_stdout   = BL.toStrict outLazy</span>
+<span class="lineno">   56 </span><span class="spaces">        </span><span class="istickedoff">, _pr_stderr   = BL.toStrict errLazy</span>
+<span class="lineno">   57 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">   58 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | No-op shell handle. Returns success with empty output.
+<span class="lineno">   61 </span>mkNoOpShellHandle :: ShellHandle
+<span class="lineno">   62 </span><span class="decl"><span class="istickedoff">mkNoOpShellHandle = ShellHandle</span>
+<span class="lineno">   63 </span><span class="spaces">  </span><span class="istickedoff">{ _sh_execute = \_ -&gt; pure ProcessResult</span>
+<span class="lineno">   64 </span><span class="spaces">      </span><span class="istickedoff">{ _pr_exitCode = ExitSuccess</span>
+<span class="lineno">   65 </span><span class="spaces">      </span><span class="istickedoff">, _pr_stdout   = &quot;&quot;</span>
+<span class="lineno">   66 </span><span class="spaces">      </span><span class="istickedoff">, _pr_stderr   = &quot;&quot;</span>
+<span class="lineno">   67 </span><span class="spaces">      </span><span class="istickedoff">}</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="istickedoff">}</span></span>
+
+</pre>
+</body>
+</html>

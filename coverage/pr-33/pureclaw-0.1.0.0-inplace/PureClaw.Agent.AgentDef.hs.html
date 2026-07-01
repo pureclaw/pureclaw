@@ -1,0 +1,433 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.AgentDef
+<span class="lineno">    2 </span>  ( -- * Agent name (smart constructor)
+<span class="lineno">    3 </span>    AgentName
+<span class="lineno">    4 </span>  , unAgentName
+<span class="lineno">    5 </span>  , mkAgentName
+<span class="lineno">    6 </span>  , AgentNameError (..)
+<span class="lineno">    7 </span>    -- * TOML frontmatter extraction
+<span class="lineno">    8 </span>  , extractFrontmatter
+<span class="lineno">    9 </span>    -- * Agent configuration (TOML frontmatter)
+<span class="lineno">   10 </span>  , AgentConfig (..)
+<span class="lineno">   11 </span>  , defaultAgentConfig
+<span class="lineno">   12 </span>  , parseAgentsMd
+<span class="lineno">   13 </span>  , AgentsMdParseError (..)
+<span class="lineno">   14 </span>    -- * Agent definition
+<span class="lineno">   15 </span>  , AgentDef (..)
+<span class="lineno">   16 </span>    -- * Prompt composition
+<span class="lineno">   17 </span>  , composeAgentPrompt
+<span class="lineno">   18 </span>  , composeAgentPromptWithBootstrap
+<span class="lineno">   19 </span>    -- * Discovery and loading
+<span class="lineno">   20 </span>  , discoverAgents
+<span class="lineno">   21 </span>  , loadAgent
+<span class="lineno">   22 </span>    -- * Workspace validation and setup
+<span class="lineno">   23 </span>  , WorkspaceError (..)
+<span class="lineno">   24 </span>  , validateWorkspace
+<span class="lineno">   25 </span>  , ensureDefaultWorkspace
+<span class="lineno">   26 </span>    -- * Override precedence
+<span class="lineno">   27 </span>  , resolveOverride
+<span class="lineno">   28 </span>  ) where
+<span class="lineno">   29 </span>
+<span class="lineno">   30 </span>import Control.Applicative ((&lt;|&gt;))
+<span class="lineno">   31 </span>import Control.Exception qualified as Exc
+<span class="lineno">   32 </span>import Data.Aeson qualified as Aeson
+<span class="lineno">   33 </span>import Data.Char qualified as Char
+<span class="lineno">   34 </span>import Data.Either (rights)
+<span class="lineno">   35 </span>import Data.List (isPrefixOf)
+<span class="lineno">   36 </span>import Data.Text (Text)
+<span class="lineno">   37 </span>import Data.Text qualified as T
+<span class="lineno">   38 </span>import Data.Text.IO qualified as TIO
+<span class="lineno">   39 </span>import System.Directory qualified as Dir
+<span class="lineno">   40 </span>import System.FilePath (isAbsolute, (&lt;/&gt;))
+<span class="lineno">   41 </span>import System.Posix.Files qualified as PF
+<span class="lineno">   42 </span>import Toml (TomlCodec, (.=))
+<span class="lineno">   43 </span>import Toml qualified
+<span class="lineno">   44 </span>
+<span class="lineno">   45 </span>import PureClaw.Handles.Log (LogHandle (..))
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>-- | Validated agent name. The data constructor is intentionally NOT exported —
+<span class="lineno">   48 </span>-- the only way to obtain an 'AgentName' is through 'mkAgentName'.
+<span class="lineno">   49 </span>newtype AgentName = AgentName { <span class="istickedoff"><span class="decl"><span class="istickedoff">unAgentName</span></span></span> :: Text }
+<span class="lineno">   50 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Ord</span></span></span></span></span></span></span></span></span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   51 </span>
+<span class="lineno">   52 </span>-- | Reasons a raw 'Text' cannot be promoted to an 'AgentName'.
+<span class="lineno">   53 </span>data AgentNameError
+<span class="lineno">   54 </span>  = AgentNameEmpty
+<span class="lineno">   55 </span>  | AgentNameTooLong
+<span class="lineno">   56 </span>  | AgentNameInvalidChars Text
+<span class="lineno">   57 </span>  | AgentNameLeadingDot
+<span class="lineno">   58 </span>  deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">   59 </span>
+<span class="lineno">   60 </span>-- | Maximum allowed length for an agent name.
+<span class="lineno">   61 </span>agentNameMaxLength :: Int
+<span class="lineno">   62 </span><span class="decl"><span class="istickedoff">agentNameMaxLength = 64</span></span>
+<span class="lineno">   63 </span>
+<span class="lineno">   64 </span>-- | Valid character predicate: ASCII letters, digits, underscore, hyphen.
+<span class="lineno">   65 </span>isValidAgentNameChar :: Char -&gt; Bool
+<span class="lineno">   66 </span><span class="decl"><span class="istickedoff">isValidAgentNameChar c =</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="istickedoff">Char.isAsciiUpper c</span>
+<span class="lineno">   68 </span><span class="spaces">    </span><span class="istickedoff">|| Char.isAsciiLower c</span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">|| Char.isDigit c</span>
+<span class="lineno">   70 </span><span class="spaces">    </span><span class="istickedoff">|| c == '_'</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">|| c == '-'</span></span>
+<span class="lineno">   72 </span>
+<span class="lineno">   73 </span>-- | Smart constructor. Rejects empty names, names longer than 64 characters,
+<span class="lineno">   74 </span>-- names with a leading dot (hidden), and names containing any character
+<span class="lineno">   75 </span>-- outside @[a-zA-Z0-9_-]@ (which in particular rejects @.@, @/@, and null).
+<span class="lineno">   76 </span>mkAgentName :: Text -&gt; Either AgentNameError AgentName
+<span class="lineno">   77 </span><span class="decl"><span class="istickedoff">mkAgentName raw</span>
+<span class="lineno">   78 </span><span class="spaces">  </span><span class="istickedoff">| T.null raw = Left AgentNameEmpty</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="istickedoff">| T.length raw &gt; agentNameMaxLength = Left AgentNameTooLong</span>
+<span class="lineno">   80 </span><span class="spaces">  </span><span class="istickedoff">| T.head raw == '.' &amp;&amp; T.all isValidAgentNameChar (T.tail raw) = Left AgentNameLeadingDot</span>
+<span class="lineno">   81 </span><span class="spaces">  </span><span class="istickedoff">| not (T.all isValidAgentNameChar raw) = Left (AgentNameInvalidChars raw)</span>
+<span class="lineno">   82 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = Right (AgentName raw)</span></span>
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>-- | Custom 'Aeson.FromJSON' routes through 'mkAgentName' so that invalid
+<span class="lineno">   85 </span>-- names on disk cannot bypass the smart constructor.
+<span class="lineno">   86 </span>-- | Split a TOML frontmatter fence off the front of a document. Recognizes a
+<span class="lineno">   87 </span>-- leading @---\\n@, a terminating @\\n---\\n@, and returns the inner block as
+<span class="lineno">   88 </span>-- the first component and the body after the closer as the second. If the
+<span class="lineno">   89 </span>-- input does not start with a fence or the fence is not closed, returns
+<span class="lineno">   90 </span>-- @(Nothing, originalInput)@ unchanged.
+<span class="lineno">   91 </span>extractFrontmatter :: Text -&gt; (Maybe Text, Text)
+<span class="lineno">   92 </span><span class="decl"><span class="istickedoff">extractFrontmatter input =</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">case T.stripPrefix &quot;---\n&quot; input of</span>
+<span class="lineno">   94 </span><span class="spaces">    </span><span class="istickedoff">Nothing -&gt; (Nothing, input)</span>
+<span class="lineno">   95 </span><span class="spaces">    </span><span class="istickedoff">Just rest -&gt;</span>
+<span class="lineno">   96 </span><span class="spaces">      </span><span class="istickedoff">case T.breakOn &quot;\n---\n&quot; rest of</span>
+<span class="lineno">   97 </span><span class="spaces">        </span><span class="istickedoff">(_, &quot;&quot;) -&gt; (Nothing, input)  -- no closing fence</span>
+<span class="lineno">   98 </span><span class="spaces">        </span><span class="istickedoff">(inner, afterBreak) -&gt;</span>
+<span class="lineno">   99 </span><span class="spaces">          </span><span class="istickedoff">let body = T.drop (T.length (&quot;\n---\n&quot; :: Text)) afterBreak</span>
+<span class="lineno">  100 </span><span class="spaces">          </span><span class="istickedoff">in (Just inner, body)</span></span>
+<span class="lineno">  101 </span>
+<span class="lineno">  102 </span>instance <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Aeson.FromJSON AgentName</span></span></span></span> where
+<span class="lineno">  103 </span>  <span class="decl"><span class="istickedoff">parseJSON = Aeson.withText <span class="nottickedoff">&quot;AgentName&quot;</span> $ \t -&gt;</span>
+<span class="lineno">  104 </span><span class="spaces">    </span><span class="istickedoff">case mkAgentName t of</span>
+<span class="lineno">  105 </span><span class="spaces">      </span><span class="istickedoff">Right n -&gt; pure n</span>
+<span class="lineno">  106 </span><span class="spaces">      </span><span class="istickedoff">Left err -&gt; fail <span class="nottickedoff">(&quot;invalid AgentName: &quot; ++ show err)</span></span></span>
+<span class="lineno">  107 </span>
+<span class="lineno">  108 </span>-- | Configuration loaded from the TOML frontmatter of an @AGENTS.md@ file.
+<span class="lineno">  109 </span>-- All fields are optional; unknown fields are ignored by the codec.
+<span class="lineno">  110 </span>data AgentConfig = AgentConfig
+<span class="lineno">  111 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ac_model</span></span></span>       :: Maybe Text
+<span class="lineno">  112 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ac_toolProfile</span></span></span> :: Maybe Text
+<span class="lineno">  113 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ac_workspace</span></span></span>   :: Maybe Text
+<span class="lineno">  114 </span>  } deriving stock (<span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  115 </span>
+<span class="lineno">  116 </span>-- | An 'AgentConfig' with every field unset.
+<span class="lineno">  117 </span>defaultAgentConfig :: AgentConfig
+<span class="lineno">  118 </span><span class="decl"><span class="istickedoff">defaultAgentConfig = AgentConfig Nothing Nothing Nothing</span></span>
+<span class="lineno">  119 </span>
+<span class="lineno">  120 </span>agentConfigCodec :: TomlCodec AgentConfig
+<span class="lineno">  121 </span><span class="decl"><span class="istickedoff">agentConfigCodec = AgentConfig</span>
+<span class="lineno">  122 </span><span class="spaces">  </span><span class="istickedoff">&lt;$&gt; Toml.dioptional (Toml.text &quot;model&quot;)        .= <span class="nottickedoff">_ac_model</span></span>
+<span class="lineno">  123 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;tool_profile&quot;) .= <span class="nottickedoff">_ac_toolProfile</span></span>
+<span class="lineno">  124 </span><span class="spaces">  </span><span class="istickedoff">&lt;*&gt; Toml.dioptional (Toml.text &quot;workspace&quot;)    .= <span class="nottickedoff">_ac_workspace</span></span></span>
+<span class="lineno">  125 </span>
+<span class="lineno">  126 </span>-- | Errors that may occur while parsing an @AGENTS.md@ document.
+<span class="lineno">  127 </span>newtype AgentsMdParseError
+<span class="lineno">  128 </span>  = AgentsMdTomlError Text
+<span class="lineno">  129 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  130 </span>
+<span class="lineno">  131 </span>-- | Parse an @AGENTS.md@ document: extract the optional TOML frontmatter,
+<span class="lineno">  132 </span>-- decode it as an 'AgentConfig', and return the remaining body. A document
+<span class="lineno">  133 </span>-- with no frontmatter yields 'defaultAgentConfig' and the whole input as the
+<span class="lineno">  134 </span>-- body.
+<span class="lineno">  135 </span>parseAgentsMd :: Text -&gt; Either AgentsMdParseError (AgentConfig, Text)
+<span class="lineno">  136 </span><span class="decl"><span class="istickedoff">parseAgentsMd input =</span>
+<span class="lineno">  137 </span><span class="spaces">  </span><span class="istickedoff">case extractFrontmatter input of</span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">(Nothing, body) -&gt; Right (defaultAgentConfig, body)</span>
+<span class="lineno">  139 </span><span class="spaces">    </span><span class="istickedoff">(Just &quot;&quot;, body) -&gt; Right (defaultAgentConfig, body)</span>
+<span class="lineno">  140 </span><span class="spaces">    </span><span class="istickedoff">(Just toml, body) -&gt;</span>
+<span class="lineno">  141 </span><span class="spaces">      </span><span class="istickedoff">case Toml.decode agentConfigCodec toml of</span>
+<span class="lineno">  142 </span><span class="spaces">        </span><span class="istickedoff">Left errs -&gt; Left <span class="nottickedoff">(AgentsMdTomlError (Toml.prettyTomlDecodeErrors errs))</span></span>
+<span class="lineno">  143 </span><span class="spaces">        </span><span class="istickedoff">Right cfg -&gt; Right (cfg, body)</span></span>
+<span class="lineno">  144 </span>
+<span class="lineno">  145 </span>-- | A discovered and loaded agent: its validated name, the on-disk directory
+<span class="lineno">  146 </span>-- that holds its bootstrap files, and its parsed @AGENTS.md@ frontmatter
+<span class="lineno">  147 </span>-- (falling back to 'defaultAgentConfig' when no frontmatter is present).
+<span class="lineno">  148 </span>data AgentDef = AgentDef
+<span class="lineno">  149 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">_ad_name</span></span></span>   :: AgentName
+<span class="lineno">  150 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ad_dir</span></span></span>    :: FilePath
+<span class="lineno">  151 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">_ad_config</span></span></span> :: AgentConfig
+<span class="lineno">  152 </span>  } deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  153 </span>
+<span class="lineno">  154 </span>-- | Bootstrap file types, in the order they should be injected into the
+<span class="lineno">  155 </span>-- system prompt.
+<span class="lineno">  156 </span>data SectionKind = SoulK | UserK | AgentsK | MemoryK | IdentityK | ToolsK | BootstrapK
+<span class="lineno">  157 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>)
+<span class="lineno">  158 </span>
+<span class="lineno">  159 </span>sectionFileName :: SectionKind -&gt; FilePath
+<span class="lineno">  160 </span><span class="decl"><span class="istickedoff">sectionFileName SoulK      = &quot;SOUL.md&quot;</span>
+<span class="lineno">  161 </span><span class="spaces"></span><span class="istickedoff">sectionFileName UserK      = &quot;USER.md&quot;</span>
+<span class="lineno">  162 </span><span class="spaces"></span><span class="istickedoff">sectionFileName AgentsK    = &quot;AGENTS.md&quot;</span>
+<span class="lineno">  163 </span><span class="spaces"></span><span class="istickedoff">sectionFileName MemoryK    = &quot;MEMORY.md&quot;</span>
+<span class="lineno">  164 </span><span class="spaces"></span><span class="istickedoff">sectionFileName IdentityK  = &quot;IDENTITY.md&quot;</span>
+<span class="lineno">  165 </span><span class="spaces"></span><span class="istickedoff">sectionFileName ToolsK     = &quot;TOOLS.md&quot;</span>
+<span class="lineno">  166 </span><span class="spaces"></span><span class="istickedoff">sectionFileName BootstrapK = &quot;BOOTSTRAP.md&quot;</span></span>
+<span class="lineno">  167 </span>
+<span class="lineno">  168 </span>sectionMarker :: SectionKind -&gt; Text
+<span class="lineno">  169 </span><span class="decl"><span class="istickedoff">sectionMarker SoulK      = &quot;--- SOUL ---&quot;</span>
+<span class="lineno">  170 </span><span class="spaces"></span><span class="istickedoff">sectionMarker UserK      = &quot;--- USER ---&quot;</span>
+<span class="lineno">  171 </span><span class="spaces"></span><span class="istickedoff">sectionMarker AgentsK    = &quot;--- AGENTS ---&quot;</span>
+<span class="lineno">  172 </span><span class="spaces"></span><span class="istickedoff">sectionMarker MemoryK    = &quot;--- MEMORY ---&quot;</span>
+<span class="lineno">  173 </span><span class="spaces"></span><span class="istickedoff">sectionMarker IdentityK  = &quot;--- IDENTITY ---&quot;</span>
+<span class="lineno">  174 </span><span class="spaces"></span><span class="istickedoff">sectionMarker ToolsK     = &quot;--- TOOLS ---&quot;</span>
+<span class="lineno">  175 </span><span class="spaces"></span><span class="istickedoff">sectionMarker BootstrapK = &quot;--- BOOTSTRAP ---&quot;</span></span>
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>-- | Maximum raw file size we will read. Anything larger is rejected with a
+<span class="lineno">  178 </span>-- log warning and skipped.
+<span class="lineno">  179 </span>maxBootstrapFileBytes :: Integer
+<span class="lineno">  180 </span><span class="decl"><span class="istickedoff">maxBootstrapFileBytes = 1024 * 1024</span></span>
+<span class="lineno">  181 </span>
+<span class="lineno">  182 </span>-- | Truncate a section body to @limit@ characters, appending the exact
+<span class="lineno">  183 </span>-- truncation marker. Strings at or under the limit are returned as-is.
+<span class="lineno">  184 </span>truncateSection :: Int -&gt; Text -&gt; Text
+<span class="lineno">  185 </span><span class="decl"><span class="istickedoff">truncateSection limit txt</span>
+<span class="lineno">  186 </span><span class="spaces">  </span><span class="istickedoff">| T.length txt &lt;= limit = txt</span>
+<span class="lineno">  187 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  188 </span><span class="spaces">      </span><span class="istickedoff">T.take limit txt</span>
+<span class="lineno">  189 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; &quot;\n[...truncated at &quot; &lt;&gt; T.pack (show limit) &lt;&gt; &quot; chars...]&quot;</span></span>
+<span class="lineno">  190 </span>
+<span class="lineno">  191 </span>-- | Read a single bootstrap section file, applying size/empty/truncation
+<span class="lineno">  192 </span>-- rules. Returns 'Nothing' when the file is missing, empty (including
+<span class="lineno">  193 </span>-- whitespace-only), or rejected as oversized.
+<span class="lineno">  194 </span>readSection :: LogHandle -&gt; FilePath -&gt; SectionKind -&gt; Int -&gt; IO (Maybe Text)
+<span class="lineno">  195 </span><span class="decl"><span class="istickedoff">readSection lg dir kind limit = do</span>
+<span class="lineno">  196 </span><span class="spaces">  </span><span class="istickedoff">let path = dir &lt;/&gt; sectionFileName kind</span>
+<span class="lineno">  197 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- Dir.doesFileExist path</span>
+<span class="lineno">  198 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  199 </span><span class="spaces">    </span><span class="istickedoff">then pure Nothing</span>
+<span class="lineno">  200 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  201 </span><span class="spaces">      </span><span class="istickedoff">size &lt;- Dir.getFileSize path</span>
+<span class="lineno">  202 </span><span class="spaces">      </span><span class="istickedoff">if size &gt; maxBootstrapFileBytes</span>
+<span class="lineno">  203 </span><span class="spaces">        </span><span class="istickedoff">then do</span>
+<span class="lineno">  204 </span><span class="spaces">          </span><span class="istickedoff">_lh_logWarn lg $</span>
+<span class="lineno">  205 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;Skipping oversized bootstrap file (&gt;&quot; &lt;&gt; T.pack (show maxBootstrapFileBytes) &lt;&gt;</span></span>
+<span class="lineno">  206 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot; bytes): &quot; &lt;&gt; T.pack path</span></span>
+<span class="lineno">  207 </span><span class="spaces">          </span><span class="istickedoff">pure Nothing</span>
+<span class="lineno">  208 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  209 </span><span class="spaces">          </span><span class="istickedoff">raw &lt;- Exc.try (TIO.readFile path) :: IO (Either Exc.IOException Text)</span>
+<span class="lineno">  210 </span><span class="spaces">          </span><span class="istickedoff">case raw of</span>
+<span class="lineno">  211 </span><span class="spaces">            </span><span class="istickedoff">Left e -&gt; <span class="nottickedoff">do</span></span>
+<span class="lineno">  212 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">_lh_logWarn lg $</span></span>
+<span class="lineno">  213 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">&quot;Failed to read bootstrap file &quot; &lt;&gt; T.pack path &lt;&gt; &quot;: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">  214 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">pure Nothing</span></span>
+<span class="lineno">  215 </span><span class="spaces">            </span><span class="istickedoff">Right txt -&gt;</span>
+<span class="lineno">  216 </span><span class="spaces">              </span><span class="istickedoff">let contents = case kind of</span>
+<span class="lineno">  217 </span><span class="spaces">                    </span><span class="istickedoff">AgentsK -&gt; case parseAgentsMd txt of</span>
+<span class="lineno">  218 </span><span class="spaces">                      </span><span class="istickedoff">Right (_, body) -&gt; body</span>
+<span class="lineno">  219 </span><span class="spaces">                      </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">txt</span></span>
+<span class="lineno">  220 </span><span class="spaces">                    </span><span class="istickedoff">_ -&gt; txt</span>
+<span class="lineno">  221 </span><span class="spaces">                  </span><span class="istickedoff">trimmed = T.dropWhileEnd Char.isSpace contents</span>
+<span class="lineno">  222 </span><span class="spaces">              </span><span class="istickedoff">in if T.null (T.strip trimmed)</span>
+<span class="lineno">  223 </span><span class="spaces">                   </span><span class="istickedoff">then pure Nothing</span>
+<span class="lineno">  224 </span><span class="spaces">                   </span><span class="istickedoff">else pure (Just (truncateSection limit trimmed))</span></span>
+<span class="lineno">  225 </span>
+<span class="lineno">  226 </span>-- | Compose a system prompt from an agent's bootstrap files. Files are read
+<span class="lineno">  227 </span>-- in the fixed injection order (SOUL, USER, AGENTS, MEMORY, IDENTITY, TOOLS,
+<span class="lineno">  228 </span>-- BOOTSTRAP), missing or empty (including whitespace-only) files are
+<span class="lineno">  229 </span>-- skipped, oversized files (&gt;1MB) are rejected with a log warning, and any
+<span class="lineno">  230 </span>-- section exceeding @limit@ characters is truncated with the exact marker
+<span class="lineno">  231 </span>-- @&quot;\\n[...truncated at \&lt;limit\&gt; chars...]&quot;@.
+<span class="lineno">  232 </span>--
+<span class="lineno">  233 </span>-- For @AGENTS.md@, only the body after the TOML frontmatter fence is
+<span class="lineno">  234 </span>-- injected (the frontmatter itself lives in '_ad_config').
+<span class="lineno">  235 </span>composeAgentPrompt :: LogHandle -&gt; AgentDef -&gt; Int -&gt; IO Text
+<span class="lineno">  236 </span><span class="decl"><span class="istickedoff">composeAgentPrompt lg def limit =</span>
+<span class="lineno">  237 </span><span class="spaces">  </span><span class="istickedoff">composeAgentPromptWithBootstrap lg def limit False</span></span>
+<span class="lineno">  238 </span>
+<span class="lineno">  239 </span>-- | Like 'composeAgentPrompt', but when @bootstrapConsumed@ is 'True' the
+<span class="lineno">  240 </span>-- @BOOTSTRAP.md@ section is skipped entirely (used after the first
+<span class="lineno">  241 </span>-- @StreamDone@ in a session).
+<span class="lineno">  242 </span>composeAgentPromptWithBootstrap :: LogHandle -&gt; AgentDef -&gt; Int -&gt; Bool -&gt; IO Text
+<span class="lineno">  243 </span><span class="decl"><span class="istickedoff">composeAgentPromptWithBootstrap lg def limit bootstrapConsumed = do</span>
+<span class="lineno">  244 </span><span class="spaces">  </span><span class="istickedoff">let kinds =</span>
+<span class="lineno">  245 </span><span class="spaces">        </span><span class="istickedoff">[ SoulK, UserK, AgentsK, MemoryK, IdentityK, ToolsK ]</span>
+<span class="lineno">  246 </span><span class="spaces">        </span><span class="istickedoff">&lt;&gt; [ BootstrapK | not bootstrapConsumed ]</span>
+<span class="lineno">  247 </span><span class="spaces">  </span><span class="istickedoff">sections &lt;- mapM (\k -&gt; readSection lg (_ad_dir def) k limit) kinds</span>
+<span class="lineno">  248 </span><span class="spaces">  </span><span class="istickedoff">let rendered = [ sectionMarker k &lt;&gt; &quot;\n&quot; &lt;&gt; body</span>
+<span class="lineno">  249 </span><span class="spaces">                 </span><span class="istickedoff">| (k, Just body) &lt;- zip kinds sections</span>
+<span class="lineno">  250 </span><span class="spaces">                 </span><span class="istickedoff">]</span>
+<span class="lineno">  251 </span><span class="spaces">  </span><span class="istickedoff">pure (T.intercalate &quot;\n\n&quot; rendered)</span></span>
+<span class="lineno">  252 </span>
+<span class="lineno">  253 </span>-- | Enumerate agent directories under @parent@. Subdirectories whose name
+<span class="lineno">  254 </span>-- is not a valid 'AgentName' are skipped with a log warning. A missing
+<span class="lineno">  255 </span>-- parent directory returns the empty list (no error).
+<span class="lineno">  256 </span>discoverAgents :: LogHandle -&gt; FilePath -&gt; IO [AgentDef]
+<span class="lineno">  257 </span><span class="decl"><span class="istickedoff">discoverAgents lg parent = do</span>
+<span class="lineno">  258 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- Dir.doesDirectoryExist parent</span>
+<span class="lineno">  259 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  260 </span><span class="spaces">    </span><span class="istickedoff">then pure []</span>
+<span class="lineno">  261 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  262 </span><span class="spaces">      </span><span class="istickedoff">entries &lt;- Dir.listDirectory parent</span>
+<span class="lineno">  263 </span><span class="spaces">      </span><span class="istickedoff">results &lt;- mapM tryOne entries</span>
+<span class="lineno">  264 </span><span class="spaces">      </span><span class="istickedoff">pure (rights results)</span>
+<span class="lineno">  265 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">tryOne entry = do</span>
+<span class="lineno">  267 </span><span class="spaces">      </span><span class="istickedoff">let full = parent &lt;/&gt; entry</span>
+<span class="lineno">  268 </span><span class="spaces">      </span><span class="istickedoff">isDir &lt;- Dir.doesDirectoryExist full</span>
+<span class="lineno">  269 </span><span class="spaces">      </span><span class="istickedoff">if <span class="tickonlyfalse">not isDir</span></span>
+<span class="lineno">  270 </span><span class="spaces">        </span><span class="istickedoff">then <span class="nottickedoff">pure (Left ())</span></span>
+<span class="lineno">  271 </span><span class="spaces">        </span><span class="istickedoff">else case mkAgentName (T.pack entry) of</span>
+<span class="lineno">  272 </span><span class="spaces">          </span><span class="istickedoff">Left err -&gt; do</span>
+<span class="lineno">  273 </span><span class="spaces">            </span><span class="istickedoff">_lh_logWarn lg $</span>
+<span class="lineno">  274 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&quot;Skipping invalid agent directory name &quot; &lt;&gt; T.pack (show entry) &lt;&gt;</span></span>
+<span class="lineno">  275 </span><span class="spaces">              </span><span class="istickedoff"><span class="nottickedoff">&quot;: &quot; &lt;&gt; T.pack (show err)</span></span>
+<span class="lineno">  276 </span><span class="spaces">            </span><span class="istickedoff">pure (Left <span class="nottickedoff">()</span>)</span>
+<span class="lineno">  277 </span><span class="spaces">          </span><span class="istickedoff">Right name -&gt; do</span>
+<span class="lineno">  278 </span><span class="spaces">            </span><span class="istickedoff">cfg &lt;- loadAgentConfig full</span>
+<span class="lineno">  279 </span><span class="spaces">            </span><span class="istickedoff">pure (Right AgentDef { _ad_name = name, _ad_dir = <span class="nottickedoff">full</span>, _ad_config = <span class="nottickedoff">cfg</span> })</span></span>
+<span class="lineno">  280 </span>
+<span class="lineno">  281 </span>-- | Load an agent by validated name from @parent@. Returns 'Nothing' if the
+<span class="lineno">  282 </span>-- corresponding directory does not exist.
+<span class="lineno">  283 </span>loadAgent :: FilePath -&gt; AgentName -&gt; IO (Maybe AgentDef)
+<span class="lineno">  284 </span><span class="decl"><span class="istickedoff">loadAgent parent name = do</span>
+<span class="lineno">  285 </span><span class="spaces">  </span><span class="istickedoff">let dir = parent &lt;/&gt; T.unpack (unAgentName name)</span>
+<span class="lineno">  286 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- Dir.doesDirectoryExist dir</span>
+<span class="lineno">  287 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  288 </span><span class="spaces">    </span><span class="istickedoff">then pure Nothing</span>
+<span class="lineno">  289 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  290 </span><span class="spaces">      </span><span class="istickedoff">cfg &lt;- loadAgentConfig dir</span>
+<span class="lineno">  291 </span><span class="spaces">      </span><span class="istickedoff">pure (Just AgentDef { _ad_name = name, _ad_dir = dir, _ad_config = cfg })</span></span>
+<span class="lineno">  292 </span>
+<span class="lineno">  293 </span>-- | Read and parse the @AGENTS.md@ frontmatter inside an agent directory.
+<span class="lineno">  294 </span>-- If the file is missing or fails to parse, returns 'defaultAgentConfig'.
+<span class="lineno">  295 </span>loadAgentConfig :: FilePath -&gt; IO AgentConfig
+<span class="lineno">  296 </span><span class="decl"><span class="istickedoff">loadAgentConfig dir = do</span>
+<span class="lineno">  297 </span><span class="spaces">  </span><span class="istickedoff">let path = dir &lt;/&gt; &quot;AGENTS.md&quot;</span>
+<span class="lineno">  298 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- Dir.doesFileExist path</span>
+<span class="lineno">  299 </span><span class="spaces">  </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  300 </span><span class="spaces">    </span><span class="istickedoff">then pure defaultAgentConfig</span>
+<span class="lineno">  301 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  302 </span><span class="spaces">      </span><span class="istickedoff">raw &lt;- Exc.try (TIO.readFile path) :: IO (Either Exc.IOException Text)</span>
+<span class="lineno">  303 </span><span class="spaces">      </span><span class="istickedoff">case raw of</span>
+<span class="lineno">  304 </span><span class="spaces">        </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">pure defaultAgentConfig</span></span>
+<span class="lineno">  305 </span><span class="spaces">        </span><span class="istickedoff">Right txt -&gt; case parseAgentsMd txt of</span>
+<span class="lineno">  306 </span><span class="spaces">          </span><span class="istickedoff">Right (cfg, _) -&gt; pure cfg</span>
+<span class="lineno">  307 </span><span class="spaces">          </span><span class="istickedoff">Left _ -&gt; <span class="nottickedoff">pure defaultAgentConfig</span></span></span>
+<span class="lineno">  308 </span>
+<span class="lineno">  309 </span>-- | Validation error for an agent workspace path.
+<span class="lineno">  310 </span>data WorkspaceError
+<span class="lineno">  311 </span>  = WorkspaceNotAbsolute Text
+<span class="lineno">  312 </span>  | WorkspaceDoesNotExist FilePath
+<span class="lineno">  313 </span>  | WorkspaceDenied FilePath Text  -- ^ denied canonical path + reason
+<span class="lineno">  314 </span>  deriving stock (<span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Show</span></span></span></span></span></span>, <span class="decl"><span class="nottickedoff"><span class="decl"><span class="nottickedoff">Eq</span></span></span></span>)
+<span class="lineno">  315 </span>
+<span class="lineno">  316 </span>-- | Absolute system directories that must never be used as a workspace.
+<span class="lineno">  317 </span>-- Checked as equality or prefix (@base &lt;&gt; &quot;/&quot;@ prefix) against the
+<span class="lineno">  318 </span>-- canonicalized input.
+<span class="lineno">  319 </span>deniedAbsoluteRoots :: [FilePath]
+<span class="lineno">  320 </span><span class="decl"><span class="istickedoff">deniedAbsoluteRoots =</span>
+<span class="lineno">  321 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;/&quot;, &quot;/etc&quot;, &quot;/usr&quot;, &quot;/bin&quot;, &quot;/sbin&quot;, &quot;/var&quot;, &quot;/sys&quot;, &quot;/proc&quot;, &quot;/dev&quot; ]</span></span>
+<span class="lineno">  322 </span>
+<span class="lineno">  323 </span>-- | Home-relative segments that must never be used as a workspace. The
+<span class="lineno">  324 </span>-- effective denied path is @homeDir &lt;/&gt; segment@.
+<span class="lineno">  325 </span>deniedHomeSegments :: [FilePath]
+<span class="lineno">  326 </span><span class="decl"><span class="istickedoff">deniedHomeSegments =</span>
+<span class="lineno">  327 </span><span class="spaces">  </span><span class="istickedoff">[ &quot;.ssh&quot;, &quot;.gnupg&quot;, &quot;.aws&quot;, &quot;.config&quot;, &quot;.pureclaw&quot; ]</span></span>
+<span class="lineno">  328 </span>
+<span class="lineno">  329 </span>-- | @isUnderPath base target@ is 'True' iff @target@ equals @base@ or is
+<span class="lineno">  330 </span>-- inside @base@. Both arguments are expected to already be canonicalized.
+<span class="lineno">  331 </span>isUnderPath :: FilePath -&gt; FilePath -&gt; Bool
+<span class="lineno">  332 </span><span class="decl"><span class="istickedoff">isUnderPath base target =</span>
+<span class="lineno">  333 </span><span class="spaces">  </span><span class="istickedoff">target == base</span>
+<span class="lineno">  334 </span><span class="spaces">    </span><span class="istickedoff">|| (base /= &quot;/&quot; &amp;&amp; (base &lt;&gt; <span class="nottickedoff">&quot;/&quot;</span>) `isPrefixOf` target)</span></span>
+<span class="lineno">  335 </span>
+<span class="lineno">  336 </span>-- | Expand a leading tilde in a raw workspace path against a supplied home dir.
+<span class="lineno">  337 </span>expandTilde :: FilePath -&gt; Text -&gt; FilePath
+<span class="lineno">  338 </span><span class="decl"><span class="istickedoff">expandTilde home raw</span>
+<span class="lineno">  339 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlyfalse">raw == &quot;~&quot;</span> = <span class="nottickedoff">home</span></span>
+<span class="lineno">  340 </span><span class="spaces">  </span><span class="istickedoff">| Just rest &lt;- T.stripPrefix &quot;~/&quot; raw = home &lt;/&gt; T.unpack rest</span>
+<span class="lineno">  341 </span><span class="spaces">  </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = T.unpack raw</span></span>
+<span class="lineno">  342 </span>
+<span class="lineno">  343 </span>-- | Validate a user-supplied workspace path. Tilde-expands with the supplied
+<span class="lineno">  344 </span>-- home dir, requires the path to be absolute, requires the directory to
+<span class="lineno">  345 </span>-- exist, canonicalizes (resolving symlinks), then checks it against the
+<span class="lineno">  346 </span>-- denylist of system and home-relative paths.
+<span class="lineno">  347 </span>validateWorkspace :: FilePath -&gt; Text -&gt; IO (Either WorkspaceError FilePath)
+<span class="lineno">  348 </span><span class="decl"><span class="istickedoff">validateWorkspace homeDir raw = do</span>
+<span class="lineno">  349 </span><span class="spaces">  </span><span class="istickedoff">let expanded = expandTilde homeDir raw</span>
+<span class="lineno">  350 </span><span class="spaces">  </span><span class="istickedoff">if not (isAbsolute expanded)</span>
+<span class="lineno">  351 </span><span class="spaces">    </span><span class="istickedoff">then pure (Left (WorkspaceNotAbsolute <span class="nottickedoff">raw</span>))</span>
+<span class="lineno">  352 </span><span class="spaces">    </span><span class="istickedoff">else do</span>
+<span class="lineno">  353 </span><span class="spaces">      </span><span class="istickedoff">exists &lt;- Dir.doesDirectoryExist expanded</span>
+<span class="lineno">  354 </span><span class="spaces">      </span><span class="istickedoff">if not exists</span>
+<span class="lineno">  355 </span><span class="spaces">        </span><span class="istickedoff">then pure (Left (WorkspaceDoesNotExist <span class="nottickedoff">expanded</span>))</span>
+<span class="lineno">  356 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  357 </span><span class="spaces">          </span><span class="istickedoff">canonical &lt;- Dir.canonicalizePath expanded</span>
+<span class="lineno">  358 </span><span class="spaces">          </span><span class="istickedoff">reason &lt;- checkDenylist homeDir canonical</span>
+<span class="lineno">  359 </span><span class="spaces">          </span><span class="istickedoff">case reason of</span>
+<span class="lineno">  360 </span><span class="spaces">            </span><span class="istickedoff">Just r -&gt; pure (Left (WorkspaceDenied <span class="nottickedoff">canonical</span> <span class="nottickedoff">r</span>))</span>
+<span class="lineno">  361 </span><span class="spaces">            </span><span class="istickedoff">Nothing -&gt; pure (Right canonical)</span></span>
+<span class="lineno">  362 </span>
+<span class="lineno">  363 </span>-- | Check a canonicalized path against the denylist. Returns 'Just' a
+<span class="lineno">  364 </span>-- human-readable reason if denied, 'Nothing' otherwise. Denylist entries
+<span class="lineno">  365 </span>-- are themselves canonicalized (when they exist) so that e.g. macOS's
+<span class="lineno">  366 </span>-- @/etc -&gt; /private/etc@ symlink is handled correctly.
+<span class="lineno">  367 </span>checkDenylist :: FilePath -&gt; FilePath -&gt; IO (Maybe Text)
+<span class="lineno">  368 </span><span class="decl"><span class="istickedoff">checkDenylist homeDir canonical = do</span>
+<span class="lineno">  369 </span><span class="spaces">  </span><span class="istickedoff">absHits &lt;- mapM canonicalizeIfExists deniedAbsoluteRoots</span>
+<span class="lineno">  370 </span><span class="spaces">  </span><span class="istickedoff">let absMatch =</span>
+<span class="lineno">  371 </span><span class="spaces">        </span><span class="istickedoff">[ <span class="nottickedoff">orig</span></span>
+<span class="lineno">  372 </span><span class="spaces">        </span><span class="istickedoff">| (orig, canon) &lt;- zip deniedAbsoluteRoots absHits</span>
+<span class="lineno">  373 </span><span class="spaces">        </span><span class="istickedoff">, isUnderPath canon canonical</span>
+<span class="lineno">  374 </span><span class="spaces">        </span><span class="istickedoff">]</span>
+<span class="lineno">  375 </span><span class="spaces">  </span><span class="istickedoff">case absMatch of</span>
+<span class="lineno">  376 </span><span class="spaces">    </span><span class="istickedoff">(hit : _) -&gt; pure (Just <span class="nottickedoff">(&quot;is inside system directory &quot; &lt;&gt; T.pack hit)</span>)</span>
+<span class="lineno">  377 </span><span class="spaces">    </span><span class="istickedoff">[] -&gt; do</span>
+<span class="lineno">  378 </span><span class="spaces">      </span><span class="istickedoff">homeCanons &lt;- mapM (canonicalizeIfExists . (homeDir &lt;/&gt;)) deniedHomeSegments</span>
+<span class="lineno">  379 </span><span class="spaces">      </span><span class="istickedoff">let homeMatch =</span>
+<span class="lineno">  380 </span><span class="spaces">            </span><span class="istickedoff">[ <span class="nottickedoff">seg</span></span>
+<span class="lineno">  381 </span><span class="spaces">            </span><span class="istickedoff">| (seg, canon) &lt;- zip deniedHomeSegments homeCanons</span>
+<span class="lineno">  382 </span><span class="spaces">            </span><span class="istickedoff">, isUnderPath canon canonical</span>
+<span class="lineno">  383 </span><span class="spaces">            </span><span class="istickedoff">]</span>
+<span class="lineno">  384 </span><span class="spaces">      </span><span class="istickedoff">case homeMatch of</span>
+<span class="lineno">  385 </span><span class="spaces">        </span><span class="istickedoff">(seg : _) -&gt; pure (Just <span class="nottickedoff">(&quot;is inside sensitive home directory ~/&quot; &lt;&gt; T.pack seg)</span>)</span>
+<span class="lineno">  386 </span><span class="spaces">        </span><span class="istickedoff">[] -&gt; pure Nothing</span></span>
+<span class="lineno">  387 </span>
+<span class="lineno">  388 </span>-- | Canonicalize a path if it exists; otherwise return it unchanged. Used
+<span class="lineno">  389 </span>-- to normalize denylist entries so symlinks like @/etc -&gt; /private/etc@
+<span class="lineno">  390 </span>-- resolve to the same canonical form as user-supplied paths.
+<span class="lineno">  391 </span>canonicalizeIfExists :: FilePath -&gt; IO FilePath
+<span class="lineno">  392 </span><span class="decl"><span class="istickedoff">canonicalizeIfExists p = do</span>
+<span class="lineno">  393 </span><span class="spaces">  </span><span class="istickedoff">exists &lt;- Dir.doesDirectoryExist p</span>
+<span class="lineno">  394 </span><span class="spaces">  </span><span class="istickedoff">if exists then Dir.canonicalizePath p else pure p</span></span>
+<span class="lineno">  395 </span>
+<span class="lineno">  396 </span>-- | Ensure the default workspace directory for an agent exists with
+<span class="lineno">  397 </span>-- @0o700@ permissions. Creates parent directories as needed. Idempotent.
+<span class="lineno">  398 </span>-- The workspace path is @\&lt;pureclawDir\&gt;/agents/\&lt;name\&gt;/workspace/@.
+<span class="lineno">  399 </span>ensureDefaultWorkspace :: FilePath -&gt; AgentName -&gt; IO FilePath
+<span class="lineno">  400 </span><span class="decl"><span class="istickedoff">ensureDefaultWorkspace pureclawDir name = do</span>
+<span class="lineno">  401 </span><span class="spaces">  </span><span class="istickedoff">let workspaceDir =</span>
+<span class="lineno">  402 </span><span class="spaces">        </span><span class="istickedoff">pureclawDir &lt;/&gt; &quot;agents&quot; &lt;/&gt; T.unpack (unAgentName name) &lt;/&gt; &quot;workspace&quot;</span>
+<span class="lineno">  403 </span><span class="spaces">  </span><span class="istickedoff">Dir.createDirectoryIfMissing True workspaceDir</span>
+<span class="lineno">  404 </span><span class="spaces">  </span><span class="istickedoff">PF.setFileMode workspaceDir PF.ownerModes</span>
+<span class="lineno">  405 </span><span class="spaces">  </span><span class="istickedoff">pure workspaceDir</span></span>
+<span class="lineno">  406 </span>
+<span class="lineno">  407 </span>-- | Resolve a config value using precedence: CLI &gt; frontmatter &gt; config &gt;
+<span class="lineno">  408 </span>-- default. Returns the first non-'Nothing' argument.
+<span class="lineno">  409 </span>resolveOverride :: Maybe a -&gt; Maybe a -&gt; Maybe a -&gt; Maybe a -&gt; Maybe a
+<span class="lineno">  410 </span><span class="decl"><span class="istickedoff">resolveOverride cli fm cfg def = cli &lt;|&gt; fm &lt;|&gt; cfg &lt;|&gt; def</span></span>
+
+</pre>
+</body>
+</html>

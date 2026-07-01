@@ -1,0 +1,187 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="decl"><span class="nottickedoff">never executed</span> <span class="tickonlytrue">always true</span> <span class="tickonlyfalse">always false</span></span>
+</pre>
+<pre>
+<span class="lineno">    1 </span>module PureClaw.Agent.Loop
+<span class="lineno">    2 </span>  ( -- * Background tasks (/bg, issue #52)
+<span class="lineno">    3 </span>    runBackgroundTurn
+<span class="lineno">    4 </span>    -- * Re-exports from Handles.Harness (for backward compatibility)
+<span class="lineno">    5 </span>  , sanitizeHarnessOutput
+<span class="lineno">    6 </span>  ) where
+<span class="lineno">    7 </span>
+<span class="lineno">    8 </span>import Control.Exception
+<span class="lineno">    9 </span>import Data.IORef
+<span class="lineno">   10 </span>import Data.Text (Text)
+<span class="lineno">   11 </span>import Data.Text qualified as T
+<span class="lineno">   12 </span>import Data.Time (getCurrentTime)
+<span class="lineno">   13 </span>import System.Directory (createDirectoryIfMissing)
+<span class="lineno">   14 </span>import System.FilePath (takeDirectory)
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>import Data.Map.Strict qualified as Map
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import PureClaw.Agent.AgentDef qualified as AgentDef
+<span class="lineno">   19 </span>import PureClaw.Core.Types
+<span class="lineno">   20 </span>import PureClaw.Agent.Env
+<span class="lineno">   21 </span>import PureClaw.Agent.SlashCommands (getSessionsDir)
+<span class="lineno">   22 </span>import PureClaw.Handles.Channel
+<span class="lineno">   23 </span>import PureClaw.Handles.Harness
+<span class="lineno">   24 </span>import PureClaw.Handles.Log
+<span class="lineno">   25 </span>import PureClaw.Handles.Transcript qualified as Transcript
+<span class="lineno">   26 </span>import PureClaw.MCP (mcpRegistry)
+<span class="lineno">   27 </span>import PureClaw.Providers.Class
+<span class="lineno">   28 </span>import PureClaw.Session.Handle qualified as Session
+<span class="lineno">   29 </span>import PureClaw.Session.Types qualified as SessionTypes
+<span class="lineno">   30 </span>import PureClaw.Tools.Delegate (runSubAgent)
+<span class="lineno">   31 </span>import PureClaw.Tools.Registry
+<span class="lineno">   32 </span>import PureClaw.Transcript.Provider
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>-- | Maximum turns for a @\/bg@ background task (provider + tool-call cycles).
+<span class="lineno">   35 </span>backgroundMaxTurns :: Int
+<span class="lineno">   36 </span><span class="decl"><span class="istickedoff">backgroundMaxTurns = 20</span></span>
+<span class="lineno">   37 </span>
+<span class="lineno">   38 </span>-- | Run a @\/bg@ prompt in a fresh background session and push the result
+<span class="lineno">   39 </span>-- directly to the channel (issue #52).
+<span class="lineno">   40 </span>--
+<span class="lineno">   41 </span>-- The background turn runs in its OWN session — a brand-new
+<span class="lineno">   42 </span>-- 'PureClaw.Session.Handle.SessionHandle' created under the same sessions
+<span class="lineno">   43 </span>-- directory as the foreground session and wired to the same
+<span class="lineno">   44 </span>-- 'PureClaw.Frontend.StreamBroker.StreamBroker'. The provider is wrapped
+<span class="lineno">   45 </span>-- with 'mkTranscriptProvider' so every request/response is recorded to the
+<span class="lineno">   46 </span>-- session's @transcript.jsonl@ (and broadcast to the broker). This is what
+<span class="lineno">   47 </span>-- makes the background conversation appear in the frontend UI like any
+<span class="lineno">   48 </span>-- other conversation: the frontend enumerates session directories on disk
+<span class="lineno">   49 </span>-- and subscribes to broker events. The fresh session also means the
+<span class="lineno">   50 </span>-- background turn does NOT leak into the foreground conversation history.
+<span class="lineno">   51 </span>--
+<span class="lineno">   52 </span>-- It uses the process default provider/model and the effective tool
+<span class="lineno">   53 </span>-- registry (built-ins + connected MCP servers), runs to completion via
+<span class="lineno">   54 </span>-- 'runSubAgent' (non-streaming, so it does not interleave with the
+<span class="lineno">   55 </span>-- foreground), and emits a single @[bg done] …@ message via '_ch_send'.
+<span class="lineno">   56 </span>-- This intentionally does NOT go through the tab-output queue
+<span class="lineno">   57 </span>-- ('_env_tabOutQ') — the background turn emits directly so its result is
+<span class="lineno">   58 </span>-- delivered even without the relay-writer thread in scope.
+<span class="lineno">   59 </span>--
+<span class="lineno">   60 </span>-- Provider/model-absent and provider-failure cases each emit a short,
+<span class="lineno">   61 </span>-- redacted @[bg] …@ message rather than throwing (the caller forks this
+<span class="lineno">   62 </span>-- with '_env_fork' and does not observe its result).
+<span class="lineno">   63 </span>runBackgroundTurn :: AgentEnv -&gt; Text -&gt; IO ()
+<span class="lineno">   64 </span><span class="decl"><span class="istickedoff">runBackgroundTurn env prompt = do</span>
+<span class="lineno">   65 </span><span class="spaces">  </span><span class="istickedoff">let channel = _env_channel env</span>
+<span class="lineno">   66 </span><span class="spaces">  </span><span class="istickedoff">mProvider &lt;- readIORef (_env_provider env)</span>
+<span class="lineno">   67 </span><span class="spaces">  </span><span class="istickedoff">mModel    &lt;- readIORef (_env_model env)</span>
+<span class="lineno">   68 </span><span class="spaces">  </span><span class="istickedoff">case (mProvider, mModel) of</span>
+<span class="lineno">   69 </span><span class="spaces">    </span><span class="istickedoff">(Nothing, _) -&gt;</span>
+<span class="lineno">   70 </span><span class="spaces">      </span><span class="istickedoff">_ch_send channel (OutgoingMessage &quot;[bg] Cannot run: no provider configured.&quot;)</span>
+<span class="lineno">   71 </span><span class="spaces">    </span><span class="istickedoff">(_, Nothing) -&gt;</span>
+<span class="lineno">   72 </span><span class="spaces">      </span><span class="istickedoff"><span class="nottickedoff">_ch_send channel (OutgoingMessage &quot;[bg] Cannot run: no model configured.&quot;)</span></span>
+<span class="lineno">   73 </span><span class="spaces">    </span><span class="istickedoff">(Just provider, Just model) -&gt; do</span>
+<span class="lineno">   74 </span><span class="spaces">      </span><span class="istickedoff">outcome &lt;- try @SomeException (runBackgroundSession env provider model prompt)</span>
+<span class="lineno">   75 </span><span class="spaces">      </span><span class="istickedoff">case outcome of</span>
+<span class="lineno">   76 </span><span class="spaces">        </span><span class="istickedoff">Left e -&gt; do</span>
+<span class="lineno">   77 </span><span class="spaces">          </span><span class="istickedoff">_lh_logError (_env_logger env) $</span>
+<span class="lineno">   78 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;Background task error: &quot; &lt;&gt; T.pack (show e)</span></span>
+<span class="lineno">   79 </span><span class="spaces">          </span><span class="istickedoff">_ch_send channel (OutgoingMessage</span>
+<span class="lineno">   80 </span><span class="spaces">            </span><span class="istickedoff">&quot;[bg] Something went wrong running the background task.&quot;)</span>
+<span class="lineno">   81 </span><span class="spaces">        </span><span class="istickedoff">Right text -&gt;</span>
+<span class="lineno">   82 </span><span class="spaces">          </span><span class="istickedoff">let body = if T.null (T.strip text) then &quot;(no response)&quot; else text</span>
+<span class="lineno">   83 </span><span class="spaces">          </span><span class="istickedoff">in _ch_send channel (OutgoingMessage (&quot;[bg done] &quot; &lt;&gt; body))</span></span>
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>-- | Create the fresh background session, run the prompt against a
+<span class="lineno">   86 </span>-- transcript-recording provider, persist + close the session, and return
+<span class="lineno">   87 </span>-- the final assistant text. Any exception propagates to 'runBackgroundTurn'
+<span class="lineno">   88 </span>-- (which reports a redacted failure); the session is saved + closed
+<span class="lineno">   89 </span>-- regardless via 'finally'.
+<span class="lineno">   90 </span>runBackgroundSession :: AgentEnv -&gt; SomeProvider -&gt; ModelId -&gt; Text -&gt; IO Text
+<span class="lineno">   91 </span><span class="decl"><span class="istickedoff">runBackgroundSession env provider model prompt = do</span>
+<span class="lineno">   92 </span><span class="spaces">  </span><span class="istickedoff">registry  &lt;- backgroundRegistry env</span>
+<span class="lineno">   93 </span><span class="spaces">  </span><span class="istickedoff">bgSession &lt;- mkBackgroundSession env model prompt</span>
+<span class="lineno">   94 </span><span class="spaces">  </span><span class="istickedoff">let transcript = Session._sh_transcript bgSession</span>
+<span class="lineno">   95 </span><span class="spaces">      </span><span class="istickedoff">-- Recording wrapper: each provider call writes a request/response</span>
+<span class="lineno">   96 </span><span class="spaces">      </span><span class="istickedoff">-- pair to the session transcript (and fans out to the broker).</span>
+<span class="lineno">   97 </span><span class="spaces">      </span><span class="istickedoff">provider'  = mkTranscriptProvider transcript (unModelId model) Nothing provider</span>
+<span class="lineno">   98 </span><span class="spaces">  </span><span class="istickedoff">runSubAgent provider' model registry (_env_systemPrompt env)</span>
+<span class="lineno">   99 </span><span class="spaces">              </span><span class="istickedoff">prompt backgroundMaxTurns</span>
+<span class="lineno">  100 </span><span class="spaces">    </span><span class="istickedoff">`finally` do</span>
+<span class="lineno">  101 </span><span class="spaces">      </span><span class="istickedoff">ignoreExc (Session._sh_save bgSession)</span>
+<span class="lineno">  102 </span><span class="spaces">      </span><span class="istickedoff">ignoreExc (Transcript._th_close transcript)</span></span>
+<span class="lineno">  103 </span>
+<span class="lineno">  104 </span>-- | Build a fresh on-disk session for a @\/bg@ turn, rooted under the same
+<span class="lineno">  105 </span>-- sessions directory as the foreground session (so the frontend — which
+<span class="lineno">  106 </span>-- scans that directory — discovers it) and wired to '_env_broker' (so its
+<span class="lineno">  107 </span>-- transcript writes broadcast live).
+<span class="lineno">  108 </span>mkBackgroundSession :: AgentEnv -&gt; ModelId -&gt; Text -&gt; IO Session.SessionHandle
+<span class="lineno">  109 </span><span class="decl"><span class="istickedoff">mkBackgroundSession env model prompt = do</span>
+<span class="lineno">  110 </span><span class="spaces">  </span><span class="istickedoff">now         &lt;- getCurrentTime</span>
+<span class="lineno">  111 </span><span class="spaces">  </span><span class="istickedoff">sessionsDir &lt;- backgroundSessionsDir env</span>
+<span class="lineno">  112 </span><span class="spaces">  </span><span class="istickedoff">createDirectoryIfMissing True sessionsDir</span>
+<span class="lineno">  113 </span><span class="spaces">  </span><span class="istickedoff">let modelTxt = unModelId model</span>
+<span class="lineno">  114 </span><span class="spaces">      </span><span class="istickedoff">mAgent   = <span class="nottickedoff">AgentDef._ad_name</span> &lt;$&gt; _env_agentDef env</span>
+<span class="lineno">  115 </span><span class="spaces">      </span><span class="istickedoff">meta = SessionTypes.SessionMeta</span>
+<span class="lineno">  116 </span><span class="spaces">        </span><span class="istickedoff">{ SessionTypes._sm_id    = SessionTypes.newSessionId Nothing now</span>
+<span class="lineno">  117 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_agent = mAgent</span>
+<span class="lineno">  118 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_kind  = SessionTypes.SkProvider</span>
+<span class="lineno">  119 </span><span class="spaces">            </span><span class="istickedoff">(SessionTypes.ProviderSpec</span>
+<span class="lineno">  120 </span><span class="spaces">              </span><span class="istickedoff">(SessionTypes.inferProviderId modelTxt) model mAgent)</span>
+<span class="lineno">  121 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_model   = modelTxt</span>
+<span class="lineno">  122 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_channel = &quot;bg&quot;</span>
+<span class="lineno">  123 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_createdAt  = now</span>
+<span class="lineno">  124 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_lastActive = now</span>
+<span class="lineno">  125 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_bootstrapConsumed = False</span>
+<span class="lineno">  126 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_archived = False</span>
+<span class="lineno">  127 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_description = Just (backgroundDescription prompt)</span>
+<span class="lineno">  128 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_autoSummary = Nothing</span>
+<span class="lineno">  129 </span><span class="spaces">        </span><span class="istickedoff">, SessionTypes._sm_source = Nothing</span>
+<span class="lineno">  130 </span><span class="spaces">        </span><span class="istickedoff">}</span>
+<span class="lineno">  131 </span><span class="spaces">  </span><span class="istickedoff">Session.mkSessionHandle (_env_broker env) <span class="nottickedoff">(_env_logger env)</span> sessionsDir meta</span></span>
+<span class="lineno">  132 </span>
+<span class="lineno">  133 </span>-- | The sessions directory a @\/bg@ session should be created under: the
+<span class="lineno">  134 </span>-- parent of the foreground session's directory (which is exactly the
+<span class="lineno">  135 </span>-- directory the frontend enumerates). Falls back to 'getSessionsDir' when
+<span class="lineno">  136 </span>-- the foreground session has no on-disk directory (e.g. a no-op handle).
+<span class="lineno">  137 </span>backgroundSessionsDir :: AgentEnv -&gt; IO FilePath
+<span class="lineno">  138 </span><span class="decl"><span class="istickedoff">backgroundSessionsDir env = do</span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">sh &lt;- readIORef (_env_session env)</span>
+<span class="lineno">  140 </span><span class="spaces">  </span><span class="istickedoff">let dir = Session._sh_dir sh</span>
+<span class="lineno">  141 </span><span class="spaces">  </span><span class="istickedoff">if <span class="tickonlyfalse">null dir</span> then <span class="nottickedoff">getSessionsDir</span> else pure (takeDirectory dir)</span></span>
+<span class="lineno">  142 </span>
+<span class="lineno">  143 </span>-- | A short sidebar label for a @\/bg@ session.
+<span class="lineno">  144 </span>backgroundDescription :: Text -&gt; Text
+<span class="lineno">  145 </span><span class="decl"><span class="istickedoff">backgroundDescription prompt = &quot;/bg: &quot; &lt;&gt; T.take 80 (T.strip prompt)</span></span>
+<span class="lineno">  146 </span>
+<span class="lineno">  147 </span>-- | Run an IO action and swallow its exception. Used to make the
+<span class="lineno">  148 </span>-- background session's save/close best-effort so a flush failure does not
+<span class="lineno">  149 </span>-- mask the turn's own result. Although this catches 'SomeException', it is
+<span class="lineno">  150 </span>-- only ever invoked inside 'finally's finalizer (which runs with async
+<span class="lineno">  151 </span>-- exceptions masked), so in practice it swallows synchronous IO failures
+<span class="lineno">  152 </span>-- from save/close — not an asynchronous 'AsyncCancelled'.
+<span class="lineno">  153 </span>ignoreExc :: IO () -&gt; IO ()
+<span class="lineno">  154 </span><span class="decl"><span class="istickedoff">ignoreExc m = m `catch` <span class="nottickedoff">\(_ :: SomeException) -&gt; pure ()</span></span></span>
+<span class="lineno">  155 </span>
+<span class="lineno">  156 </span>-- | The effective tool registry for a background turn: built-in tools
+<span class="lineno">  157 </span>-- merged with any connected MCP server tools.
+<span class="lineno">  158 </span>backgroundRegistry :: AgentEnv -&gt; IO ToolRegistry
+<span class="lineno">  159 </span><span class="decl"><span class="istickedoff">backgroundRegistry env = do</span>
+<span class="lineno">  160 </span><span class="spaces">  </span><span class="istickedoff">servers &lt;- readIORef (_env_mcpServers env)</span>
+<span class="lineno">  161 </span><span class="spaces">  </span><span class="istickedoff">let base = _env_registry env</span>
+<span class="lineno">  162 </span><span class="spaces">  </span><span class="istickedoff">pure $ if <span class="tickonlytrue">Map.null servers</span></span>
+<span class="lineno">  163 </span><span class="spaces">           </span><span class="istickedoff">then base</span>
+<span class="lineno">  164 </span><span class="spaces">           </span><span class="istickedoff">else <span class="nottickedoff">mergeRegistries base (mcpRegistry (Map.elems servers))</span></span></span>
+
+</pre>
+</body>
+</html>
